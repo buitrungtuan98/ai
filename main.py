@@ -105,7 +105,6 @@ def delete_channel(channel=Depends(get_owned_channel), db=Depends(get_db)):
 # ── Google OAuth2 web flow (connect a YouTube channel) ───────────────────────
 @app.get("/oauth/google/start")
 def google_oauth_start(request: Request, user: CurrentUser):
-    from google_auth_oauthlib.flow import Flow
 
     flow = _google_flow()
     auth_url, state = flow.authorization_url(access_type="offline", include_granted_scopes="true", prompt="consent")
@@ -117,7 +116,6 @@ def google_oauth_start(request: Request, user: CurrentUser):
 @app.get("/oauth/google/callback")
 def google_oauth_callback(request: Request, db: DbDep):
     from googleapiclient.discovery import build
-    from google_auth_oauthlib.flow import Flow
 
     flow = _google_flow(state=request.session.get("oauth_state"))
     flow.fetch_token(authorization_response=str(request.url))

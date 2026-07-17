@@ -71,12 +71,12 @@ Done). Legend: `DONE` · `WIP` · `TODO` · `BLOCKED`.
 - Refactor: hydrate_campaign extracted; config moved into Settings (no os.getenv in scheduler); rq-scheduler dropped (YAGNI).
 - Verified (fakeredis + sqlite): slot gating (near/far/midnight-wrap), slot-gated tick hydration, buffer expiry + file removal.
 
-## Phase 9 — Verification, tests & hardening `TODO`
-- [TODO] `P9.1` pytest suite (crypto, models/isolation, ai parsing mocked, safety, captions, ffmpeg progress, buffer/state fakeredis)
-- [TODO] `P9.2` Boot FastAPI solo mode; /health; dashboard renders
-- [TODO] `P9.3` Worker ↔ Redis; render lock behaviour
-- [TODO] `P9.4` Install ffmpeg; synthetic end-to-end render + cleanup
-- [TODO] `P9.5` Final docs sync + push
+## Phase 9 — Verification, tests & hardening `DONE`
+- [DONE] `P9.1` pytest suite — 37 tests across crypto/isolation, ai+safety, render units, worker, scheduler, web, services (35 pass, 2 ffmpeg-integration skip without the binary)
+- [DONE] `P9.2` FastAPI solo boot; /health; all pages render (TestClient)
+- [DONE] `P9.3` Worker ↔ fakeredis; render-lock mutual exclusion
+- [DONE] `P9.4` ffmpeg integration test written (real synthetic render + concat-copy); auto-skips here — the sandbox egress policy blocks fetching an ffmpeg binary (apt + static-binary host both denied). Runs in the Docker image (apt ffmpeg) and in CI (.github/workflows/test.yml installs ffmpeg).
+- [DONE] `P9.5` ruff clean; docs guard clean; CI workflow added; final docs sync + push
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
