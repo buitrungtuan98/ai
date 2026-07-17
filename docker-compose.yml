@@ -1,0 +1,93 @@
+# AI Video Factory — one box, four containers.
+# Hard rules encoded here (see CLAUDE.md / ADR-003, ADR-004):
+#   * `web` has NO `ports:` mapping — it is reachable only on the private network,
+#     exclusively through the cloudflared tunnel. No inbound ports on the host.
+#   * exactly ONE `worker` — never scale it; render concurrency is 1.
+#   * pin `platform: linux/arm64` for the Oracle Ampere target.
+
+x-restart: &default-restart unless-stopped
+
+services:
+  redis:
+    image: redis:7-alpine
+    platform: linux/arm64
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 384mb
+      --maxmemory-policy noeviction
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+    restart: *default-restart
+    mem_limit: 512m
+    cpus: 0.5
+
+  web:
+    build: .
+    image: ai-video-factory:latest
+    platform: linux/arm64
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+    # NO `ports:` — expose keeps 8000 on the internal network only (cloudflared reaches web:8000).
+    expose:
+      - "8000"
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - db_data:/data/db
+      - media_data:/data/media
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 20s
+      timeout: 4s
+      retries: 5
+    restart: *default-restart
+    mem_limit: 1g
+    cpus: 0.5
+
+  worker:
+    build: .
+    image: ai-video-factory:latest
+    platform: linux/arm64
+    command: ["python", "run_worker.py"]
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - db_data:/data/db
+      - media_data:/data/media
+    healthcheck:
+      test: ["CMD", "python", "-c", "from workers.task_queue import worker_alive; import sys; sys.exit(0 if worker_alive() else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    stop_grace_period: 300s          # let an in-flight render finish before SIGKILL
+    restart: *default-restart
+    mem_limit: 14g                    # ffmpeg headroom
+    cpus: 3.0                          # leave ~1 core for web/redis/OS on the 4-core box
+
+  cloudflared:
+    image: cloudflare/cloudflared:2024.12.2
+    platform: linux/arm64
+    command: ["tunnel", "--no-autoupdate", "--metrics", "0.0.0.0:2000", "run"]
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    depends_on:
+      web:
+        condition: service_healthy
+    restart: *default-restart
+    mem_limit: 256m
+    cpus: 0.25
+
+volumes:
+  redis_data:
+  db_data:
+  media_data:
