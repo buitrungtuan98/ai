@@ -22,10 +22,11 @@ Done). Legend: `DONE` · `WIP` · `TODO` · `BLOCKED`.
 - [DONE] `P1.5` database/db_session.py — WAL PRAGMA engine, get_db, init_db
 - Verified: crypto round-trip, transparent encrypted columns (raw ciphertext confirmed), WAL active, schema create (`smoke test`).
 
-## Phase 2 — Auth & Multi-tenancy `TODO`
-- [TODO] `P2.1` auth/dependencies.py — get_current_user (solo/Firebase), CurrentUser
-- [TODO] `P2.2` ownership guards (get_owned_campaign/channel) returning 404
-- [TODO] `P2.3` Firebase verify wrapper
+## Phase 2 — Auth & Multi-tenancy `DONE`
+- [DONE] `P2.1` auth/dependencies.py — get_current_user (solo/Firebase), CurrentUser
+- [DONE] `P2.2` ownership guards (get_owned_campaign/channel) returning 404
+- [DONE] `P2.3` auth/firebase.py — lazy Firebase verify wrapper
+- Verified: solo get-or-create idempotent; owner access ok; cross-tenant + missing id → 404.
 
 ## Phase 3 — AI engine & safety `TODO`
 - [TODO] `P3.1` core/ai_engine.py — generate_structured + schemas + retry/repair

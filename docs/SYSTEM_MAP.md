@@ -15,7 +15,8 @@ Status tokens: `DONE` · `WIP` · `TODO` · `BLOCKED`.
 | `database/types.py` | data | `EncryptedString` TypeDecorator + Python enums (Platform, statuses) | column values | encrypted columns | security | DONE | 2026-07-17 |
 | `database/models.py` | data | ORM: Users→Channels→Campaigns→{Tasks,BufferPool}, encrypted creds | — | ORM classes | SQLAlchemy, types | DONE | 2026-07-17 |
 | `database/db_session.py` | data | Engine + WAL/busy_timeout/foreign_keys PRAGMA listener, `SessionLocal`, `get_db`, `init_db` | `DATABASE_URL` | sessions | SQLAlchemy, config | DONE | 2026-07-17 |
-| `auth/dependencies.py` | auth | `get_current_user` (solo/Firebase), `CurrentUser`, ownership guards (404) | request headers | `User` | firebase-admin, models, config | TODO | — |
+| `auth/dependencies.py` | auth | `get_current_user` (solo/Firebase), `CurrentUser`, ownership guards (404) | request headers | `User` | firebase, models, config | DONE | 2026-07-17 |
+| `auth/firebase.py` | auth | Lazy Firebase Admin init + `verify_id_token` wrapper (only module touching firebase_admin) | ID token | decoded claims | firebase-admin, config | DONE | 2026-07-17 |
 | `core/ai_engine.py` | ai | `generate_structured` Gemini wrapper; `VideoScript`/`MetadataSet` schemas; retry/repair | topic, campaign cfg | script + 3 A/B metadata | google-generativeai, pydantic | TODO | — |
 | `core/safety_filter.py` | ai | Profanity/brand-safety term filter; Pexels license check; variation/ToS policy gate | script text, flags | filtered text, gate result | config | TODO | — |
 | `core/ffmpeg_runner.py` | render | DRY subprocess runner: `nice -n 19`, `-threads 4`, `-progress` → progress % | ffmpeg args | files, progress callbacks | ffmpeg (system) | TODO | — |
