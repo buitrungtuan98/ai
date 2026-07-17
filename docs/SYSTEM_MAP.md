@@ -10,11 +10,11 @@ Status tokens: `DONE` · `WIP` · `TODO` · `BLOCKED`.
 
 | Path | Layer | Responsibility | Inputs | Outputs | Depends on | Status | Last updated |
 |------|-------|----------------|--------|---------|------------|--------|--------------|
-| `core/config.py` | config | The only place env/`.env` is read; `settings` singleton, fail-fast validation | `.env` | `Settings` | pydantic-settings | TODO | — |
-| `core/security.py` | security | Fernet/MultiFernet encrypt/decrypt util (key rotation, None-safe) | `FERNET_KEY` | ciphertext/plaintext | cryptography, config | TODO | — |
-| `database/types.py` | data | `EncryptedString` TypeDecorator + Python enums (Platform, statuses) | column values | encrypted columns | security | TODO | — |
-| `database/models.py` | data | ORM: Users→Channels→Campaigns→{Tasks,BufferPool}, encrypted creds | — | ORM classes | SQLAlchemy, types | TODO | — |
-| `database/db_session.py` | data | Engine + WAL/busy_timeout/foreign_keys PRAGMA listener, `SessionLocal`, `get_db` | `DATABASE_URL` | sessions | SQLAlchemy, config | TODO | — |
+| `core/config.py` | config | The only place env/`.env` is read; `settings` singleton, fail-fast validation | `.env` | `Settings` | pydantic-settings | DONE | 2026-07-17 |
+| `core/security.py` | security | Fernet/MultiFernet encrypt/decrypt util (key rotation, None-safe) | `FERNET_KEY` | ciphertext/plaintext | cryptography, config | DONE | 2026-07-17 |
+| `database/types.py` | data | `EncryptedString` TypeDecorator + Python enums (Platform, statuses) | column values | encrypted columns | security | DONE | 2026-07-17 |
+| `database/models.py` | data | ORM: Users→Channels→Campaigns→{Tasks,BufferPool}, encrypted creds | — | ORM classes | SQLAlchemy, types | DONE | 2026-07-17 |
+| `database/db_session.py` | data | Engine + WAL/busy_timeout/foreign_keys PRAGMA listener, `SessionLocal`, `get_db`, `init_db` | `DATABASE_URL` | sessions | SQLAlchemy, config | DONE | 2026-07-17 |
 | `auth/dependencies.py` | auth | `get_current_user` (solo/Firebase), `CurrentUser`, ownership guards (404) | request headers | `User` | firebase-admin, models, config | TODO | — |
 | `core/ai_engine.py` | ai | `generate_structured` Gemini wrapper; `VideoScript`/`MetadataSet` schemas; retry/repair | topic, campaign cfg | script + 3 A/B metadata | google-generativeai, pydantic | TODO | — |
 | `core/safety_filter.py` | ai | Profanity/brand-safety term filter; Pexels license check; variation/ToS policy gate | script text, flags | filtered text, gate result | config | TODO | — |

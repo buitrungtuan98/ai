@@ -14,12 +14,13 @@ Done). Legend: `DONE` · `WIP` · `TODO` · `BLOCKED`.
 - [DONE] `P0.8` .github/workflows/backup.yml
 - [DONE] `P0.9` .env.example + .gitignore
 
-## Phase 1 — Data & Config layer `TODO`
-- [TODO] `P1.1` core/config.py — Settings singleton, fail-fast
-- [TODO] `P1.2` core/security.py — Fernet/MultiFernet util
-- [TODO] `P1.3` database/types.py — EncryptedString + enums
-- [TODO] `P1.4` database/models.py — Users/Channels/Campaigns/Tasks/BufferPool
-- [TODO] `P1.5` database/db_session.py — WAL PRAGMA engine, get_db
+## Phase 1 — Data & Config layer `DONE`
+- [DONE] `P1.1` core/config.py — Settings singleton, fail-fast
+- [DONE] `P1.2` core/security.py — Fernet/MultiFernet util
+- [DONE] `P1.3` database/types.py — EncryptedString + enums
+- [DONE] `P1.4` database/models.py — Users/Channels/Campaigns/Tasks/BufferPool
+- [DONE] `P1.5` database/db_session.py — WAL PRAGMA engine, get_db, init_db
+- Verified: crypto round-trip, transparent encrypted columns (raw ciphertext confirmed), WAL active, schema create (`smoke test`).
 
 ## Phase 2 — Auth & Multi-tenancy `TODO`
 - [TODO] `P2.1` auth/dependencies.py — get_current_user (solo/Firebase), CurrentUser
