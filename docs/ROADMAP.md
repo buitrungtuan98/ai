@@ -56,10 +56,12 @@ Done). Legend: `DONE` · `WIP` · `TODO` · `BLOCKED`.
 - [DONE] `P6.3` services/telegram_bot.py — alert helper
 - Verified (injected fakes): YouTube token refresh persists to channel; missing-refresh-token error; Facebook creds load/error; Telegram send True/False (never raises). Live uploads deferred to operator (RUNBOOK).
 
-## Phase 7 — Web app & UI `TODO`
-- [TODO] `P7.1` main.py — FastAPI, routers, Google OAuth web flow, HTMX poll, /health
-- [TODO] `P7.2` templates/ — dark dashboard (Channels, Campaigns 3-tab, Asset Pool, Credentials, Task Logs)
-- [TODO] `P7.3` static/ — prebuilt Tailwind CSS + assets
+## Phase 7 — Web app & UI `DONE`
+- [DONE] `P7.1` main.py — FastAPI, routers, Google OAuth web flow, AJAX task poll, /health
+- [DONE] `P7.2` templates/ — dark dashboard (Channels, Campaigns 3-tab, Asset Pool, Credentials, Task Logs)
+- [DONE] `P7.3` static/ — self-contained dark CSS + polling app.js
+- Verified (TestClient, solo mode): all pages 200; add FB channel (creds encrypted at rest); create + start campaign (queues buffer); save credentials (encrypted); ownership 404; lifespan startup; zero deprecation warnings.
+- Note: browser-side Firebase login (multi-tenant UI) is deferred — the API dependency already verifies ID tokens; solo mode (default) needs no login.
 
 ## Phase 8 — Automation & lifecycle wiring `TODO`
 - [TODO] `P8.1` Hourly buffer hydration + campaign auto-advance tick

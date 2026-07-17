@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}New Campaign · AI Video Factory{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>New Campaign</h1><p class="subtitle">Configure strategy, audio, and distribution.</p></div></div>
+
+{% if not channels %}
+<div class="empty">You need a connected channel first. <a href="/channels">Add one →</a></div>
+{% else %}
+<form method="post" action="/campaigns">
+  <div class="tabs">
+    <button type="button" class="tab-btn active" data-tab="core">Core &amp; AI Strategy</button>
+    <button type="button" class="tab-btn" data-tab="audio">Aesthetics &amp; Audio</button>
+    <button type="button" class="tab-btn" data-tab="dist">Distribution</button>
+  </div>
+
+  <div class="tab-panel active" id="core">
+    <div class="card">
+      <div class="form-row"><label>Topic name</label><input name="topic_name" required placeholder="Amazing space facts"></div>
+      <div class="form-row"><label>Target channel</label>
+        <select name="channel_id" required>
+          {% for c in channels %}<option value="{{ c.id }}">{{ c.channel_name }} ({{ c.platform.value }})</option>{% endfor %}
+        </select>
+      </div>
+      <div class="form-row"><label>Total episodes</label><input name="total_episodes" type="number" min="1" value="10" required></div>
+      <div class="form-row"><label>Target language</label>
+        <select name="language"><option value="vi">Vietnamese</option><option value="en" selected>English</option><option value="es">Spanish</option></select>
+      </div>
+      <div class="form-row"><label>Custom system prompt (optional)</label><textarea name="system_prompt" placeholder="Tone, style, constraints for the scriptwriter…"></textarea></div>
+    </div>
+  </div>
+
+  <div class="tab-panel" id="audio">
+    <div class="card">
+      <div class="form-row"><label>Subtitle style</label>
+        <select name="subtitle_style"><option value="word">Word-by-word</option><option value="line">Line</option></select>
+      </div>
+      <div class="form-row"><label>Voice profile (edge-tts, optional)</label><input name="voice" placeholder="en-US-AriaNeural"></div>
+      <div class="form-row"><label>Audio speed adjustment: <span id="rate-val">0</span>%</label>
+        <input name="rate_pct" type="range" min="-20" max="20" value="0" oninput="document.getElementById('rate-val').textContent=this.value">
+      </div>
+      <div class="form-row"><label>Background music path (optional)</label><input name="music_path" placeholder="/data/media/music/bg.mp3"></div>
+    </div>
+  </div>
+
+  <div class="tab-panel" id="dist">
+    <div class="card">
+      <div class="form-row"><label>Posting time slots (comma-separated, 24h)</label><input name="posting_slots" placeholder="09:00, 18:30"></div>
+      <div class="form-row"><label><input type="checkbox" name="ab_testing" style="width:auto" checked> Enable A/B metadata testing</label></div>
+      <div class="form-row"><label>Pinned comment / CTA</label><textarea name="cta" placeholder="👉 Follow for daily shorts!"></textarea></div>
+    </div>
+  </div>
+
+  <div class="row-actions mt">
+    <button class="btn" type="submit">Create Campaign</button>
+    <a class="btn ghost" href="/campaigns">Cancel</a>
+  </div>
+</form>
+{% endif %}
+{% endblock %}
+{% block scripts %}
+<script>
+  document.querySelectorAll(".tab-btn").forEach(function (b) {
+    b.addEventListener("click", function () {
+      document.querySelectorAll(".tab-btn").forEach(x => x.classList.remove("active"));
+      document.querySelectorAll(".tab-panel").forEach(x => x.classList.remove("active"));
+      b.classList.add("active");
+      document.getElementById(b.dataset.tab).classList.add("active");
+    });
+  });
+</script>
+{% endblock %}

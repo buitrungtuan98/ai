@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Asset Pool · AI Video Factory{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>Asset Pool Cache</h1><p class="subtitle">Pre-rendered episodes waiting for or consumed by publishing.</p></div></div>
+
+{% if items %}
+<div class="card">
+  <table>
+    <thead><tr><th>Campaign</th><th>Episode</th><th>Status</th><th>Metadata title</th><th>Created</th></tr></thead>
+    <tbody>
+      {% for i in items %}
+      <tr>
+        <td>C{{ i.campaign_id }}</td>
+        <td>Ep {{ i.episode_number }}</td>
+        <td><span class="pill {{ 'completed' if i.status.value=='consumed' else ('failed' if i.status.value=='expired' else 'active') }}">{{ i.status.value|title }}</span></td>
+        <td>{{ i.metadata_json.get('title','—') }}</td>
+        <td class="meta">{{ i.created_at.strftime('%Y-%m-%d %H:%M') if i.created_at else '' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="empty">Buffer pool is empty. Active campaigns will pre-render episodes here.</div>
+{% endif %}
+{% endblock %}

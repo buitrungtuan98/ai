@@ -33,9 +33,9 @@ Status tokens: `DONE` · `WIP` · `TODO` · `BLOCKED`.
 | `services/youtube_service.py` | publish | OAuth2 token refresh (persist to channel) + resumable upload + CTA comment | video, metadata, channel | uploaded video id | google-api-python-client, google-auth | DONE | 2026-07-17 |
 | `services/facebook_service.py` | publish | Page video upload via Page ID + permanent token (decrypted on the fly) | video, metadata, channel | uploaded video id | requests | DONE | 2026-07-17 |
 | `services/telegram_bot.py` | publish | DRY alert helper (queued/finished/failed) to a user's chat | message, token, chat id | Telegram message | requests | DONE | 2026-07-17 |
-| `main.py` | web | FastAPI app, routers (channels/campaigns/credentials/tasks), Google OAuth web flow, HTMX poll, `/health` | HTTP | HTML/JSON | fastapi, auth, models, task_queue | TODO | — |
-| `templates/` | web | Jinja2 + HTMX dashboard (sidebar; 5 sections) | context | HTML | jinja2 | TODO | — |
-| `static/` | web | Prebuilt Tailwind dark theme CSS + assets (no runtime CDN) | — | CSS/assets | — | TODO | — |
+| `main.py` | web | FastAPI app, routers (channels/campaigns/credentials/tasks), Google OAuth web flow, AJAX task poll, `/health` | HTTP | HTML/JSON | fastapi, auth, models, task_queue | DONE | 2026-07-17 |
+| `templates/` | web | Jinja2 dashboard (sidebar; dashboard/channels/campaigns/assets/credentials/tasks) | context | HTML | jinja2 | DONE | 2026-07-17 |
+| `static/` | web | Dark-theme CSS (Tailwind-flavoured, self-contained) + polling app.js (no runtime CDN) | — | CSS/JS | — | DONE | 2026-07-17 |
 
 ## Ops / infra
 

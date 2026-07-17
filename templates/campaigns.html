@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Campaigns · AI Video Factory{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Campaigns Manager</h1>
+    <p class="subtitle">Each campaign is mapped to a connected channel and runs episodic content.</p>
+  </div>
+  <a class="btn" href="/campaigns/new">+ New Campaign</a>
+</div>
+
+{% if campaigns %}
+<div class="grid cols-3">
+  {% for c in campaigns %}
+  <div class="card">
+    <div class="flex between">
+      <h3>{{ c.topic_name }}</h3>
+      <span class="pill {{ c.status.value }}">{{ c.status.value|title }}</span>
+    </div>
+    <p class="meta">
+      Channel: {{ channels[c.channel_id].channel_name if c.channel_id in channels else '—' }}<br>
+      Episode {{ c.current_episode }} / {{ c.total_episodes }} ·
+      Language: {{ c.config_json.get('language','en') }}
+    </p>
+    <div class="progress mt"><span style="width: {{ (100 * c.current_episode / c.total_episodes) if c.total_episodes else 0 }}%"></span></div>
+    <div class="row-actions mt">
+      {% if c.status.value in ['pending','failed'] %}
+      <form method="post" action="/campaigns/{{ c.id }}/start"><button class="btn sm" type="submit">▶ Start</button></form>
+      {% endif %}
+      <form method="post" action="/campaigns/{{ c.id }}/delete" onsubmit="return confirm('Delete campaign?')">
+        <button class="btn danger sm" type="submit">Delete</button>
+      </form>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty">No campaigns yet. Create one and map it to a channel.</div>
+{% endif %}
+{% endblock %}
