@@ -19,13 +19,14 @@ Status tokens: `DONE` · `WIP` · `TODO` · `BLOCKED`.
 | `auth/firebase.py` | auth | Lazy Firebase Admin init + `verify_id_token` wrapper (only module touching firebase_admin) | ID token | decoded claims | firebase-admin, config | DONE | 2026-07-17 |
 | `core/ai_engine.py` | ai | `generate_structured` Gemini wrapper; `VideoScript`/`MetadataSet` schemas; retry/repair | topic, campaign cfg | script + 3 A/B metadata | google-generativeai, pydantic | DONE | 2026-07-17 |
 | `core/safety_filter.py` | ai | Profanity/brand-safety term filter; Pexels license check; variation/ToS policy gate | script text, flags | filtered text, gate result | stdlib | DONE | 2026-07-17 |
-| `core/ffmpeg_runner.py` | render | DRY subprocess runner: `nice -n 19`, `-threads 4`, `-progress` → progress % | ffmpeg args | files, progress callbacks | ffmpeg (system) | TODO | — |
-| `core/tts.py` | render | edge-tts per scene; returns mp3 path + word-boundary timings | narration, voice, rate | mp3 + timings | edge-tts | TODO | — |
-| `core/media.py` | render | ffprobe helpers (duration/codec); audio duration = ground truth | media path | duration/codec info | ffprobe (system) | TODO | — |
-| `core/captions.py` | render | Word-by-word ASS subtitles; PIL 1080px text wrapping (shared font loader) | timings, text | `.ass` file | Pillow | TODO | — |
-| `core/thumbnail.py` | render | PIL cover from mid-video frame + wrapped title + optional logo | frame, title | `.jpg` | Pillow, ffmpeg_runner | TODO | — |
-| `core/cleanup.py` | render | `RenderWorkspace` context manager + `sweep_orphans` (nothing >60 min) | job id | removed temp dirs | stdlib | TODO | — |
-| `core/video_factory.py` | render | Orchestration: TTS→footage→captions→render→thumbnail→branding→cleanup | campaign, episode | master.mp4 + thumb + metadata | all core/* , config | TODO | — |
+| `core/ffmpeg_runner.py` | render | DRY subprocess runner: `nice -n 19`, `-threads 4`, `-progress` → progress % | ffmpeg args | files, progress callbacks | ffmpeg (system) | DONE | 2026-07-17 |
+| `core/tts.py` | render | edge-tts per scene; returns mp3 path + word-boundary timings | narration, voice, rate | mp3 + timings | edge-tts | DONE | 2026-07-17 |
+| `core/media.py` | render | ffprobe helpers (duration/codec); audio duration = ground truth | media path | duration/codec info | ffprobe (system) | DONE | 2026-07-17 |
+| `core/pexels.py` | render | Pexels stock-footage search + download (portrait renditions) | query, api key | clip metadata, files | requests | DONE | 2026-07-17 |
+| `core/captions.py` | render | Word-by-word ASS subtitles; PIL 1080px text wrapping (shared font loader) | timings, text | `.ass` file | Pillow | DONE | 2026-07-17 |
+| `core/thumbnail.py` | render | PIL cover from mid-video frame + wrapped title + optional logo | frame, title | `.jpg` | Pillow, ffmpeg_runner | DONE | 2026-07-17 |
+| `core/cleanup.py` | render | `RenderWorkspace` context manager + `sweep_orphans` (nothing >60 min) | job id | removed temp dirs | stdlib | DONE | 2026-07-17 |
+| `core/video_factory.py` | render | Orchestration: TTS→footage→captions→render→stitch(copy)→thumbnail→branding→cleanup | script, episode | master.mp4 + thumb + metadata | all core/* , config | DONE | 2026-07-17 |
 | `workers/task_queue.py` | queue | Single `renders` queue, global render lock, `worker_alive()` (single source of truth) | `REDIS_URL` | `Queue`, lock helpers | redis, rq, config | TODO | — |
 | `workers/video_worker.py` | worker | The job: pipeline, buffer hydration, campaign state machine, A/B rotation, error→Telegram | Task id | published video, DB updates | video_factory, services, models | TODO | — |
 | `run_worker.py` | worker | Entrypoint: one `SimpleWorker`, warm SIGTERM shutdown, job_timeout | — | running worker | task_queue, rq | TODO | — |

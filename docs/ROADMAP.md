@@ -33,14 +33,16 @@ Done). Legend: `DONE` · `WIP` · `TODO` · `BLOCKED`.
 - [DONE] `P3.2` core/safety_filter.py — profanity/brand-safety + variation/ToS gate
 - Verified (mocked Gemini): parse, code-fence strip, retry+repair, safety-block passthrough, exhausted→error; filter remove/mask; variation gate default-off + opt-in; footage license guard.
 
-## Phase 4 — Rendering pipeline (CPU-only) `TODO`
-- [TODO] `P4.1` core/ffmpeg_runner.py — nice/threads/progress runner
-- [TODO] `P4.2` core/tts.py — edge-tts + word boundaries
-- [TODO] `P4.3` core/media.py — ffprobe helpers
-- [TODO] `P4.4` core/captions.py — ASS + PIL wrapping
-- [TODO] `P4.5` core/thumbnail.py — PIL cover
-- [TODO] `P4.6` core/cleanup.py — RenderWorkspace + orphan sweeper
-- [TODO] `P4.7` core/video_factory.py — orchestration, audio ground-truth, concat copy, branding
+## Phase 4 — Rendering pipeline (CPU-only) `DONE`
+- [DONE] `P4.1` core/ffmpeg_runner.py — nice/threads/progress runner
+- [DONE] `P4.2` core/tts.py — edge-tts + word boundaries
+- [DONE] `P4.3` core/media.py — ffprobe helpers
+- [DONE] `P4.4` core/captions.py — ASS + PIL wrapping
+- [DONE] `P4.5` core/thumbnail.py — PIL cover
+- [DONE] `P4.6` core/cleanup.py — RenderWorkspace + orphan sweeper
+- [DONE] `P4.7` core/video_factory.py — orchestration, audio ground-truth, concat copy, branding
+- [DONE] `P4.8` core/pexels.py — footage search/download
+- Verified (pure logic): select_clips cycling, scene/concat arg builders, branding filter order (mirror→tint→overlay→ass), ASS generation, wrap_text, A/B rotation. Real ffmpeg render deferred to P9.4.
 
 ## Phase 5 — Queue & Worker `TODO`
 - [TODO] `P5.1` workers/task_queue.py — queue, render lock, worker_alive
