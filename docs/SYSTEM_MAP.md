@@ -30,9 +30,9 @@ Status tokens: `DONE` · `WIP` · `TODO` · `BLOCKED`.
 | `workers/task_queue.py` | queue | Single `renders` queue, global render lock, Redis progress, `worker_alive()` | `REDIS_URL` | `Queue`, lock/progress helpers | redis, rq, config | DONE | 2026-07-17 |
 | `workers/video_worker.py` | worker | The job: pipeline, buffer hydration, campaign state machine, A/B rotation, error→Telegram | Task id | published video, DB updates | video_factory, services, models | DONE | 2026-07-17 |
 | `run_worker.py` | worker | Entrypoint: one `SimpleWorker`, warm SIGTERM shutdown, job_timeout | — | running worker | task_queue, rq | DONE | 2026-07-17 |
-| `services/youtube_service.py` | publish | OAuth2 token refresh + resumable upload + pinned comment; multi-account routing | video, metadata, channel | uploaded video id | google-api-python-client, security | TODO | — |
-| `services/facebook_service.py` | publish | Page video upload via Page ID + permanent token (decrypted on the fly) | video, metadata, channel | uploaded video id | httpx, security | TODO | — |
-| `services/telegram_bot.py` | publish | DRY alert helper (queued/finished/failed) to a user's chat | message, token, chat id | Telegram message | httpx, config | TODO | — |
+| `services/youtube_service.py` | publish | OAuth2 token refresh (persist to channel) + resumable upload + CTA comment | video, metadata, channel | uploaded video id | google-api-python-client, google-auth | DONE | 2026-07-17 |
+| `services/facebook_service.py` | publish | Page video upload via Page ID + permanent token (decrypted on the fly) | video, metadata, channel | uploaded video id | requests | DONE | 2026-07-17 |
+| `services/telegram_bot.py` | publish | DRY alert helper (queued/finished/failed) to a user's chat | message, token, chat id | Telegram message | requests | DONE | 2026-07-17 |
 | `main.py` | web | FastAPI app, routers (channels/campaigns/credentials/tasks), Google OAuth web flow, HTMX poll, `/health` | HTTP | HTML/JSON | fastapi, auth, models, task_queue | TODO | — |
 | `templates/` | web | Jinja2 + HTMX dashboard (sidebar; 5 sections) | context | HTML | jinja2 | TODO | — |
 | `static/` | web | Prebuilt Tailwind dark theme CSS + assets (no runtime CDN) | — | CSS/assets | — | TODO | — |

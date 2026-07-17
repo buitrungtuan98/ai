@@ -228,6 +228,9 @@ def render_task(task_id: int) -> None:
         db.refresh(buf)
 
         _set_status(db, task, TaskStatus.PUBLISHING, 92)
+        # Carry campaign-level distribution settings into the publish metadata.
+        result.metadata.setdefault("cta", cfg.get("cta"))
+        result.metadata.setdefault("privacy", cfg.get("privacy", "public"))
         video_id = _publish(channel, result, user)
 
         buf.status = BufferStatus.consumed
