@@ -98,40 +98,44 @@ def advance_campaign(db, campaign: Campaign) -> AdvanceEvents:
 
 
 # ── Buffer hydration ─────────────────────────────────────────────────────────
-def hydrate_buffers(db, *, buffer_size: int | None = None, enqueue=enqueue_render) -> list[int]:
-    """Ensure each active campaign has up to `buffer_size` upcoming (not-yet-finished) episodes
-    queued. Returns the list of Task ids created. Idempotent — unique(campaign,episode) prevents
-    duplicates."""
+def hydrate_campaign(db, campaign: Campaign, *, buffer_size: int | None = None, enqueue=enqueue_render) -> list[int]:
+    """Ensure ONE campaign has up to `buffer_size` upcoming (not-yet-finished) episodes queued.
+    Returns Task ids created. Idempotent — unique(campaign,episode) prevents duplicates."""
     size = buffer_size or settings.DEFAULT_BUFFER_SIZE
+    created: list[int] = []
+    # Query episode numbers directly (never via the cached `campaign.tasks` relationship, which can
+    # be stale after we insert Tasks by campaign_id within the same session).
+    all_eps = set(db.scalars(select(Task.episode_number).where(Task.campaign_id == campaign.id)).all())
+    active_eps = set(
+        db.scalars(
+            select(Task.episode_number).where(
+                Task.campaign_id == campaign.id,
+                Task.status.notin_([TaskStatus.COMPLETED, TaskStatus.FAILED]),
+            )
+        ).all()
+    )
+    next_ep = campaign.current_episode + 1
+    while len(active_eps) < size and next_ep <= campaign.total_episodes:
+        if next_ep not in all_eps:
+            task = Task(campaign_id=campaign.id, user_id=campaign.user_id, episode_number=next_ep)
+            db.add(task)
+            db.commit()
+            db.refresh(task)
+            task.rq_job_id = enqueue(task.id)
+            db.commit()
+            created.append(task.id)
+            active_eps.add(next_ep)
+            all_eps.add(next_ep)
+        next_ep += 1
+    return created
+
+
+def hydrate_buffers(db, *, buffer_size: int | None = None, enqueue=enqueue_render) -> list[int]:
+    """Ensure every active campaign is topped up to `buffer_size` upcoming episodes."""
     created: list[int] = []
     campaigns = db.scalars(select(Campaign).where(Campaign.status == CampaignStatus.active)).all()
     for campaign in campaigns:
-        # Query episode numbers directly (never via the cached `campaign.tasks` relationship, which
-        # can be stale after we insert Tasks by campaign_id within the same session).
-        all_eps = set(
-            db.scalars(select(Task.episode_number).where(Task.campaign_id == campaign.id)).all()
-        )
-        active_eps = set(
-            db.scalars(
-                select(Task.episode_number).where(
-                    Task.campaign_id == campaign.id,
-                    Task.status.notin_([TaskStatus.COMPLETED, TaskStatus.FAILED]),
-                )
-            ).all()
-        )
-        next_ep = campaign.current_episode + 1
-        while len(active_eps) < size and next_ep <= campaign.total_episodes:
-            if next_ep not in all_eps:
-                task = Task(campaign_id=campaign.id, user_id=campaign.user_id, episode_number=next_ep)
-                db.add(task)
-                db.commit()
-                db.refresh(task)
-                task.rq_job_id = enqueue(task.id)
-                db.commit()
-                created.append(task.id)
-                active_eps.add(next_ep)
-                all_eps.add(next_ep)
-            next_ep += 1
+        created += hydrate_campaign(db, campaign, buffer_size=buffer_size, enqueue=enqueue)
     return created
 
 

@@ -63,10 +63,13 @@ Done). Legend: `DONE` · `WIP` · `TODO` · `BLOCKED`.
 - Verified (TestClient, solo mode): all pages 200; add FB channel (creds encrypted at rest); create + start campaign (queues buffer); save credentials (encrypted); ownership 404; lifespan startup; zero deprecation warnings.
 - Note: browser-side Firebase login (multi-tenant UI) is deferred — the API dependency already verifies ID tokens; solo mode (default) needs no login.
 
-## Phase 8 — Automation & lifecycle wiring `TODO`
-- [TODO] `P8.1` Hourly buffer hydration + campaign auto-advance tick
-- [TODO] `P8.2` Posting-time-slot scheduling
-- [TODO] `P8.3` Disk-pressure media sweep + log rotation
+## Phase 8 — Automation & lifecycle wiring `DONE`
+- [DONE] `P8.1` workers/scheduler.py periodic_tick — hourly buffer hydration; campaign auto-advance already in render_task
+- [DONE] `P8.2` Posting-time-slot gating (is_within_slot) drives when episodes are produced
+- [DONE] `P8.3` Disk-pressure sweep + buffer expiry; docker-compose json-file log rotation
+- [DONE] `P8.4` run_worker starts scheduler in a daemon thread (no extra container)
+- Refactor: hydrate_campaign extracted; config moved into Settings (no os.getenv in scheduler); rq-scheduler dropped (YAGNI).
+- Verified (fakeredis + sqlite): slot gating (near/far/midnight-wrap), slot-gated tick hydration, buffer expiry + file removal.
 
 ## Phase 9 — Verification, tests & hardening `TODO`
 - [TODO] `P9.1` pytest suite (crypto, models/isolation, ai parsing mocked, safety, captions, ffmpeg progress, buffer/state fakeredis)

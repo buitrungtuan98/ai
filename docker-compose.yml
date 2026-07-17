@@ -7,6 +7,13 @@
 
 x-restart: &default-restart unless-stopped
 
+# Cap container log growth so logs can't exhaust the 200GB disk.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   redis:
     image: redis:7-alpine
@@ -19,6 +26,7 @@ services:
       --maxmemory-policy noeviction
     volumes:
       - redis_data:/data
+    logging: *default-logging
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 15s
@@ -49,6 +57,7 @@ services:
       timeout: 4s
       retries: 5
     restart: *default-restart
+    logging: *default-logging
     mem_limit: 1g
     cpus: 0.5
 
@@ -71,6 +80,7 @@ services:
       retries: 3
     stop_grace_period: 300s          # let an in-flight render finish before SIGKILL
     restart: *default-restart
+    logging: *default-logging
     mem_limit: 14g                    # ffmpeg headroom
     cpus: 3.0                          # leave ~1 core for web/redis/OS on the 4-core box
 
@@ -84,6 +94,7 @@ services:
       web:
         condition: service_healthy
     restart: *default-restart
+    logging: *default-logging
     mem_limit: 256m
     cpus: 0.25
 

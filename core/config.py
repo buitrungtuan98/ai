@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     JOB_TIMEOUT_SECONDS: int = 2700
     ORPHAN_MAX_AGE_MINUTES: int = 60
 
+    # --- Scheduler / automation tick ---
+    SCHEDULER_INTERVAL_SECONDS: int = 3600  # hourly buffer-hydration + housekeeping
+    SLOT_TOLERANCE_MINUTES: int = 30        # how close to a posting slot counts as "now"
+    BUFFER_MAX_AGE_HOURS: int = 72          # expire pre-rendered buffer items older than this
+    DISK_PRESSURE_PCT: int = 90             # sweep aggressively above this disk usage
+
     # --- App ---
     LOG_LEVEL: str = "INFO"
     SECRET_KEY: str = Field(default="dev-insecure-session-key-change-me")

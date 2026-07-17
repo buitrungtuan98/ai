@@ -16,8 +16,8 @@ python-dotenv==1.0.1
 
 # --- Queue ---
 rq==1.16.2
-rq-scheduler==0.13.1          # periodic buffer-hydration / campaign-advance ticks
 redis==5.2.1
+# (periodic ticks run in an in-process daemon thread — see workers/scheduler.py — no rq-scheduler)
 
 # --- Security ---
 cryptography==44.0.0
