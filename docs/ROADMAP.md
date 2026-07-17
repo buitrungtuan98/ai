@@ -44,10 +44,11 @@ Done). Legend: `DONE` · `WIP` · `TODO` · `BLOCKED`.
 - [DONE] `P4.8` core/pexels.py — footage search/download
 - Verified (pure logic): select_clips cycling, scene/concat arg builders, branding filter order (mirror→tint→overlay→ass), ASS generation, wrap_text, A/B rotation. Real ffmpeg render deferred to P9.4.
 
-## Phase 5 — Queue & Worker `TODO`
-- [TODO] `P5.1` workers/task_queue.py — queue, render lock, worker_alive
-- [TODO] `P5.2` run_worker.py — SimpleWorker, SIGTERM, job_timeout
-- [TODO] `P5.3` workers/video_worker.py — pipeline job, buffer hydration, state machine, A/B rotation, error→Telegram
+## Phase 5 — Queue & Worker `DONE`
+- [DONE] `P5.1` workers/task_queue.py — queue, render lock, Redis progress, worker_alive
+- [DONE] `P5.2` run_worker.py — SimpleWorker, SIGTERM, job_timeout
+- [DONE] `P5.3` workers/video_worker.py — pipeline job, buffer hydration, state machine, A/B rotation, error→Telegram
+- Verified (fakeredis + sqlite, mocked render/publish): render lock mutual exclusion; buffer hydration + idempotency; state machine (active→completed→auto-activate next); full render_task (COMPLETED, buffer consumed, episode advanced, self-hydration); failure path (FAILED + stack captured).
 
 ## Phase 6 — Publishing services `TODO`
 - [TODO] `P6.1` services/youtube_service.py — OAuth2 refresh + resumable upload + pinned comment
