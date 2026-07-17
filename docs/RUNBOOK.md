@@ -63,5 +63,33 @@ The `FERNET_KEY` used when the data was encrypted must match, or encrypted colum
   `integrity_check`, and prunes history. A backup you can't restore isn't a backup — check the
   workflow is green.
 
+## Continuous deployment (CD)
+Merging to `main` triggers `.github/workflows/deploy.yml`, which SSHes into the VPS and runs
+`scripts/deploy.sh` (git reset to `origin/main` → `docker compose up -d --build` → health check →
+image prune). Your `.env` and the docker volumes (DB + media) are never touched.
+
+**One-time VPS bootstrap:**
+1. `git clone <repo-url> ~/ai` on the box (the deploy path). Give the box **read access** to pull:
+   add a read-only **deploy key** (`ssh-keygen`, add the public key to the repo's Deploy Keys) and
+   set the clone's remote to SSH, or configure a PAT credential helper.
+2. `cd ~/ai && cp .env.example .env` and fill it in (see first-time setup above).
+3. Ensure the deploy SSH user can run Docker (in the `docker` group).
+
+**Required GitHub repository Secrets** (Settings → Secrets and variables → Actions):
+| Secret | Value |
+|---|---|
+| `SSH_HOST` | VPS public host/IP |
+| `SSH_PORT` | Your **non-default** SSH port (defaults to 22 if unset) |
+| `SSH_USER` | Login user (defaults to `ubuntu` if unset) |
+| `SSH_PRIVATE_KEY` | Private key whose public half is in the box's `~/.ssh/authorized_keys` |
+| `SSH_KNOWN_HOSTS` | Output of `ssh-keyscan -p <PORT> <HOST>` — pins the host key (recommended). If omitted, the workflow falls back to trust-on-first-use. |
+| `DEPLOY_PATH` | Repo path on the box (defaults to `ai`, i.e. `~/ai`) |
+
+**Deploy:** merge the feature branch into `main` (or run the workflow manually from the Actions
+tab via *Run workflow*). Watch progress in the Actions tab; the run fails loudly if the web
+container doesn't become healthy.
+
+**Rollback:** on the box, `cd ~/ai && git reset --hard <previous-good-sha> && bash scripts/deploy.sh`.
+
 ## Emergency: take the app offline
 `docker compose stop cloudflared` removes public access instantly while leaving data intact.

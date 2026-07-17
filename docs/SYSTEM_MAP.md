@@ -52,6 +52,8 @@ Status tokens: `DONE` · `WIP` · `TODO` · `BLOCKED`.
 | `scripts/check_docs.py` | ops | Fail if a source file has no `SYSTEM_MAP.md` row (docs-drift guard) | tree, this file | pass/fail | stdlib | DONE | 2026-07-17 |
 | `.github/workflows/backup.yml` | ops | Verify committed dump restores + integrity check + retention prune | backup repo | CI result | GitHub Actions | DONE | 2026-07-17 |
 | `.github/workflows/test.yml` | ops | CI: install ffmpeg + deps, ruff lint, run pytest (no secrets) | push/PR | CI result | GitHub Actions | DONE | 2026-07-17 |
+| `.github/workflows/deploy.yml` | ops | CD: on push to main, SSH (pinned host, custom port) → run deploy.sh on the VPS | merge to main | deployed stack | GitHub Actions, ssh | DONE | 2026-07-17 |
+| `scripts/deploy.sh` | ops | On-VPS deploy: docker compose up --build, health-gate, image prune (keeps .env/volumes) | repo checkout | running stack | docker compose | DONE | 2026-07-17 |
 | `tests/` | test | pytest suite (crypto, isolation, ai/safety, render units, worker, scheduler, web, services, ffmpeg integration) | — | test results | pytest, fakeredis | DONE | 2026-07-17 |
 | `pytest.ini` | test | pytest config (testpaths=tests) | — | — | pytest | DONE | 2026-07-17 |
 

@@ -98,3 +98,13 @@ responsible for platform-ToS compliance.
 **Why:** SQLite serializes writes regardless of async; the render worker is inherently synchronous
 (subprocess ffmpeg). Async adds complexity with no throughput gain (KISS). `SimpleWorker` avoids
 fork overhead and makes the single-render guarantee trivial.
+
+### ADR-008 — Push-to-main CD via raw SSH, credentials in GitHub Secrets
+**Decision:** `.github/workflows/deploy.yml` deploys on merge to `main` by SSHing into the VPS (raw
+`ssh`, host-key pinned via `SSH_KNOWN_HOSTS`, configurable non-default `SSH_PORT`) and running
+`scripts/deploy.sh` there (`git reset --hard origin/main` → `docker compose up -d --build`).
+**Why:** No third-party marketplace action (smaller supply-chain surface, KISS). All credentials
+live in GitHub Secrets, never in the repo. The box keeps its own `.env` and named volumes, so the
+deploy transmits **no secrets** and never risks the DB/media — it only updates code and rebuilds.
+The worker's 300s stop grace means an in-flight render finishes before its container is recreated.
+Pull happens on the box (needs a read-only deploy key), keeping GitHub's egress one-directional.
