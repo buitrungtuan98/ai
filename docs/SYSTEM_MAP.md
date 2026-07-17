@@ -17,8 +17,8 @@ Status tokens: `DONE` · `WIP` · `TODO` · `BLOCKED`.
 | `database/db_session.py` | data | Engine + WAL/busy_timeout/foreign_keys PRAGMA listener, `SessionLocal`, `get_db`, `init_db` | `DATABASE_URL` | sessions | SQLAlchemy, config | DONE | 2026-07-17 |
 | `auth/dependencies.py` | auth | `get_current_user` (solo/Firebase), `CurrentUser`, ownership guards (404) | request headers | `User` | firebase, models, config | DONE | 2026-07-17 |
 | `auth/firebase.py` | auth | Lazy Firebase Admin init + `verify_id_token` wrapper (only module touching firebase_admin) | ID token | decoded claims | firebase-admin, config | DONE | 2026-07-17 |
-| `core/ai_engine.py` | ai | `generate_structured` Gemini wrapper; `VideoScript`/`MetadataSet` schemas; retry/repair | topic, campaign cfg | script + 3 A/B metadata | google-generativeai, pydantic | TODO | — |
-| `core/safety_filter.py` | ai | Profanity/brand-safety term filter; Pexels license check; variation/ToS policy gate | script text, flags | filtered text, gate result | config | TODO | — |
+| `core/ai_engine.py` | ai | `generate_structured` Gemini wrapper; `VideoScript`/`MetadataSet` schemas; retry/repair | topic, campaign cfg | script + 3 A/B metadata | google-generativeai, pydantic | DONE | 2026-07-17 |
+| `core/safety_filter.py` | ai | Profanity/brand-safety term filter; Pexels license check; variation/ToS policy gate | script text, flags | filtered text, gate result | stdlib | DONE | 2026-07-17 |
 | `core/ffmpeg_runner.py` | render | DRY subprocess runner: `nice -n 19`, `-threads 4`, `-progress` → progress % | ffmpeg args | files, progress callbacks | ffmpeg (system) | TODO | — |
 | `core/tts.py` | render | edge-tts per scene; returns mp3 path + word-boundary timings | narration, voice, rate | mp3 + timings | edge-tts | TODO | — |
 | `core/media.py` | render | ffprobe helpers (duration/codec); audio duration = ground truth | media path | duration/codec info | ffprobe (system) | TODO | — |

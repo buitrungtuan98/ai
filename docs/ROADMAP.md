@@ -28,9 +28,10 @@ Done). Legend: `DONE` · `WIP` · `TODO` · `BLOCKED`.
 - [DONE] `P2.3` auth/firebase.py — lazy Firebase verify wrapper
 - Verified: solo get-or-create idempotent; owner access ok; cross-tenant + missing id → 404.
 
-## Phase 3 — AI engine & safety `TODO`
-- [TODO] `P3.1` core/ai_engine.py — generate_structured + schemas + retry/repair
-- [TODO] `P3.2` core/safety_filter.py — profanity/brand-safety + variation/ToS gate
+## Phase 3 — AI engine & safety `DONE`
+- [DONE] `P3.1` core/ai_engine.py — generate_structured + schemas + retry/repair
+- [DONE] `P3.2` core/safety_filter.py — profanity/brand-safety + variation/ToS gate
+- Verified (mocked Gemini): parse, code-fence strip, retry+repair, safety-block passthrough, exhausted→error; filter remove/mask; variation gate default-off + opt-in; footage license guard.
 
 ## Phase 4 — Rendering pipeline (CPU-only) `TODO`
 - [TODO] `P4.1` core/ffmpeg_runner.py — nice/threads/progress runner
