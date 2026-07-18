@@ -18,6 +18,12 @@
         <a href="/credentials" class="{{ 'active' if nav=='credentials' else '' }}"><span class="ico">⚿</span> Credentials</a>
         <a href="/tasks" class="{{ 'active' if nav=='tasks' else '' }}"><span class="ico">≣</span> Task Logs</a>
       </nav>
+      {% if settings.MULTI_TENANT_MODE %}
+      <div class="sidebar-foot">
+        <span class="who" title="{{ request.session.get('email') or '' }}">{{ request.session.get('email') or 'Signed in' }}</span>
+        <form method="post" action="/auth/logout"><button class="btn ghost sm" type="submit">Sign out</button></form>
+      </div>
+      {% endif %}
     </aside>
     <main class="main">
       {% block content %}{% endblock %}

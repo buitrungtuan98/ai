@@ -119,6 +119,14 @@ th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: upp
 .between { justify-content: space-between; }
 .mt { margin-top: 20px; }
 
+/* Auth (login page + sidebar session chip) */
+.auth-body { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 24px; }
+.auth-card { width: 100%; max-width: 380px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 32px 28px; }
+.divider { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; margin: 18px 0; }
+.divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+.sidebar-foot { position: absolute; bottom: 20px; left: 16px; right: 16px; display: flex; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid var(--border); padding-top: 14px; }
+.sidebar-foot .who { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 @media (max-width: 720px) {
   .sidebar { display: none; }
   .main { padding: 20px; }

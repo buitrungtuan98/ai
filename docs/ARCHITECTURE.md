@@ -108,3 +108,16 @@ live in GitHub Secrets, never in the repo. The box keeps its own `.env` and name
 deploy transmits **no secrets** and never risks the DB/media — it only updates code and rebuilds.
 The worker's 300s stop grace means an in-flight render finishes before its container is recreated.
 Pull happens on the box (needs a read-only deploy key), keeping GitHub's egress one-directional.
+
+### ADR-009 — Browser login via Firebase REST + signed session cookie (no CDN, no JS SDK)
+**Decision:** The multi-tenant `/login` page authenticates with the **Firebase Auth REST API**
+(email/password sign-in + sign-up) and a **server-side Google OAuth** flow that exchanges the Google
+id_token via `accounts:signInWithIdp` — no Firebase JS SDK, no external CDN script. After any
+successful auth, the browser POSTs the Firebase ID token to `/auth/session`, which verifies it with
+firebase-admin and mints a **signed Starlette session cookie** (`SECRET_KEY`, SameSite=Lax,
+`SESSION_MAX_AGE_DAYS`). `get_current_user` accepts either a `Bearer` ID token (API clients) or the
+session cookie (browsers); unauthenticated browser navigations 303-redirect to `/login`.
+**Why:** Keeps the "no runtime CDN" property (KISS, CSP-friendly, self-contained) and reuses the
+existing SessionMiddleware and Google OAuth helper (DRY). Trade-off: a signed session is not
+server-revocable before expiry (disabling a Firebase user takes effect on next login, worst case
+`SESSION_MAX_AGE_DAYS`); acceptable at this scale and documented in the RUNBOOK.

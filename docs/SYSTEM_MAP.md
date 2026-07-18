@@ -10,13 +10,13 @@ Status tokens: `DONE` · `WIP` · `TODO` · `BLOCKED`.
 
 | Path | Layer | Responsibility | Inputs | Outputs | Depends on | Status | Last updated |
 |------|-------|----------------|--------|---------|------------|--------|--------------|
-| `core/config.py` | config | The only place env/`.env` is read; `settings` singleton, fail-fast validation | `.env` | `Settings` | pydantic-settings | DONE | 2026-07-17 |
+| `core/config.py` | config | The only place env/`.env` is read; `settings` singleton, fail-fast validation | `.env` | `Settings` | pydantic-settings | DONE | 2026-07-18 |
 | `core/security.py` | security | Fernet/MultiFernet encrypt/decrypt util (key rotation, None-safe) | `FERNET_KEY` | ciphertext/plaintext | cryptography, config | DONE | 2026-07-17 |
 | `database/types.py` | data | `EncryptedString` TypeDecorator + Python enums (Platform, statuses) | column values | encrypted columns | security | DONE | 2026-07-17 |
 | `database/models.py` | data | ORM: Users→Channels→Campaigns→{Tasks,BufferPool}, encrypted creds | — | ORM classes | SQLAlchemy, types | DONE | 2026-07-17 |
 | `database/db_session.py` | data | Engine + WAL/busy_timeout/foreign_keys PRAGMA listener, `SessionLocal`, `get_db`, `init_db` | `DATABASE_URL` | sessions | SQLAlchemy, config | DONE | 2026-07-17 |
-| `auth/dependencies.py` | auth | `get_current_user` (solo/Firebase), `CurrentUser`, ownership guards (404) | request headers | `User` | firebase, models, config | DONE | 2026-07-17 |
-| `auth/firebase.py` | auth | Lazy Firebase Admin init + `verify_id_token` wrapper (only module touching firebase_admin) | ID token | decoded claims | firebase-admin, config | DONE | 2026-07-17 |
+| `auth/dependencies.py` | auth | `get_current_user` (solo/Firebase Bearer/session cookie), `CurrentUser`, ownership guards (404), `get_or_create_user` | request | `User` | firebase, models, config | DONE | 2026-07-18 |
+| `auth/firebase.py` | auth | Lazy Firebase Admin init, `verify_id_token`, `sign_in_with_google_id_token` (REST signInWithIdp) | tokens | claims / firebase sign-in | firebase-admin, requests, config | DONE | 2026-07-18 |
 | `core/ai_engine.py` | ai | `generate_structured` Gemini wrapper; `VideoScript`/`MetadataSet` schemas; retry/repair | topic, campaign cfg | script + 3 A/B metadata | google-generativeai, pydantic | DONE | 2026-07-17 |
 | `core/safety_filter.py` | ai | Profanity/brand-safety term filter; Pexels license check; variation/ToS policy gate | script text, flags | filtered text, gate result | stdlib | DONE | 2026-07-17 |
 | `core/ffmpeg_runner.py` | render | DRY subprocess runner: `nice -n 19`, `-threads 4`, `-progress` → progress % | ffmpeg args | files, progress callbacks | ffmpeg (system) | DONE | 2026-07-17 |
@@ -34,9 +34,9 @@ Status tokens: `DONE` · `WIP` · `TODO` · `BLOCKED`.
 | `services/youtube_service.py` | publish | OAuth2 token refresh (persist to channel) + resumable upload + CTA comment | video, metadata, channel | uploaded video id | google-api-python-client, google-auth | DONE | 2026-07-17 |
 | `services/facebook_service.py` | publish | Page video upload via Page ID + permanent token (decrypted on the fly) | video, metadata, channel | uploaded video id | requests | DONE | 2026-07-17 |
 | `services/telegram_bot.py` | publish | DRY alert helper (queued/finished/failed) to a user's chat | message, token, chat id | Telegram message | requests | DONE | 2026-07-17 |
-| `main.py` | web | FastAPI app, routers (channels/campaigns/credentials/tasks), Google OAuth web flow, AJAX task poll, `/health` | HTTP | HTML/JSON | fastapi, auth, models, task_queue | DONE | 2026-07-17 |
-| `templates/` | web | Jinja2 dashboard (sidebar; dashboard/channels/campaigns/assets/credentials/tasks) | context | HTML | jinja2 | DONE | 2026-07-17 |
-| `static/` | web | Dark-theme CSS (Tailwind-flavoured, self-contained) + polling app.js (no runtime CDN) | — | CSS/JS | — | DONE | 2026-07-17 |
+| `main.py` | web | FastAPI app, /login + session/logout + Google SSO login, routers, YouTube OAuth flow, AJAX task poll, 401→/login handler, `/health` | HTTP | HTML/JSON | fastapi, auth, models, task_queue | DONE | 2026-07-18 |
+| `templates/` | web | Jinja2 dashboard (6 pages) + standalone login.html; sidebar session chip | context | HTML | jinja2 | DONE | 2026-07-18 |
+| `static/` | web | Dark-theme CSS (incl. auth styles) + polling app.js (401→/login) — no runtime CDN | — | CSS/JS | — | DONE | 2026-07-18 |
 
 ## Ops / infra
 

@@ -8,11 +8,28 @@ root and a populated `.env`.
 2. Generate a Fernet key: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
    → put it in `FERNET_KEY`. **Back this up offline** — losing it means every stored API key/OAuth
    token is unrecoverable.
-3. For public/multi-tenant mode: set `MULTI_TENANT_MODE=true` and place Firebase service-account JSON
-   at `config/firebase_credentials.json`.
+3. For public/multi-tenant mode, see **Enable multi-tenant mode** below.
 4. Create a Cloudflare Tunnel, copy its token into `TUNNEL_TOKEN`, and map the public hostname to
    `http://web:8000` in the Cloudflare Zero-Trust dashboard.
 5. `docker compose up -d`. Confirm health: `docker compose ps` (all `healthy`).
+
+## Enable multi-tenant mode (public registration via Firebase)
+1. Firebase console → create a project → **Authentication → Sign-in method**: enable
+   **Email/Password** and (optionally) **Google**.
+2. Project settings → Service accounts → generate a private key → save as
+   `config/firebase_credentials.json` on the box (gitignored).
+3. Project settings → General → copy the **Web API Key** into `FIREBASE_WEB_API_KEY`.
+4. Set in `.env`: `MULTI_TENANT_MODE=true`, `FIREBASE_CREDENTIALS_PATH`, `FIREBASE_WEB_API_KEY`,
+   and a strong `SECRET_KEY` (`python -c "import secrets; print(secrets.token_urlsafe(48))"`).
+5. For **Continue with Google**: in the Google Cloud console, add a second authorized redirect URI
+   `<OAUTH_REDIRECT_BASE>/auth/google/callback` to the same OAuth client used for YouTube connect.
+6. `docker compose up -d` — unauthenticated visitors now land on `/login`; accounts are
+   JIT-provisioned on first sign-in, each isolated to their own channels/campaigns.
+
+Notes: sessions last `SESSION_MAX_AGE_DAYS` (default 7); disabling a user in Firebase takes effect
+at their next login, worst case when the session expires (ADR-009). In **solo mode** there is no
+login page — anyone reaching the URL is the admin, so keep the hostname private or put a
+Cloudflare Access policy (email OTP) in front of it.
 
 ## Verify the stack locally (no public exposure)
 - `docker compose up -d redis` then run tests: `pytest`.

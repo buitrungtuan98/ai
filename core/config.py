@@ -36,6 +36,9 @@ class Settings(BaseSettings):
 
     # --- Firebase (multi-tenant only) ---
     FIREBASE_CREDENTIALS_PATH: str | None = None
+    # Public web API key (Firebase console → Project settings). Used by the /login page for the
+    # Firebase Auth REST API — it is an identifier, not a secret, but lives in .env like all config.
+    FIREBASE_WEB_API_KEY: str | None = None
 
     # --- Optional global fallback provider keys (per-user keys take priority) ---
     GEMINI_API_KEY: str | None = None
@@ -66,6 +69,7 @@ class Settings(BaseSettings):
     # --- App ---
     LOG_LEVEL: str = "INFO"
     SECRET_KEY: str = Field(default="dev-insecure-session-key-change-me")
+    SESSION_MAX_AGE_DAYS: int = 7  # signed browser session lifetime (multi-tenant login)
 
     @model_validator(mode="after")
     def _require_firebase_in_multi_tenant(self) -> "Settings":

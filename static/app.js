@@ -44,7 +44,10 @@
 
   function poll() {
     fetch("/api/tasks", { headers: { "Accept": "application/json" } })
-      .then(function (r) { return r.json(); })
+      .then(function (r) {
+        if (r.status === 401) { window.location.href = "/login"; throw new Error("unauthenticated"); }
+        return r.json();
+      })
       .then(function (d) { render(d.tasks || []); })
       .catch(function () { /* transient — try again next tick */ });
   }

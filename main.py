@@ -11,14 +11,24 @@ import logging
 
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Form, Request
+from fastapi import Depends, FastAPI, Form, HTTPException, Request
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 from sqlalchemy import select
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
-from auth.dependencies import CurrentUser, DbDep, get_owned_campaign, get_owned_channel
+from auth import firebase
+from auth.dependencies import (
+    CurrentUser,
+    DbDep,
+    get_or_create_user,
+    get_owned_campaign,
+    get_owned_channel,
+)
 from core.config import settings
 from database.db_session import get_db, init_db
 from database.models import BufferPoolItem, Campaign, Channel, Task
@@ -35,20 +45,112 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="AI Video Factory", lifespan=lifespan)
-app.add_middleware(SessionMiddleware, secret_key=settings.SECRET_KEY)
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=settings.SECRET_KEY,
+    max_age=settings.SESSION_MAX_AGE_DAYS * 86400,
+    same_site="lax",
+)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
+templates.env.globals["settings"] = settings  # e.g. MULTI_TENANT_MODE toggles the sign-out chip
 
 YOUTUBE_SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube.readonly",
     "https://www.googleapis.com/auth/youtube.force-ssl",
 ]
+LOGIN_SCOPES = [  # Google SSO login (identity only — no YouTube access)
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+]
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _auth_aware_http_exception(request: Request, exc: StarletteHTTPException):
+    """Browsers navigating unauthenticated get sent to /login; API callers keep the raw 401."""
+    if (
+        exc.status_code == 401
+        and settings.MULTI_TENANT_MODE
+        and "text/html" in (request.headers.get("accept") or "")
+    ):
+        return RedirectResponse("/login", status_code=303)
+    return await http_exception_handler(request, exc)
 
 
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+# ── Login & sessions (multi-tenant mode) ─────────────────────────────────────
+class SessionPayload(BaseModel):
+    id_token: str
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request):
+    if not settings.MULTI_TENANT_MODE or request.session.get("uid"):
+        return RedirectResponse("/", status_code=303)
+    return templates.TemplateResponse(
+        request,
+        "login.html",
+        {
+            "request": request,
+            "web_api_key": settings.FIREBASE_WEB_API_KEY,
+            "google_enabled": bool(settings.GOOGLE_CLIENT_ID and settings.GOOGLE_CLIENT_SECRET),
+        },
+    )
+
+
+@app.post("/auth/session")
+def create_session(payload: SessionPayload, request: Request, db: DbDep):
+    """Verify a Firebase ID token (obtained by the /login page) and mint the browser session."""
+    if not settings.MULTI_TENANT_MODE:
+        return {"ok": True, "mode": "solo"}
+    try:
+        decoded = firebase.verify_id_token(payload.id_token)
+    except Exception as exc:  # noqa: BLE001 — any verification failure is a 401
+        raise HTTPException(401, "Invalid Firebase token") from exc
+    get_or_create_user(db, firebase_uid=decoded["uid"])  # JIT-provision on first login
+    request.session["uid"] = decoded["uid"]
+    request.session["email"] = decoded.get("email")
+    return {"ok": True}
+
+
+@app.post("/auth/logout")
+def logout(request: Request):
+    request.session.clear()
+    return RedirectResponse("/login" if settings.MULTI_TENANT_MODE else "/", status_code=303)
+
+
+@app.get("/auth/google/login")
+def google_login_start(request: Request):
+    """CDN-free "Continue with Google": server-side OAuth for identity only (see ADR-009)."""
+    if not settings.MULTI_TENANT_MODE:
+        return RedirectResponse("/", status_code=303)
+    if not (settings.GOOGLE_CLIENT_ID and settings.GOOGLE_CLIENT_SECRET):
+        raise HTTPException(400, "Google sign-in is not configured")
+    flow = _google_flow(LOGIN_SCOPES, "/auth/google/callback")
+    auth_url, state = flow.authorization_url(prompt="select_account")
+    request.session["login_state"] = state
+    return RedirectResponse(auth_url)
+
+
+@app.get("/auth/google/callback")
+def google_login_callback(request: Request, db: DbDep):
+    if request.query_params.get("state") != request.session.pop("login_state", None):
+        raise HTTPException(400, "OAuth state mismatch")
+    flow = _google_flow(LOGIN_SCOPES, "/auth/google/callback")
+    flow.fetch_token(code=request.query_params.get("code"))
+    # Exchange the Google id_token for a Firebase sign-in, then verify it like any login.
+    data = firebase.sign_in_with_google_id_token(flow.credentials.id_token)
+    decoded = firebase.verify_id_token(data["idToken"])
+    get_or_create_user(db, firebase_uid=decoded["uid"])
+    request.session["uid"] = decoded["uid"]
+    request.session["email"] = decoded.get("email") or data.get("email")
+    return RedirectResponse("/", status_code=303)
 
 
 # ── Dashboard ────────────────────────────────────────────────────────────────
@@ -105,8 +207,7 @@ def delete_channel(channel=Depends(get_owned_channel), db=Depends(get_db)):
 # ── Google OAuth2 web flow (connect a YouTube channel) ───────────────────────
 @app.get("/oauth/google/start")
 def google_oauth_start(request: Request, user: CurrentUser):
-
-    flow = _google_flow()
+    flow = _google_flow(YOUTUBE_SCOPES, "/oauth/google/callback")
     auth_url, state = flow.authorization_url(access_type="offline", include_granted_scopes="true", prompt="consent")
     request.session["oauth_state"] = state
     request.session["oauth_user"] = user.id
@@ -117,8 +218,11 @@ def google_oauth_start(request: Request, user: CurrentUser):
 def google_oauth_callback(request: Request, db: DbDep):
     from googleapiclient.discovery import build
 
-    flow = _google_flow(state=request.session.get("oauth_state"))
-    flow.fetch_token(authorization_response=str(request.url))
+    if request.query_params.get("state") != request.session.pop("oauth_state", None):
+        raise HTTPException(400, "OAuth state mismatch")
+    flow = _google_flow(YOUTUBE_SCOPES, "/oauth/google/callback")
+    # Exchange by code (not the full callback URL) — robust behind the HTTP-origin tunnel.
+    flow.fetch_token(code=request.query_params.get("code"))
     creds = flow.credentials
     user_id = request.session.get("oauth_user")
 
@@ -143,7 +247,8 @@ def google_oauth_callback(request: Request, db: DbDep):
     return RedirectResponse("/channels", status_code=303)
 
 
-def _google_flow(state: str | None = None):
+def _google_flow(scopes: list[str], redirect_path: str):
+    """Build a Google OAuth flow. Reused by the YouTube-connect flow and the SSO login flow."""
     from google_auth_oauthlib.flow import Flow
 
     client_config = {
@@ -154,8 +259,8 @@ def _google_flow(state: str | None = None):
             "token_uri": "https://oauth2.googleapis.com/token",
         }
     }
-    flow = Flow.from_client_config(client_config, scopes=YOUTUBE_SCOPES, state=state)
-    flow.redirect_uri = settings.OAUTH_REDIRECT_BASE.rstrip("/") + "/oauth/google/callback"
+    flow = Flow.from_client_config(client_config, scopes=scopes)
+    flow.redirect_uri = settings.OAUTH_REDIRECT_BASE.rstrip("/") + redirect_path
     return flow
 
 

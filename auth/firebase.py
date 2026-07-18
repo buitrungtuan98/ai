@@ -36,3 +36,26 @@ def verify_id_token(token: str) -> dict:
     from firebase_admin import auth as fb_auth
 
     return fb_auth.verify_id_token(token)
+
+
+def sign_in_with_google_id_token(google_id_token: str) -> dict:
+    """Exchange a Google OAuth id_token for a Firebase sign-in via the Auth REST API
+    (`accounts:signInWithIdp`). Returns the response dict (contains `idToken`, `localId`,
+    `email`, …). Used by the CDN-free server-side "Continue with Google" login flow."""
+    import requests
+
+    if not settings.FIREBASE_WEB_API_KEY:
+        raise RuntimeError("FIREBASE_WEB_API_KEY is not set (required for Google sign-in).")
+    resp = requests.post(
+        "https://identitytoolkit.googleapis.com/v1/accounts:signInWithIdp",
+        params={"key": settings.FIREBASE_WEB_API_KEY},
+        json={
+            "postBody": f"id_token={google_id_token}&providerId=google.com",
+            "requestUri": settings.OAUTH_REDIRECT_BASE,
+            "returnSecureToken": True,
+            "returnIdpCredential": True,
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()
