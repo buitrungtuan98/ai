@@ -9,6 +9,7 @@
     AUDIO_SYNCED: "Audio Synced",
     RENDERING: "Rendering",
     AWAITING_REVIEW: "Awaiting Review",
+    SCHEDULED: "Scheduled",
     PUBLISHING: "Publishing",
     COMPLETED: "Completed",
     FAILED: "Failed",
@@ -32,6 +33,9 @@
     }
     if (t.status === "AWAITING_REVIEW") {
       return '<a href="/assets">Preview in Asset Pool →</a>';
+    }
+    if (t.status === "SCHEDULED") {
+      return '<span class="meta">Rendered — publishing at the next posting slot</span>';
     }
     if (t.error) {
       return '<div class="err">' + esc(t.error.slice(0, 300)) + "</div>";

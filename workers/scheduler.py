@@ -1,13 +1,18 @@
-"""Periodic automation tick — buffer hydration gated by posting slots, plus housekeeping.
+"""Periodic automation tick — eager rendering, slot-timed publishing, and housekeeping.
 
 Runs as a daemon thread inside the worker process (KISS: no extra container). The tick only enqueues
-jobs and sweeps files — it never renders — so the single-render guarantee is untouched (the one
-worker still consumes the queue one job at a time).
+jobs and sweeps files — it never renders — so the single-render guarantee is untouched.
+
+Cadence model (ADR-011): rendering runs EAGERLY (keep every active campaign's buffer full), while
+publishing is what posting slots control — exactly ONE pre-rendered episode is published per slot,
+in the campaign's timezone. Campaigns without slots publish immediately after render (continuous
+mode); review-mode campaigns publish only on operator approval.
 
 Responsibilities each tick:
   * sweep orphaned temp media (crash survivors) and relieve disk pressure,
   * expire stale pre-rendered buffer items (and delete their files),
-  * for each active campaign whose posting slot is current, top up the render buffer.
+  * top up every active campaign's render buffer,
+  * publish one `ready` buffer item per campaign whose posting slot is current.
 """
 from __future__ import annotations
 
@@ -16,7 +21,7 @@ import os
 import shutil
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -24,20 +29,21 @@ from sqlalchemy import select
 from core.cleanup import sweep_orphans
 from core.config import settings
 from database.db_session import SessionLocal
-from database.models import BufferPoolItem, Campaign
-from database.types import BufferStatus, CampaignStatus
-from workers import video_worker
+from database.models import BufferPoolItem, Campaign, Task
+from database.types import BufferStatus, CampaignStatus, TaskStatus
+from workers import task_queue, video_worker
 
 logger = logging.getLogger(__name__)
 
 
-def local_now() -> datetime:
-    """Now in the operator's configured timezone — posting slots are interpreted in it, so a user
-    in Asia/Ho_Chi_Minh who types 09:00 gets a 09:00 local post, not 09:00 UTC."""
+def local_now(timezone: str | None = None) -> datetime:
+    """Now in the given (or globally configured) timezone — posting slots are interpreted in it,
+    so a user in Asia/Ho_Chi_Minh who types 09:00 gets a 09:00 local post, not 09:00 UTC."""
+    tz = timezone or settings.TIMEZONE
     try:
-        return datetime.now(ZoneInfo(settings.TIMEZONE))
-    except Exception:  # noqa: BLE001 — a bad TIMEZONE value must not kill the scheduler
-        logger.warning("Invalid TIMEZONE %r — falling back to UTC", settings.TIMEZONE)
+        return datetime.now(ZoneInfo(tz))
+    except Exception:  # noqa: BLE001 — a bad timezone value must not kill the scheduler
+        logger.warning("Invalid timezone %r — falling back to UTC", tz)
         return datetime.utcnow()
 
 
@@ -93,13 +99,52 @@ def disk_usage_pct(path: str) -> float:
         return 0.0
 
 
+def _recently_published(db, campaign_id: int, window_minutes: int) -> bool:
+    """True if this campaign already published within the window — the one-per-slot guard, so an
+    hourly tick landing twice inside one slot's tolerance can't double-post."""
+    cutoff = datetime.utcnow() - timedelta(minutes=window_minutes)
+    latest = db.scalar(
+        select(Task.finished_at)
+        .where(Task.campaign_id == campaign_id, Task.status == TaskStatus.COMPLETED)
+        .order_by(Task.finished_at.desc())
+        .limit(1)
+    )
+    return latest is not None and latest >= cutoff
+
+
+def publish_due_campaign(db, campaign: Campaign, now: datetime | None = None,
+                         enqueue=None) -> int | None:
+    """Publish exactly ONE ready buffer item if the campaign's posting slot is current (in the
+    campaign's own timezone). Returns the buffer id queued, or None."""
+    cfg = campaign.config_json or {}
+    slots = cfg.get("posting_slots") or []
+    if not slots or not cfg.get("auto_publish", True):
+        return None  # continuous mode publishes at render time; review mode publishes on approval
+    now = now or local_now(cfg.get("timezone"))
+    if not is_within_slot(slots, now):
+        return None
+    if _recently_published(db, campaign.id, settings.SLOT_TOLERANCE_MINUTES):
+        return None
+    buf = db.scalar(
+        select(BufferPoolItem)
+        .where(BufferPoolItem.campaign_id == campaign.id,
+               BufferPoolItem.status == BufferStatus.ready)
+        .order_by(BufferPoolItem.episode_number)
+        .limit(1)
+    )
+    if buf is None:
+        return None
+    (enqueue or task_queue.enqueue_publish)(buf.id)
+    logger.info("Slot publish: campaign %s episode %s queued", campaign.id, buf.episode_number)
+    return buf.id
+
+
 def periodic_tick(db=None, now: datetime | None = None) -> dict:
     """One automation cycle. `now` (local time) drives the posting-slot check; buffer expiry uses
     UTC internally to match DB timestamps. Returns a small summary dict."""
-    now = now or local_now()
     own_session = db is None
     db = db or SessionLocal()
-    summary = {"swept": 0, "expired": 0, "hydrated": []}
+    summary = {"swept": 0, "expired": 0, "hydrated": [], "published": []}
     try:
         # Disk hygiene.
         summary["swept"] = sweep_orphans()
@@ -108,12 +153,14 @@ def periodic_tick(db=None, now: datetime | None = None) -> dict:
             summary["swept"] += sweep_orphans(max_age_minutes=5)
         summary["expired"] = expire_stale_buffers(db)
 
-        # Slot-gated buffer hydration.
         campaigns = db.scalars(select(Campaign).where(Campaign.status == CampaignStatus.active)).all()
         for campaign in campaigns:
-            slots = (campaign.config_json or {}).get("posting_slots") or []
-            if is_within_slot(slots, now):
-                summary["hydrated"] += video_worker.hydrate_campaign(db, campaign)
+            # Render eagerly — a full buffer is what makes on-the-dot slot publishing possible.
+            summary["hydrated"] += video_worker.hydrate_campaign(db, campaign)
+            # Publish exactly one pre-rendered episode if this campaign's slot is now.
+            published = publish_due_campaign(db, campaign, now=now)
+            if published is not None:
+                summary["published"].append(published)
         return summary
     finally:
         if own_session:

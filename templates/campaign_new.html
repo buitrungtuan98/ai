@@ -1,12 +1,13 @@
 {% extends "base.html" %}
 {% set cfg = cfg if cfg is defined else {} %}
 {% set editing = campaign is defined and campaign %}
+{% set dup = source is defined and source %}
 {% set branding = cfg.get('branding') or {} %}
-{% block title %}{{ 'Edit' if editing else 'New' }} Campaign · AI Video Factory{% endblock %}
+{% block title %}{{ 'Edit' if editing else ('Duplicate' if dup else 'New') }} Campaign · AI Video Factory{% endblock %}
 {% block content %}
 <div class="page-head"><div>
-  <h1>{{ 'Edit Campaign' if editing else 'New Campaign' }}</h1>
-  <p class="subtitle">Configure strategy, audio &amp; branding, and distribution. Every field here is honored by the render pipeline.</p>
+  <h1>{{ 'Edit Campaign' if editing else ('Duplicate Campaign' if dup else 'New Campaign') }}</h1>
+  <p class="subtitle">{% if dup %}Copied from “{{ source.topic_name }}” — pick a new channel/language, keep the persona.{% else %}Configure strategy, persona, audio &amp; branding, and distribution. Every field here is honored by the render pipeline.{% endif %}</p>
 </div></div>
 
 {% if not channels %}
@@ -22,14 +23,14 @@
   <div class="tab-panel active" id="core">
     <div class="card">
       <div class="form-row"><label>Topic name</label>
-        <input name="topic_name" required placeholder="Amazing space facts" value="{{ campaign.topic_name if editing else '' }}"></div>
+        <input name="topic_name" required placeholder="Amazing space facts" value="{{ campaign.topic_name if editing else (source.topic_name if dup else '') }}"></div>
       <div class="form-row"><label>Target channel</label>
         <select name="channel_id" required>
           {% for c in channels %}<option value="{{ c.id }}" {{ 'selected' if editing and campaign.channel_id == c.id }}>{{ c.channel_name }} ({{ c.platform.value }})</option>{% endfor %}
         </select>
       </div>
       <div class="form-row"><label>Total episodes</label>
-        <input name="total_episodes" type="number" min="1" value="{{ campaign.total_episodes if editing else 10 }}" required></div>
+        <input name="total_episodes" type="number" min="1" value="{{ campaign.total_episodes if editing else (source.total_episodes if dup else 10) }}" required></div>
       <div class="form-row"><label>Target language</label>
         <select name="language">
           {% for code, name in [('vi','Vietnamese'), ('en','English'), ('es','Spanish')] %}
@@ -37,8 +38,28 @@
           {% endfor %}
         </select>
       </div>
+      <div class="form-row"><label>Episode continuity (series memory)</label>
+        <select name="continuity">
+          <option value="none" {{ 'selected' if cfg.get('continuity', 'none') == 'none' }}>Independent episodes</option>
+          <option value="no_repeat" {{ 'selected' if cfg.get('continuity') == 'no_repeat' }}>Never repeat — every episode a fresh premise</option>
+          <option value="serial" {{ 'selected' if cfg.get('continuity') == 'serial' }}>Serial — each episode continues the story</option>
+        </select>
+        <p class="hint">The AI remembers a one-line synopsis of each past episode and writes accordingly.</p>
+      </div>
       <div class="form-row"><label>Custom system prompt (optional)</label>
         <textarea name="system_prompt" placeholder="Tone, style, constraints for the scriptwriter…">{{ cfg.get('system_prompt') or '' }}</textarea></div>
+    </div>
+    <div class="card mt">
+      <h3>Persona — make it sound like a real person</h3>
+      <p class="subtitle">Applied to everything: narration (so subtitles too), titles, descriptions. A persona is a creative character — follow platform rules on disclosing synthetic content; don't imitate a real person.</p>
+      <div class="form-row"><label>Who is speaking? (region, personality, way of talking)</label>
+        <textarea name="persona" placeholder="Ví dụ: 'Chú Ba' — người miền Tây kể chuyện đêm khuya, giọng thân mật, hay dùng 'nha', 'dữ thần', thỉnh thoảng chọc cười một câu rồi nghiêm lại…">{{ cfg.get('persona') or '' }}</textarea></div>
+      <div class="form-row"><label>Style examples — paste 2–3 short samples of the voice you want (your own writing works best)</label>
+        <textarea name="style_examples" placeholder="Paste real captions/scripts whose rhythm and vocabulary the AI should imitate…">{{ cfg.get('style_examples') or '' }}</textarea></div>
+      <div class="form-row"><label>Signature opening (fans recognise it)</label>
+        <input name="catchphrase_open" placeholder="Khuya rồi đó… tắt đèn chưa?" value="{{ cfg.get('catchphrase_open') or '' }}"></div>
+      <div class="form-row"><label>Signature sign-off</label>
+        <input name="catchphrase_close" placeholder="Ngủ ngon nha… nếu ngủ được." value="{{ cfg.get('catchphrase_close') or '' }}"></div>
     </div>
   </div>
 
@@ -92,8 +113,11 @@
           {% endfor %}
         </select>
       </div>
-      <div class="form-row"><label>Posting time slots (comma-separated HH:MM, timezone: {{ settings.TIMEZONE }})</label>
-        <input name="posting_slots" placeholder="09:00, 18:30" value="{{ cfg.get('posting_slots', [])|join(', ') }}"></div>
+      <div class="form-row"><label>Posting time slots (comma-separated HH:MM) — exactly one pre-rendered video publishes per slot</label>
+        <input name="posting_slots" placeholder="21:00" value="{{ cfg.get('posting_slots', [])|join(', ') }}">
+        <p class="hint">Empty = publish immediately after each render (continuous mode).</p></div>
+      <div class="form-row"><label>Campaign timezone (IANA name; blank = server default {{ settings.TIMEZONE }})</label>
+        <input name="timezone" placeholder="Asia/Ho_Chi_Minh" value="{{ cfg.get('timezone') or '' }}"></div>
       <div class="form-row"><label>Pre-rendered buffer size (blank = global default {{ settings.DEFAULT_BUFFER_SIZE }})</label>
         <input name="buffer_size" type="number" min="1" max="10" value="{{ cfg.get('buffer_size') or '' }}"></div>
       <div class="form-row"><label><input type="checkbox" name="ab_testing" style="width:auto" {{ 'checked' if cfg.get('ab_testing', true) }}> Enable A/B metadata testing (rotate 3 title/description variants)</label></div>

@@ -72,6 +72,7 @@ _COLUMN_UPGRADES: dict[str, dict[str, str]] = {
         "retry_count": "INTEGER DEFAULT 0",
         "published_video_id": "VARCHAR(128)",
         "published_url": "VARCHAR(512)",
+        "synopsis": "VARCHAR(300)",
     },
 }
 

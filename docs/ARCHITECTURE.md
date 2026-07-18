@@ -135,3 +135,21 @@ mandatory) and from transparency. The split also gives cheap upload-only retries
 a failed upload) and manual publish control. The publish job runs on the same single queue (KISS:
 uploads are short and sequential-safe on one box). The 72h buffer expiry deliberately skips
 `awaiting_review` items — only `ready` items age out.
+
+### ADR-011 — Slot-timed publishing, episode memory, and the persona layer
+**Decision:** Three coupled changes. (1) **Cadence:** rendering is eager (buffers stay full);
+posting slots control *publishing* — exactly one pre-rendered episode per slot, in the campaign's
+own timezone, with a recent-publish guard against double-posting; tasks parked for a slot show as
+`SCHEDULED`. No slots = publish right after render; review mode = publish on approval. (2)
+**Episode memory:** every generation returns a one-line `synopsis`, stored on the task; later
+episodes receive prior synopses with continuity mode `no_repeat` (fresh premise every time) or
+`serial` (genuinely continue the story). (3) **Persona layer:** per-campaign persona, style
+examples (few-shot), and signature open/close catchphrases are composed into the system prompt for
+every generation — one voice across narration (hence subtitles), titles, and descriptions — plus
+always-on anti-AI-tell writing rules (spoken register, no formulaic AI phrasing).
+**Why:** The earlier design slot-gated *rendering* and published at render-completion, which could
+dump a full buffer in one slot window — slot-timed publish from the buffer is what the buffer pool
+was for. Memory and persona are what separate "content factory" output from a recognisable
+creator: consistency + non-repetition + local voice. Compliance: a persona is a creative character,
+not an impersonation of a real person; operators must follow platform synthetic-content disclosure
+rules (see RUNBOOK).

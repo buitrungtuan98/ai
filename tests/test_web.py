@@ -91,6 +91,38 @@ def test_campaign_config_persists_all_settings(client):
     assert cfg["branding"]["tint_opacity"] == 0.1
 
 
+def test_persona_and_continuity_persist_and_duplicate(client):
+    from database.db_session import SessionLocal
+    from database.models import Campaign, Channel
+
+    client.post("/channels/facebook", data={"channel_name": "P", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    db = SessionLocal()
+    cid = db.query(Channel).first().id
+    db.close()
+    client.post("/campaigns", data={
+        "topic_name": "Horror đêm khuya", "channel_id": str(cid), "total_episodes": "30",
+        "language": "vi", "continuity": "no_repeat", "timezone": "Asia/Ho_Chi_Minh",
+        "persona": "Chú Ba miền Tây kể chuyện", "style_examples": "Khuya nay kể nha...",
+        "catchphrase_open": "Tắt đèn chưa?", "catchphrase_close": "Ngủ ngon nha.",
+        "posting_slots": "21:00",
+    }, follow_redirects=False)
+    db = SessionLocal()
+    cam = db.query(Campaign).filter_by(topic_name="Horror đêm khuya").one()
+    cfg = cam.config_json
+    db.close()
+    assert cfg["persona"] == "Chú Ba miền Tây kể chuyện"
+    assert cfg["continuity"] == "no_repeat" and cfg["timezone"] == "Asia/Ho_Chi_Minh"
+    assert cfg["catchphrase_open"] == "Tắt đèn chưa?"
+
+    # Duplicate: the new-campaign form comes prefilled with the source persona.
+    page = client.get(f"/campaigns/new?from_id={cam.id}")
+    assert page.status_code == 200 and "Duplicate Campaign" in page.text
+    assert "Chú Ba miền Tây kể chuyện" in page.text and "Tắt đèn chưa?" in page.text
+    # Foreign/missing source is ignored gracefully.
+    assert "Duplicate Campaign" not in client.get("/campaigns/new?from_id=99999").text
+
+
 def test_edit_campaign(client):
     cam = _seed_campaign(client)
     r = client.get(f"/campaigns/{cam.id}/edit")

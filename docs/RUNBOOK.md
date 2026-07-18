@@ -66,9 +66,32 @@ have their local files cleaned up immediately.
 Task Logs shows every failure with its full error. **Retry** re-runs the episode; if the rendered
 file still exists (upload failed / was awaiting review) only the upload is retried — no re-render.
 
-## Posting-slot timezone
-Slots (e.g. `09:00, 18:30`) are interpreted in `TIMEZONE` from `.env` (IANA name, e.g.
-`Asia/Ho_Chi_Minh`; default UTC). Set it before relying on scheduled posting times.
+## Posting slots & cadence
+Rendering runs ahead automatically (the buffer stays full); **posting slots control publishing** —
+exactly one pre-rendered episode publishes per slot. "One video every night at 21:00" = slot
+`21:00`, done. Slots are interpreted in the campaign's own timezone (IANA name, e.g.
+`Asia/Ho_Chi_Minh`), falling back to `TIMEZONE` in `.env`. Keep slots ≥ 1 hour apart. No slots =
+publish immediately after each render; review mode = publish on your approval.
+
+## Making the content feel human (persona guide)
+The per-campaign **Persona** section is the single biggest quality lever. What works:
+1. **Persona**: a specific character — region, age, mood, speech habits ("người miền Tây, thân mật,
+   hay dùng 'nha', 'dữ thần'"). Specific beats generic; write it in the target language.
+2. **Style examples**: paste 2–3 short samples of the voice you want — your own writing/transcripts
+   work best. The AI imitates rhythm and vocabulary (few-shot), not the content.
+3. **Catchphrases**: a signature opening and sign-off, repeated every episode — this is what makes
+   a channel feel like a person fans recognise.
+4. **Continuity**: `Never repeat` for daily-story formats (the AI is shown all previous episode
+   synopses); `Serial` for a continuing story.
+5. The system always applies anti-AI-tell rules (spoken language, no "let's dive in" phrasing) to
+   narration, titles and descriptions alike — subtitles inherit it since they are the narration.
+Voice honesty: edge-tts is good neural TTS, but the biggest realism win is that TTS reading
+*colloquial spoken text* sounds far more natural than TTS reading essay text — which is exactly
+what the persona produces. For a truly human voice later, a paid voice API (e.g. ElevenLabs) can
+replace `core/tts.py` behind the same interface.
+**Compliance:** a persona is a creative character — do not imitate a real, identifiable person, and
+follow each platform's synthetic/altered-content disclosure rules (YouTube requires disclosure for
+realistic synthetic content).
 
 ## Disk pressure (200 GB SSD)
 - Check: `df -h /data` and `du -sh /data/media/*`.

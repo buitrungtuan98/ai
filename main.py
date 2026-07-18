@@ -160,7 +160,7 @@ def google_login_callback(request: Request, db: DbDep):
 # ── Dashboard ────────────────────────────────────────────────────────────────
 _WORKING_STATUSES = [
     TaskStatus.PENDING_QUEUE, TaskStatus.AI_GENERATION, TaskStatus.AUDIO_SYNCED,
-    TaskStatus.RENDERING, TaskStatus.PUBLISHING,
+    TaskStatus.RENDERING, TaskStatus.SCHEDULED, TaskStatus.PUBLISHING,
 ]
 
 
@@ -333,11 +333,17 @@ def campaigns_page(request: Request, user: CurrentUser, db: DbDep):
 
 
 @app.get("/campaigns/new", response_class=HTMLResponse)
-def campaign_new_form(request: Request, user: CurrentUser, db: DbDep):
+def campaign_new_form(request: Request, user: CurrentUser, db: DbDep, from_id: int | None = None):
+    """New-campaign form. With ?from_id=<campaign>, prefills from an owned campaign (Duplicate —
+    e.g. same horror persona in another language to another channel)."""
     channels = db.scalars(select(Channel).where(Channel.user_id == user.id)).all()
-    return templates.TemplateResponse(
-        request, "campaign_new.html", {"request": request, "user": user, "channels": channels, "nav": "campaigns"}
-    )
+    ctx: dict = {"request": request, "user": user, "channels": channels, "nav": "campaigns"}
+    if from_id is not None:
+        source = db.get(Campaign, from_id)
+        if source is not None and source.user_id == user.id:
+            ctx["source"] = source
+            ctx["cfg"] = source.config_json or {}
+    return templates.TemplateResponse(request, "campaign_new.html", ctx)
 
 
 def _build_campaign_config(
@@ -345,6 +351,8 @@ def _build_campaign_config(
     music_path: str, music_volume: float, posting_slots: str, ab_testing: bool, cta: str,
     privacy: str, publish_mode: str, buffer_size: str,
     watermark_path: str, tint_color: str, tint_opacity: float, mirror: bool,
+    persona: str, style_examples: str, catchphrase_open: str, catchphrase_close: str,
+    continuity: str, timezone: str,
 ) -> dict:
     """One place turns the campaign form into config_json (DRY: shared by create and edit)."""
     config: dict = {
@@ -355,6 +363,13 @@ def _build_campaign_config(
         "ab_testing": ab_testing, "cta": cta or None,
         "privacy": privacy, "auto_publish": publish_mode != "review",
         "buffer_size": int(buffer_size) if buffer_size.strip().isdigit() else None,
+        # Persona / humanization + series memory (ADR-011)
+        "persona": persona or None,
+        "style_examples": style_examples or None,
+        "catchphrase_open": catchphrase_open or None,
+        "catchphrase_close": catchphrase_close or None,
+        "continuity": continuity if continuity in ("none", "no_repeat", "serial") else "none",
+        "timezone": timezone.strip() or None,
     }
     if watermark_path or (tint_color and tint_opacity > 0) or mirror:
         config["branding"] = {
@@ -389,6 +404,12 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
     tint_color: str = Form(""),
     tint_opacity: float = Form(0.0),
     mirror: bool = Form(False),
+    persona: str = Form(""),
+    style_examples: str = Form(""),
+    catchphrase_open: str = Form(""),
+    catchphrase_close: str = Form(""),
+    continuity: str = Form("none"),
+    timezone: str = Form(""),
 ) -> dict:
     return {
         "topic_name": topic_name, "channel_id": channel_id, "total_episodes": total_episodes,
@@ -398,6 +419,8 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
             posting_slots=posting_slots, ab_testing=ab_testing, cta=cta, privacy=privacy,
             publish_mode=publish_mode, buffer_size=buffer_size, watermark_path=watermark_path,
             tint_color=tint_color, tint_opacity=tint_opacity, mirror=mirror,
+            persona=persona, style_examples=style_examples, catchphrase_open=catchphrase_open,
+            catchphrase_close=catchphrase_close, continuity=continuity, timezone=timezone,
         ),
     }
 
@@ -628,7 +651,7 @@ def api_tasks(user: CurrentUser, db: DbDep):
         select(Campaign).where(Campaign.user_id == user.id)).all()}
     channels = {c.id: c for c in db.scalars(
         select(Channel).where(Channel.user_id == user.id)).all()}
-    terminal = ("COMPLETED", "FAILED", "AWAITING_REVIEW")
+    terminal = ("COMPLETED", "FAILED", "AWAITING_REVIEW", "SCHEDULED")
     out = []
     for t in rows:
         # Live % comes from Redis while running; fall back to the durable column.

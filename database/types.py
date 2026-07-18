@@ -56,6 +56,7 @@ class TaskStatus(str, enum.Enum):
     AUDIO_SYNCED = "AUDIO_SYNCED"
     RENDERING = "RENDERING"
     AWAITING_REVIEW = "AWAITING_REVIEW"  # review-mode: rendered, waiting for operator approval
+    SCHEDULED = "SCHEDULED"              # rendered into the buffer, waiting for its posting slot
     PUBLISHING = "PUBLISHING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"

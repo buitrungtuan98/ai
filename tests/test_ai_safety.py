@@ -100,3 +100,43 @@ def test_footage_license_guard():
     sf.assert_licensed_footage("pexels")
     with pytest.raises(ValueError):
         sf.assert_licensed_footage("random")
+
+
+def test_compose_system_prompt_persona_layer():
+    from core.ai_engine import NATURAL_STYLE_RULES, compose_system_prompt
+
+    system = compose_system_prompt(
+        "vi",
+        custom_system_prompt="Horror ngắn, twist cuối.",
+        persona="Chú Ba miền Tây, giọng thân mật, hay dùng 'nha'.",
+        style_examples="Khuya nay kể chuyện nhà bà Sáu nha...",
+        catchphrase_open="Khuya rồi đó… tắt đèn chưa?",
+        catchphrase_close="Ngủ ngon nha… nếu ngủ được.",
+    )
+    # Everything the operator configures actually reaches the model, plus the anti-AI-tell rules.
+    assert NATURAL_STYLE_RULES in system
+    assert "Chú Ba miền Tây" in system
+    assert "nhà bà Sáu" in system
+    assert "tắt đèn chưa?" in system and "nếu ngủ được." in system
+    assert "Horror ngắn" in system
+
+    # Minimal call still works with no persona configured.
+    bare = compose_system_prompt("en")
+    assert NATURAL_STYLE_RULES in bare and "CHARACTER" not in bare
+
+
+def test_build_script_prompt_episode_memory():
+    from core.ai_engine import build_script_prompt
+
+    prev = ["A ghost in the old market", "The taxi that never arrives"]
+    no_repeat = build_script_prompt("horror", "vi", 30, 3, continuity="no_repeat", previous_synopses=prev)
+    assert "EPISODE MEMORY" in no_repeat
+    assert "ghost in the old market" in no_repeat and "clearly different premise" in no_repeat
+
+    serial = build_script_prompt("horror", "vi", 30, 3, continuity="serial", previous_synopses=prev)
+    assert "SERIAL STORY" in serial and "Continue DIRECTLY" in serial
+    assert "The taxi that never arrives" in serial  # continues from the LAST episode
+
+    plain = build_script_prompt("horror", "vi", 30, 1)
+    assert "EPISODE MEMORY" not in plain and "SERIAL STORY" not in plain
+    assert "synopsis" in plain  # the schema field is always requested

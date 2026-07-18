@@ -151,6 +151,8 @@ class Task(Base):
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
     published_video_id: Mapped[str | None] = mapped_column(String(128))
     published_url: Mapped[str | None] = mapped_column(String(512))
+    # Episode memory: one-line premise, fed into later episodes' prompts (no-repeat/serial modes).
+    synopsis: Mapped[str | None] = mapped_column(String(300))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()

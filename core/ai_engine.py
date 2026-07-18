@@ -38,6 +38,15 @@ class Scene(BaseModel):
     )
 
 
+class _SynopsisMixin(BaseModel):
+    # Episode memory: a one-line summary stored per episode and fed back into later prompts so the
+    # series never repeats itself (no_repeat) or can genuinely continue (serial).
+    synopsis: str = Field(
+        default="", max_length=300,
+        description="One-sentence summary of THIS episode's specific premise/content.",
+    )
+
+
 class MetadataVariation(BaseModel):
     variant: Literal["A", "B", "C"]
     title: str = Field(min_length=1, max_length=100)
@@ -45,7 +54,7 @@ class MetadataVariation(BaseModel):
     tags: list[str] = Field(min_length=3, max_length=15)
 
 
-class VideoScript(BaseModel):
+class VideoScript(_SynopsisMixin):
     language: Language
     topic: str
     scenes: list[Scene] = Field(min_length=3, max_length=8)
@@ -163,21 +172,95 @@ def _strip_code_fence(text: str) -> str:
 
 # ── Thin callers ─────────────────────────────────────────────────────────────
 _SYSTEM_BY_LANG: dict[str, str] = {
-    "en": "You are a viral short-form video scriptwriter. Write punchy, factual narration in English.",
-    "vi": "Bạn là người viết kịch bản video ngắn lan truyền. Viết lời dẫn ngắn gọn, chính xác bằng tiếng Việt.",
-    "es": "Eres un guionista de videos cortos virales. Escribe una narración concisa y precisa en español.",
+    "en": "You are a short-form video scriptwriter. Write narration in natural spoken English.",
+    "vi": "Bạn là người viết kịch bản video ngắn. Viết lời dẫn bằng tiếng Việt nói tự nhiên.",
+    "es": "Eres un guionista de videos cortos. Escribe la narración en español hablado y natural.",
 }
 
+# Anti-"AI-tell" rules applied to EVERY generation (script, titles, descriptions — and therefore
+# subtitles, which are the narration verbatim). The goal is natural spoken language, not deception:
+# operators must still follow platform synthetic-content disclosure rules (see RUNBOOK).
+NATURAL_STYLE_RULES = (
+    "Write exactly like a real person talking to camera, not like an essay or a listicle:\n"
+    "- Spoken register: contractions, short sentences mixed with long ones, natural filler where "
+    "it fits the persona. Read it aloud in your head — if it sounds like a blog post, rewrite it.\n"
+    "- Use local, everyday expressions of the target language/region; light humor when natural.\n"
+    "- NEVER use AI-typical phrasing: no 'let's dive in', 'in conclusion', 'delve', 'unleash', "
+    "'game-changer', no numbered-list cadence, no starting every sentence the same way.\n"
+    "- Titles and descriptions must sound like a real creator typed them on their phone — "
+    "specific and curious, not clickbait-formula. Tags stay plain.\n"
+    "- Stay in character 100% of the time, including in titles and descriptions."
+)
 
-def build_script_prompt(topic: str, language: str, total_episodes: int, episode: int) -> str:
-    return (
+
+def compose_system_prompt(
+    language: str,
+    *,
+    custom_system_prompt: str | None = None,
+    persona: str | None = None,
+    style_examples: str | None = None,
+    catchphrase_open: str | None = None,
+    catchphrase_close: str | None = None,
+) -> str:
+    """Assemble the full character sheet the model writes as. One place (DRY) so script, titles,
+    descriptions and (via narration) subtitles all speak with the same human voice."""
+    parts = [_SYSTEM_BY_LANG.get(language, _SYSTEM_BY_LANG["en"]), NATURAL_STYLE_RULES]
+    if persona:
+        parts.append(f"YOUR CHARACTER (stay in this persona everywhere):\n{persona}")
+    if style_examples:
+        parts.append(
+            "STYLE EXAMPLES — mimic the voice, rhythm and vocabulary of these samples "
+            f"(do not copy their content):\n{style_examples}"
+        )
+    if catchphrase_open or catchphrase_close:
+        cues = []
+        if catchphrase_open:
+            cues.append(f"The FIRST scene's narration must open with (or naturally weave in): "
+                        f"\"{catchphrase_open}\"")
+        if catchphrase_close:
+            cues.append(f"The LAST scene's narration must end with (or naturally weave in): "
+                        f"\"{catchphrase_close}\"")
+        parts.append("SIGNATURE CATCHPHRASES (fans recognise these):\n" + "\n".join(cues))
+    if custom_system_prompt:
+        parts.append(custom_system_prompt)
+    return "\n\n".join(parts)
+
+
+def build_script_prompt(
+    topic: str,
+    language: str,
+    total_episodes: int,
+    episode: int,
+    *,
+    continuity: str = "none",
+    previous_synopses: list[str] | None = None,
+) -> str:
+    base = (
         f"Create a vertical short-form video script for episode {episode} of {total_episodes} "
         f"in a series about: '{topic}'. Language: {language}. "
         "Produce 3-6 scenes; each scene has narration the voice will speak, an optional short "
         "on-screen caption hook, and 1-4 stock-footage keywords. Also produce exactly 3 distinct "
         "A/B metadata variations (variant A/B/C) each with a title (<=100 chars), a description, "
-        "and 5-15 tags. Keep it original and engaging."
+        "and 5-15 tags, all in the same persona/voice. Include a one-sentence 'synopsis' of this "
+        "episode's specific premise. Keep it original and engaging."
     )
+    prev = [s for s in (previous_synopses or []) if s]
+    if continuity == "no_repeat" and prev:
+        listing = "\n".join(f"- {s}" for s in prev)
+        base += (
+            "\n\nEPISODE MEMORY — these episodes already exist:\n" + listing +
+            "\nThis episode MUST have a clearly different premise, angle and details from ALL of "
+            "the above. Do not reuse their hooks or twists."
+        )
+    elif continuity == "serial" and prev:
+        listing = "\n".join(f"- Episode so far: {s}" for s in prev[-5:])
+        base += (
+            "\n\nSERIAL STORY — this is one continuing story:\n" + listing +
+            f"\nThe previous episode ended with: \"{prev[-1]}\". Continue DIRECTLY from there — "
+            "same characters, same world, advancing the plot. Open with a one-line hook that "
+            "reminds viewers where we left off."
+        )
+    return base
 
 
 def generate_script(
@@ -188,15 +271,29 @@ def generate_script(
     episode: int,
     api_key: str,
     custom_system_prompt: str | None = None,
+    persona: str | None = None,
+    style_examples: str | None = None,
+    catchphrase_open: str | None = None,
+    catchphrase_close: str | None = None,
+    continuity: str = "none",
+    previous_synopses: list[str] | None = None,
     model: str = DEFAULT_MODEL,
 ) -> VideoScript:
-    system = _SYSTEM_BY_LANG.get(language, _SYSTEM_BY_LANG["en"])
-    if custom_system_prompt:
-        system = f"{system}\n{custom_system_prompt}"
-    prompt = build_script_prompt(topic, language, total_episodes, episode)
+    system = compose_system_prompt(
+        language,
+        custom_system_prompt=custom_system_prompt,
+        persona=persona,
+        style_examples=style_examples,
+        catchphrase_open=catchphrase_open,
+        catchphrase_close=catchphrase_close,
+    )
+    prompt = build_script_prompt(
+        topic, language, total_episodes, episode,
+        continuity=continuity, previous_synopses=previous_synopses,
+    )
     return generate_structured(
         prompt=prompt, schema=VideoScript, api_key=api_key, system_prompt=system,
-        model=model, temperature=0.7,
+        model=model, temperature=0.85 if continuity != "none" else 0.7,
     )
 
 

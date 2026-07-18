@@ -234,12 +234,24 @@ def render_task(task_id: int) -> None:
     user = db.get(User, task.user_id)
     cfg = campaign.config_json or {}
     auto_publish = bool(cfg.get("auto_publish", True))
+    # With posting slots configured, auto mode renders ahead into the buffer and the scheduler
+    # publishes exactly one episode per slot (ADR-011). Without slots: publish right after render.
+    slot_scheduled = auto_publish and bool(cfg.get("posting_slots"))
 
     try:
         gemini_key, pexels_key = _resolve_keys(user)
         task.started_at = datetime.utcnow()
 
         _set_status(db, task, TaskStatus.AI_GENERATION, 5)
+        # Episode memory: prior synopses steer the model away from repeats (or continue the serial).
+        previous = [
+            s for (s,) in db.execute(
+                select(Task.synopsis)
+                .where(Task.campaign_id == campaign.id, Task.synopsis.isnot(None),
+                       Task.episode_number < task.episode_number)
+                .order_by(Task.episode_number)
+            ).all()
+        ][-15:]
         script = generate_script(
             topic=campaign.topic_name,
             language=cfg.get("language", "en"),
@@ -247,7 +259,16 @@ def render_task(task_id: int) -> None:
             episode=task.episode_number,
             api_key=gemini_key,
             custom_system_prompt=cfg.get("system_prompt"),
+            persona=cfg.get("persona"),
+            style_examples=cfg.get("style_examples"),
+            catchphrase_open=cfg.get("catchphrase_open"),
+            catchphrase_close=cfg.get("catchphrase_close"),
+            continuity=cfg.get("continuity", "none"),
+            previous_synopses=previous,
         )
+        if script.synopsis:
+            task.synopsis = script.synopsis[:300]
+            db.commit()
 
         _set_status(db, task, TaskStatus.RENDERING, 10)
         output_dir = os.path.join(settings.MEDIA_ROOT, "buffer", str(campaign.id))
@@ -286,13 +307,17 @@ def render_task(task_id: int) -> None:
         db.commit()
         db.refresh(buf)
 
-        if auto_publish:
-            _publish_buffer(db, task, buf, campaign, channel, user)
-        else:
+        if not auto_publish:
             task.finished_at = datetime.utcnow()
             _set_status(db, task, TaskStatus.AWAITING_REVIEW, 90)
             _notify(user, f"🎬 Episode {task.episode_number} of '{campaign.topic_name}' is rendered "
                           "and waiting for your review in the Asset Pool.")
+        elif slot_scheduled:
+            # Pre-rendered and parked; the scheduler publishes it at the next posting slot.
+            task.finished_at = datetime.utcnow()
+            _set_status(db, task, TaskStatus.SCHEDULED, 90)
+        else:
+            _publish_buffer(db, task, buf, campaign, channel, user)
 
         # Keep the render pipeline fed.
         hydrate_buffers(db)

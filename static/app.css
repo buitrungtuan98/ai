@@ -105,6 +105,7 @@ textarea { min-height: 88px; resize: vertical; }
 .pill.failed, .pill.FAILED { background: #ff6b6b22; color: var(--danger); }
 .pill.PENDING_QUEUE { background: #26304380; color: var(--muted); }
 .pill.AWAITING_REVIEW { background: #ffcf6b22; color: var(--warning); }
+.pill.SCHEDULED { background: #3ecf8e18; color: var(--success); }
 
 /* System health strip + attention banners */
 .health { display: flex; flex-wrap: wrap; gap: 18px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 18px; margin-bottom: 18px; font-size: 13px; color: var(--muted); }

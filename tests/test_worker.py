@@ -166,6 +166,78 @@ def test_review_mode_awaits_then_publishes(session, user, channel, monkeypatch, 
     assert not video_file.exists()  # cleaned up after publish
 
 
+def test_slot_scheduled_mode_parks_ready(session, user, channel, monkeypatch):
+    """Auto mode WITH posting slots renders into the buffer (SCHEDULED) — the scheduler publishes
+    at slot time, so a full buffer can never dump all episodes at once (ADR-011)."""
+    from database.models import BufferPoolItem, Campaign, Task
+    from database.types import BufferStatus, CampaignStatus, TaskStatus
+    from workers import video_worker
+
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="Daily", total_episodes=5,
+                   status=CampaignStatus.active,
+                   config_json={"language": "en", "auto_publish": True, "posting_slots": ["21:00"]})
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    t = Task(campaign_id=cam.id, user_id=user.id, episode_number=1)
+    session.add(t)
+    session.commit()
+    session.refresh(t)
+
+    monkeypatch.setattr(video_worker, "generate_script", lambda **k: _script())
+    monkeypatch.setattr(video_worker.video_factory, "produce", lambda **k: _result())
+    monkeypatch.setattr(video_worker, "_publish",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not publish at render time")))
+
+    video_worker.render_task(t.id)
+    session.refresh(t)
+    assert t.status == TaskStatus.SCHEDULED
+    buf = session.query(BufferPoolItem).filter_by(campaign_id=cam.id, episode_number=1).one()
+    assert buf.status == BufferStatus.ready
+
+
+def test_episode_memory_flows_into_prompt(session, user, channel, monkeypatch):
+    """The worker stores each episode's synopsis and feeds prior ones into the next generation."""
+    from database.models import Campaign, Task
+    from database.types import CampaignStatus
+    from workers import video_worker
+
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="Horror", total_episodes=9,
+                   status=CampaignStatus.active,
+                   config_json={"language": "vi", "continuity": "no_repeat",
+                                "persona": "Chú Ba miền Tây"})
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    t1 = Task(campaign_id=cam.id, user_id=user.id, episode_number=1, synopsis="Con ma chợ nổi")
+    t2 = Task(campaign_id=cam.id, user_id=user.id, episode_number=2, synopsis="Chiếc ghe không người lái")
+    t3 = Task(campaign_id=cam.id, user_id=user.id, episode_number=3)
+    session.add_all([t1, t2, t3])
+    session.commit()
+    session.refresh(t3)
+
+    captured = {}
+
+    def fake_generate(**kwargs):
+        captured.update(kwargs)
+        script = _script()
+        script.synopsis = "Căn nhà cuối xóm có tiếng ru"
+        return script
+
+    monkeypatch.setattr(video_worker, "generate_script", fake_generate)
+    monkeypatch.setattr(video_worker.video_factory, "produce", lambda **k: _result())
+    monkeypatch.setattr(video_worker, "_publish", lambda *a, **k: "vid-3")
+
+    video_worker.render_task(t3.id)
+    # Prior synopses reached the generator, in episode order, with persona + continuity mode.
+    assert captured["previous_synopses"] == ["Con ma chợ nổi", "Chiếc ghe không người lái"]
+    assert captured["continuity"] == "no_repeat"
+    assert captured["persona"] == "Chú Ba miền Tây"
+    # And this episode's synopsis was stored for the NEXT one.
+    session.refresh(t3)
+    assert t3.synopsis == "Căn nhà cuối xóm có tiếng ru"
+
+
 def test_hydrate_respects_campaign_buffer_size(session, user, channel):
     from database.models import Campaign, Task
     from database.types import CampaignStatus
