@@ -79,7 +79,7 @@ image prune). Your `.env` and the docker volumes (DB + media) are never touched.
 | Secret | Value |
 |---|---|
 | `SSH_HOST` | VPS public host/IP |
-| `SSH_PORT` | Your **non-default** SSH port (defaults to 22 if unset) |
+| `SSH_PORT` | Your **non-default** SSH port. May be a **Variable** (recommended — edit anytime, not sensitive) or a Secret; defaults to 22 if unset. |
 | `SSH_USER` | Login user (defaults to `ubuntu` if unset) |
 | `SSH_PRIVATE_KEY` | Private key whose public half is in the box's `~/.ssh/authorized_keys` |
 | `SSH_KNOWN_HOSTS` | Output of `ssh-keyscan -p <PORT> <HOST>` — pins the host key (recommended). If omitted, the workflow falls back to trust-on-first-use. |
@@ -88,6 +88,13 @@ image prune). Your `.env` and the docker volumes (DB + media) are never touched.
 **Deploy:** merge the feature branch into `main` (or run the workflow manually from the Actions
 tab via *Run workflow*). Watch progress in the Actions tab; the run fails loudly if the web
 container doesn't become healthy.
+
+**Changing the SSH port** (it varies on your VPS): the port resolves as
+*manual-run input → repo Variable `SSH_PORT` → Secret `SSH_PORT` → 22*. So you can:
+- edit the `SSH_PORT` **Variable** in Settings (no commit needed), or
+- pass a one-off `ssh_port` when you click *Run workflow*.
+The host key does **not** change when you change the port, so `SSH_KNOWN_HOSTS` usually stays valid
+(regenerate with `ssh-keyscan -p <newport> <host>` only if the box was rebuilt).
 
 **Rollback:** on the box, `cd ~/ai && git reset --hard <previous-good-sha> && bash scripts/deploy.sh`.
 
