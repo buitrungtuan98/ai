@@ -92,15 +92,17 @@ def advance_campaign(db, campaign: Campaign) -> AdvanceEvents:
     else:
         if campaign.status != CampaignStatus.active:
             campaign.status = CampaignStatus.active
-            db.commit()
+        db.commit()  # always persist the episode increment (not only on a status change)
     return events
 
 
 # ── Buffer hydration ─────────────────────────────────────────────────────────
 def hydrate_campaign(db, campaign: Campaign, *, buffer_size: int | None = None, enqueue=enqueue_render) -> list[int]:
     """Ensure ONE campaign has up to `buffer_size` upcoming (not-yet-finished) episodes queued.
-    Returns Task ids created. Idempotent — unique(campaign,episode) prevents duplicates."""
-    size = buffer_size or settings.DEFAULT_BUFFER_SIZE
+    Precedence: explicit arg > campaign config `buffer_size` > global default. Idempotent —
+    unique(campaign,episode) prevents duplicates. Returns Task ids created."""
+    cfg_size = (campaign.config_json or {}).get("buffer_size")
+    size = buffer_size or (int(cfg_size) if cfg_size else None) or settings.DEFAULT_BUFFER_SIZE
     created: list[int] = []
     # Query episode numbers directly (never via the cached `campaign.tasks` relationship, which can
     # be stale after we insert Tasks by campaign_id within the same session).
@@ -139,16 +141,23 @@ def hydrate_buffers(db, *, buffer_size: int | None = None, enqueue=enqueue_rende
 
 
 # ── Publishing / notification dispatch (lazy imports) ────────────────────────
-def _publish(channel: Channel, result: video_factory.RenderResult, user: User) -> str:
+def _publish(channel: Channel, video_path: str, metadata: dict, user: User) -> str:
     if channel.platform == Platform.youtube:
         from services import youtube_service
 
-        return youtube_service.upload_video(channel, result.master_path, result.metadata, user)
+        return youtube_service.upload_video(channel, video_path, metadata, user)
     if channel.platform == Platform.facebook:
         from services import facebook_service
 
-        return facebook_service.upload_video(channel, result.master_path, result.metadata)
+        return facebook_service.upload_video(channel, video_path, metadata)
     raise RuntimeError(f"Unknown platform: {channel.platform}")
+
+
+def published_url_for(platform: Platform, video_id: str) -> str:
+    """Human-clickable URL of a published video (shown in Task Logs)."""
+    if platform == Platform.youtube:
+        return f"https://www.youtube.com/shorts/{video_id}"
+    return f"https://www.facebook.com/{video_id}"
 
 
 def _notify(user: User, message: str) -> None:
@@ -173,9 +182,46 @@ def _safe_remove(*paths: str) -> None:
             logger.warning("Could not remove %s", p)
 
 
-# ── The job ──────────────────────────────────────────────────────────────────
+# ── Publish step (shared by auto mode and review-approval) ───────────────────
+def _publish_buffer(db, task: Task, buf: BufferPoolItem, campaign: Campaign,
+                    channel: Channel, user: User) -> str:
+    """Upload a buffered episode, record the outcome on the task, clean up, and advance the
+    campaign. Raises on failure (caller handles FAILED bookkeeping)."""
+    _set_status(db, task, TaskStatus.PUBLISHING, 92)
+    video_id = _publish(channel, buf.video_path, buf.metadata_json or {}, user)
+
+    task.published_video_id = video_id
+    task.published_url = published_url_for(channel.platform, video_id)
+    buf.status = BufferStatus.consumed
+    buf.consumed_at = datetime.utcnow()
+    db.commit()
+    _safe_remove(buf.video_path, buf.thumbnail_path)  # strict cleanup after publish
+
+    task.finished_at = datetime.utcnow()
+    _set_status(db, task, TaskStatus.COMPLETED, 100)
+    events = advance_campaign(db, campaign)
+    _notify(user, f"✅ Episode {task.episode_number} of '{campaign.topic_name}' published: {task.published_url}")
+    if events.completed:
+        _notify(user, f"🎉 Campaign '{campaign.topic_name}' Finished!")
+    if events.activated_campaign_id:
+        _notify(user, f"▶️ Next campaign #{events.activated_campaign_id} activated.")
+    return video_id
+
+
+def _fail_task(db, task: Task, user: User, campaign: Campaign, exc: Exception, job: str) -> None:
+    db.rollback()
+    task.status = TaskStatus.FAILED
+    task.finished_at = datetime.utcnow()
+    task.error_message = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-4000:]
+    db.commit()
+    logger.exception("%s for task %s failed", job, task.id)
+    _notify(user, f"❌ Episode {task.episode_number} of '{campaign.topic_name}' failed: {exc}")
+
+
+# ── The jobs ─────────────────────────────────────────────────────────────────
 @with_render_lock
 def render_task(task_id: int) -> None:
+    """Render one episode into the buffer pool; auto-publish or park for review per campaign."""
     db = SessionLocal()
     task = db.get(Task, task_id)
     if task is None:
@@ -187,9 +233,11 @@ def render_task(task_id: int) -> None:
     channel = db.get(Channel, campaign.channel_id)
     user = db.get(User, task.user_id)
     cfg = campaign.config_json or {}
+    auto_publish = bool(cfg.get("auto_publish", True))
 
     try:
         gemini_key, pexels_key = _resolve_keys(user)
+        task.started_at = datetime.utcnow()
 
         _set_status(db, task, TaskStatus.AI_GENERATION, 5)
         script = generate_script(
@@ -212,11 +260,19 @@ def render_task(task_id: int) -> None:
             voice=cfg.get("voice"),
             rate_pct=int(cfg.get("rate_pct", 0)),
             branding=_branding_from_config(cfg),
+            subtitle_style=cfg.get("subtitle_style", "word"),
+            music_path=cfg.get("music_path") or None,
+            music_volume=float(cfg.get("music_volume", 0.15)),
+            ab_testing=bool(cfg.get("ab_testing", True)),
             on_progress=lambda p: set_progress(task_id, 10 + p * 0.8),
         )
         _set_status(db, task, TaskStatus.AUDIO_SYNCED, 88)
 
-        # Park the pre-rendered episode in the buffer pool (durable record).
+        # Carry distribution settings into the stored metadata so the publish step (now or after
+        # review) has everything it needs.
+        result.metadata.setdefault("cta", cfg.get("cta"))
+        result.metadata.setdefault("privacy", cfg.get("privacy", "public"))
+
         buf = BufferPoolItem(
             campaign_id=campaign.id,
             channel_id=channel.id,
@@ -224,41 +280,56 @@ def render_task(task_id: int) -> None:
             video_path=result.master_path,
             thumbnail_path=result.thumbnail_path,
             metadata_json=result.metadata,
-            status=BufferStatus.ready,
+            status=BufferStatus.ready if auto_publish else BufferStatus.awaiting_review,
         )
         db.add(buf)
         db.commit()
         db.refresh(buf)
 
-        _set_status(db, task, TaskStatus.PUBLISHING, 92)
-        # Carry campaign-level distribution settings into the publish metadata.
-        result.metadata.setdefault("cta", cfg.get("cta"))
-        result.metadata.setdefault("privacy", cfg.get("privacy", "public"))
-        video_id = _publish(channel, result, user)
-
-        buf.status = BufferStatus.consumed
-        buf.consumed_at = datetime.utcnow()
-        db.commit()
-        _safe_remove(result.master_path, result.thumbnail_path)  # strict cleanup after publish
-
-        _set_status(db, task, TaskStatus.COMPLETED, 100)
-        events = advance_campaign(db, campaign)
-        _notify(user, f"✅ Episode {task.episode_number} of '{campaign.topic_name}' published ({video_id}).")
-        if events.completed:
-            _notify(user, f"🎉 Campaign '{campaign.topic_name}' Finished!")
-        if events.activated_campaign_id:
-            _notify(user, f"▶️ Next campaign #{events.activated_campaign_id} activated.")
+        if auto_publish:
+            _publish_buffer(db, task, buf, campaign, channel, user)
+        else:
+            task.finished_at = datetime.utcnow()
+            _set_status(db, task, TaskStatus.AWAITING_REVIEW, 90)
+            _notify(user, f"🎬 Episode {task.episode_number} of '{campaign.topic_name}' is rendered "
+                          "and waiting for your review in the Asset Pool.")
 
         # Keep the render pipeline fed.
         hydrate_buffers(db)
 
     except Exception as exc:  # noqa: BLE001 — record, alert, and continue the queue
-        db.rollback()
-        task.status = TaskStatus.FAILED
-        task.error_message = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-4000:]
-        db.commit()
-        logger.exception("render_task %s failed", task_id)
-        _notify(user, f"❌ Episode {task.episode_number} of '{campaign.topic_name}' failed: {exc}")
+        _fail_task(db, task, user, campaign, exc, "render_task")
     finally:
         clear_progress(task_id)
+        db.close()
+
+
+def publish_task(buffer_item_id: int) -> None:
+    """Publish an approved (or retried) buffered episode. Network-bound — no render lock needed."""
+    db = SessionLocal()
+    buf = db.get(BufferPoolItem, buffer_item_id)
+    if buf is None:
+        logger.error("publish_task: no BufferPoolItem %s", buffer_item_id)
+        db.close()
+        return
+    campaign = db.get(Campaign, buf.campaign_id)
+    channel = db.get(Channel, buf.channel_id)
+    user = db.get(User, campaign.user_id)
+    task = db.scalar(
+        select(Task).where(Task.campaign_id == buf.campaign_id,
+                           Task.episode_number == buf.episode_number)
+    )
+    if task is None:
+        logger.error("publish_task: no Task for buffer %s", buffer_item_id)
+        db.close()
+        return
+    try:
+        _publish_buffer(db, task, buf, campaign, channel, user)
+    except Exception as exc:  # noqa: BLE001
+        _fail_task(db, task, user, campaign, exc, "publish_task")  # rolls back first
+        # Keep the file + buffer row so the operator can retry the upload without re-rendering.
+        buf.status = BufferStatus.awaiting_review
+        db.commit()
+    finally:
+        clear_progress(task.id)
         db.close()

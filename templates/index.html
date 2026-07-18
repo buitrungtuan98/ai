@@ -9,11 +9,38 @@
   <a class="btn" href="/campaigns/new">+ New Campaign</a>
 </div>
 
+{# ── System health strip ─────────────────────────────────────────────────── #}
+<div class="health">
+  <span class="hitem"><span class="dot2 {{ 'ok' if health.worker else 'bad' }}"></span>
+    Worker {{ 'running' if health.worker else 'stopped' }}</span>
+  <span class="hitem"><span class="dot2 {{ 'ok' if health.redis else 'bad' }}"></span>
+    Redis {{ 'connected' if health.redis else 'down' }}</span>
+  <span class="hitem">Queue: <b>{{ health.queue_depth if health.queue_depth is not none else '—' }}</b> waiting</span>
+  <span class="hitem">Buffer: <b>{{ health.buffer_ready }}</b> pre-rendered</span>
+  <span class="hitem {{ 'warn' if health.disk_pct and health.disk_pct >= 85 }}">
+    Disk: <b>{{ health.disk_pct ~ '%' if health.disk_pct is not none else '—' }}</b> used</span>
+</div>
+
+{% if counts.failed > 0 %}
+<div class="banner danger">
+  ⚠ {{ counts.failed }} task{{ 's' if counts.failed > 1 }} failed and need{{ '' if counts.failed > 1 else 's' }} attention.
+  <a href="/tasks">Review &amp; retry →</a>
+</div>
+{% endif %}
+{% if counts.awaiting_review > 0 %}
+<div class="banner info">
+  🎬 {{ counts.awaiting_review }} video{{ 's' if counts.awaiting_review > 1 }} waiting for your review.
+  <a href="/assets">Preview &amp; approve →</a>
+</div>
+{% endif %}
+
 <div class="stats">
   <div class="stat"><div class="n">{{ channels|length }}</div><div class="l">Connected channels</div></div>
   <div class="stat"><div class="n">{{ campaigns|selectattr('status.value','equalto','active')|list|length }}</div><div class="l">Active campaigns</div></div>
-  <div class="stat"><div class="n">{{ campaigns|length }}</div><div class="l">Total campaigns</div></div>
-  <div class="stat"><div class="n">{{ tasks|selectattr('status.value','equalto','COMPLETED')|list|length }}</div><div class="l">Recent completed</div></div>
+  <div class="stat"><div class="n">{{ counts.published }}</div><div class="l">Videos published</div></div>
+  <div class="stat"><div class="n">{{ counts.working }}</div><div class="l">In pipeline</div></div>
+  <div class="stat"><div class="n">{{ counts.awaiting_review }}</div><div class="l">Awaiting review</div></div>
+  <div class="stat"><div class="n">{{ counts.failed }}</div><div class="l">Failed</div></div>
 </div>
 
 <div class="card">
@@ -23,20 +50,29 @@
   </div>
   {% if tasks %}
   <table class="mt">
-    <thead><tr><th>Task</th><th>Episode</th><th>Status</th><th>Progress</th></tr></thead>
+    <thead><tr><th>Task</th><th>Episode</th><th>Status</th><th>Progress</th><th>Result</th></tr></thead>
     <tbody>
       {% for t in tasks %}
+      {% set camp = camp_by_id.get(t.campaign_id) %}
+      {% set chan = chan_by_id.get(camp.channel_id) if camp else none %}
       <tr>
         <td>#{{ t.id }}</td>
-        <td>C{{ t.campaign_id }} · Ep {{ t.episode_number }}</td>
+        <td>{{ camp.topic_name if camp else 'C' ~ t.campaign_id }} · Ep {{ t.episode_number }}
+            <div class="meta">{{ chan.channel_name if chan else '' }}</div></td>
         <td><span class="pill {{ t.status.value }}">{{ t.status.value.replace('_',' ').title() }}</span></td>
         <td><div class="progress"><span style="width: {{ t.progress_pct }}%"></span></div></td>
+        <td>{% if t.published_url %}<a href="{{ t.published_url }}" target="_blank" rel="noopener">View ↗</a>{% endif %}</td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
   {% else %}
-  <div class="empty mt">No activity yet. Connect a channel and start a campaign.</div>
+  <div class="empty mt">
+    <p><b>Get started in 3 steps:</b></p>
+    <p>1. <a href="/channels">Connect a channel</a> {{ '✓' if channels }}<br>
+       2. <a href="/credentials">Add your API keys</a> {{ '✓' if user.gemini_api_key and user.pexels_api_key }}<br>
+       3. <a href="/campaigns/new">Create &amp; start a campaign</a></p>
+  </div>
   {% endif %}
 </div>
 {% endblock %}

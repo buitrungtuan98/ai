@@ -45,6 +45,18 @@ def enqueue_render(task_id: int) -> str:
     return job.id
 
 
+def enqueue_publish(buffer_item_id: int) -> str:
+    """Enqueue a publish (upload) job for an approved buffer item. Same queue/worker, so uploads
+    stay sequential with renders (KISS on one box); a short upload never blocks for long."""
+    job = render_queue.enqueue(
+        "workers.video_worker.publish_task",
+        buffer_item_id,
+        job_timeout=1800,
+        result_ttl=3600,
+    )
+    return job.id
+
+
 def with_render_lock(fn: Callable) -> Callable:
     """Ensure at most one render runs cluster-wide. The lock has a TTL so a crashed worker can't
     wedge the queue forever."""

@@ -56,8 +56,39 @@ SessionLocal = sessionmaker(
 
 
 def init_db() -> None:
-    """Create all tables if they don't exist. Safe to call at startup (idempotent)."""
+    """Create all tables if they don't exist, then apply additive column upgrades.
+    Safe to call at startup (idempotent)."""
     Base.metadata.create_all(bind=engine)
+    _ensure_added_columns()
+
+
+# Columns added after the initial schema shipped. `create_all` never ALTERs existing tables, so a
+# pre-existing .db needs these applied once. Additive-only (SQLite ADD COLUMN); a real migration
+# tool (Alembic) becomes worthwhile only when a destructive change is ever needed (YAGNI for now).
+_COLUMN_UPGRADES: dict[str, dict[str, str]] = {
+    "tasks": {
+        "started_at": "DATETIME",
+        "finished_at": "DATETIME",
+        "retry_count": "INTEGER DEFAULT 0",
+        "published_video_id": "VARCHAR(128)",
+        "published_url": "VARCHAR(512)",
+    },
+}
+
+
+def _ensure_added_columns() -> None:
+    if not _is_sqlite:
+        return
+    with engine.begin() as conn:
+        for table, columns in _COLUMN_UPGRADES.items():
+            existing = {
+                row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()
+            }
+            if not existing:  # table doesn't exist yet (fresh DB handled by create_all)
+                continue
+            for name, ddl in columns.items():
+                if name not in existing:
+                    conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
 
 def get_db() -> Iterator[Session]:

@@ -59,3 +59,178 @@ def test_create_and_start_campaign_queues(client):
 
 def test_ownership_guard_404(client):
     assert client.post("/campaigns/99999/delete", follow_redirects=False).status_code == 404
+
+
+def _seed_campaign(client):
+    from database.db_session import SessionLocal
+    from database.models import Campaign, Channel
+
+    client.post("/channels/facebook", data={"channel_name": "P", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    db = SessionLocal()
+    cid = db.query(Channel).first().id
+    db.close()
+    client.post("/campaigns", data={"topic_name": "Space", "channel_id": str(cid), "total_episodes": "5",
+                                    "language": "en", "publish_mode": "review", "privacy": "unlisted",
+                                    "buffer_size": "2", "watermark_path": "/data/logo.png",
+                                    "tint_opacity": "0.1", "tint_color": "#1e90ff"},
+                follow_redirects=False)
+    db = SessionLocal()
+    cam = db.query(Campaign).first()
+    db.close()
+    return cam
+
+
+def test_campaign_config_persists_all_settings(client):
+    cam = _seed_campaign(client)
+    cfg = cam.config_json
+    assert cfg["auto_publish"] is False          # review mode
+    assert cfg["privacy"] == "unlisted"
+    assert cfg["buffer_size"] == 2
+    assert cfg["branding"]["watermark_path"] == "/data/logo.png"
+    assert cfg["branding"]["tint_opacity"] == 0.1
+
+
+def test_edit_campaign(client):
+    cam = _seed_campaign(client)
+    r = client.get(f"/campaigns/{cam.id}/edit")
+    assert r.status_code == 200 and "Edit Campaign" in r.text and "Space" in r.text
+
+    r = client.post(f"/campaigns/{cam.id}/edit",
+                    data={"topic_name": "Deep Space", "channel_id": str(cam.channel_id),
+                          "total_episodes": "8", "language": "vi", "publish_mode": "auto",
+                          "privacy": "public"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    from database.db_session import SessionLocal
+    from database.models import Campaign
+
+    db = SessionLocal()
+    cam2 = db.get(Campaign, cam.id)
+    assert cam2.topic_name == "Deep Space" and cam2.total_episodes == 8
+    assert cam2.config_json["language"] == "vi" and cam2.config_json["auto_publish"] is True
+    db.close()
+
+
+def test_retry_route(client):
+    from database.db_session import SessionLocal
+    from database.models import Task
+    from database.types import TaskStatus
+
+    cam = _seed_campaign(client)
+    db = SessionLocal()
+    t = Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=1,
+             status=TaskStatus.FAILED, error_message="boom")
+    db.add(t)
+    db.commit()
+    db.refresh(t)
+    db.close()
+
+    r = client.post(f"/api/tasks/{t.id}/retry")
+    assert r.status_code == 200 and r.json()["ok"] is True and r.json()["mode"] == "render"
+
+    db = SessionLocal()
+    t2 = db.get(Task, t.id)
+    assert t2.status == TaskStatus.PENDING_QUEUE and t2.retry_count == 1 and t2.error_message is None
+    db.close()
+
+    # non-failed tasks can't be retried; foreign/missing ids 404
+    assert client.post(f"/api/tasks/{t.id}/retry").status_code == 400
+    assert client.post("/api/tasks/99999/retry").status_code == 404
+
+
+def test_asset_review_flow(client, tmp_path):
+    from database.db_session import SessionLocal
+    from database.models import BufferPoolItem, Task
+    from database.types import BufferStatus, TaskStatus
+
+    cam = _seed_campaign(client)
+    video = tmp_path / "ep1.mp4"
+    video.write_bytes(b"0123456789abcdef")
+
+    db = SessionLocal()
+    t = Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=1,
+             status=TaskStatus.AWAITING_REVIEW)
+    buf = BufferPoolItem(campaign_id=cam.id, channel_id=cam.channel_id, episode_number=1,
+                         video_path=str(video), status=BufferStatus.awaiting_review,
+                         metadata_json={"title": "T"})
+    db.add_all([t, buf])
+    db.commit()
+    db.refresh(buf)
+    db.close()
+
+    # Assets page shows the review card with a player.
+    page = client.get("/assets")
+    assert page.status_code == 200 and "Approve" in page.text and f"/assets/{buf.id}/video" in page.text
+
+    # Streaming: full body and a byte range.
+    full = client.get(f"/assets/{buf.id}/video")
+    assert full.status_code == 200 and full.content == b"0123456789abcdef"
+    part = client.get(f"/assets/{buf.id}/video", headers={"Range": "bytes=4-7"})
+    assert part.status_code == 206 and part.content == b"4567"
+    assert part.headers["content-range"] == "bytes 4-7/16"
+
+    # Approve → publish job enqueued (fakeredis), task queued.
+    r = client.post(f"/assets/{buf.id}/approve", follow_redirects=False)
+    assert r.status_code == 303
+    from workers import task_queue
+
+    assert len(task_queue.render_queue) == 1
+
+    # Reject path: reset to awaiting_review and reject → file removed, task failed.
+    db = SessionLocal()
+    b2 = db.get(BufferPoolItem, buf.id)
+    b2.status = BufferStatus.awaiting_review
+    db.commit()
+    db.close()
+    r = client.post(f"/assets/{buf.id}/reject", follow_redirects=False)
+    assert r.status_code == 303 and not video.exists()
+    db = SessionLocal()
+    assert db.get(BufferPoolItem, buf.id).status == BufferStatus.rejected
+    t2 = db.query(Task).filter_by(campaign_id=cam.id, episode_number=1).one()
+    assert t2.status == TaskStatus.FAILED and "Rejected" in t2.error_message
+    db.close()
+
+
+def test_asset_stream_404s(client, tmp_path):
+    # Missing item and missing file both 404 (never leak paths).
+    assert client.get("/assets/424242/video").status_code == 404
+
+
+def test_credentials_test_endpoint(client, monkeypatch):
+    from services import verification
+
+    client.post("/credentials", data={"gemini_api_key": "k"}, follow_redirects=False)
+    monkeypatch.setattr(verification, "verify_gemini", lambda key: (True, "Gemini key is valid."))
+    r = client.post("/credentials/test/gemini")
+    assert r.status_code == 200 and r.json() == {"ok": True, "detail": "Gemini key is valid."}
+    # No pexels key saved and no env fallback → clean failure message.
+    from core.config import settings
+
+    monkeypatch.setattr(settings, "PEXELS_API_KEY", None)
+    r = client.post("/credentials/test/pexels")
+    assert r.status_code == 200 and r.json()["ok"] is False
+    assert client.post("/credentials/test/unknown").status_code == 404
+
+
+def test_api_tasks_returns_names_and_transparency_fields(client):
+    from database.db_session import SessionLocal
+    from database.models import Task
+    from database.types import TaskStatus
+    from datetime import datetime
+
+    cam = _seed_campaign(client)
+    db = SessionLocal()
+    t = Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=1,
+             status=TaskStatus.COMPLETED, progress_pct=100,
+             published_url="https://www.youtube.com/shorts/x1",
+             started_at=datetime(2026, 7, 18, 10, 0, 0),
+             finished_at=datetime(2026, 7, 18, 10, 12, 30))
+    db.add(t)
+    db.commit()
+    db.close()
+
+    data = client.get("/api/tasks").json()["tasks"][0]
+    assert data["topic"] == "Space" and data["channel"] == "P"
+    assert data["published_url"].endswith("/x1")
+    assert data["duration_s"] == 750 and data["can_retry"] is False

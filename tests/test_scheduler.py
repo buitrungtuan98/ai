@@ -14,6 +14,19 @@ def test_is_within_slot():
     assert sch.is_within_slot(["23:50"], datetime(2026, 7, 17, 0, 5), 30) is True  # midnight wrap
 
 
+def test_local_now_uses_configured_timezone(monkeypatch):
+    from core.config import settings
+    from workers import scheduler as sch
+
+    monkeypatch.setattr(settings, "TIMEZONE", "Asia/Ho_Chi_Minh")
+    now = sch.local_now()
+    assert now.tzinfo is not None and now.utcoffset().total_seconds() == 7 * 3600  # ICT = UTC+7
+
+    # An invalid timezone degrades to UTC instead of killing the scheduler.
+    monkeypatch.setattr(settings, "TIMEZONE", "Not/AZone")
+    assert sch.local_now() is not None
+
+
 def test_periodic_tick_slot_gating(session, user, channel):
     from database.models import Campaign, Task
     from database.types import CampaignStatus

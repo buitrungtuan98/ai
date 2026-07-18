@@ -17,6 +17,7 @@ import shutil
 import threading
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
@@ -28,6 +29,16 @@ from database.types import BufferStatus, CampaignStatus
 from workers import video_worker
 
 logger = logging.getLogger(__name__)
+
+
+def local_now() -> datetime:
+    """Now in the operator's configured timezone — posting slots are interpreted in it, so a user
+    in Asia/Ho_Chi_Minh who types 09:00 gets a 09:00 local post, not 09:00 UTC."""
+    try:
+        return datetime.now(ZoneInfo(settings.TIMEZONE))
+    except Exception:  # noqa: BLE001 — a bad TIMEZONE value must not kill the scheduler
+        logger.warning("Invalid TIMEZONE %r — falling back to UTC", settings.TIMEZONE)
+        return datetime.utcnow()
 
 
 def is_within_slot(slots: list[str], now: datetime, tolerance_min: int | None = None) -> bool:
@@ -83,8 +94,9 @@ def disk_usage_pct(path: str) -> float:
 
 
 def periodic_tick(db=None, now: datetime | None = None) -> dict:
-    """One automation cycle. Returns a small summary dict (handy for tests/logging)."""
-    now = now or datetime.utcnow()
+    """One automation cycle. `now` (local time) drives the posting-slot check; buffer expiry uses
+    UTC internally to match DB timestamps. Returns a small summary dict."""
+    now = now or local_now()
     own_session = db is None
     db = db or SessionLocal()
     summary = {"swept": 0, "expired": 0, "hydrated": []}
@@ -94,7 +106,7 @@ def periodic_tick(db=None, now: datetime | None = None) -> dict:
         if disk_usage_pct(settings.MEDIA_ROOT) >= settings.DISK_PRESSURE_PCT:
             logger.warning("Disk pressure high on %s — sweeping aggressively", settings.MEDIA_ROOT)
             summary["swept"] += sweep_orphans(max_age_minutes=5)
-        summary["expired"] = expire_stale_buffers(db, now=now)
+        summary["expired"] = expire_stale_buffers(db)
 
         # Slot-gated buffer hydration.
         campaigns = db.scalars(select(Campaign).where(Campaign.status == CampaignStatus.active)).all()

@@ -87,16 +87,42 @@ def _ass_escape(text: str) -> str:
     return text.replace("\n", " ").replace("{", "(").replace("}", ")")
 
 
+# Line-style grouping: break a line when it grows past this many characters or the narration
+# pauses longer than this gap (a natural phrase boundary).
+LINE_MAX_CHARS = 28
+LINE_BREAK_GAP_S = 0.6
+
+
+def group_words_into_lines(timings: list[WordTiming]) -> list[WordTiming]:
+    """Merge word timings into phrase-level timings for the "line" subtitle style."""
+    lines: list[WordTiming] = []
+    buf: list[WordTiming] = []
+    for wt in timings:
+        if buf:
+            too_long = len(" ".join(w.text for w in buf) + " " + wt.text) > LINE_MAX_CHARS
+            long_pause = wt.start - buf[-1].end > LINE_BREAK_GAP_S
+            if too_long or long_pause:
+                lines.append(WordTiming(" ".join(w.text for w in buf), buf[0].start, buf[-1].end))
+                buf = []
+        buf.append(wt)
+    if buf:
+        lines.append(WordTiming(" ".join(w.text for w in buf), buf[0].start, buf[-1].end))
+    return lines
+
+
 def build_ass(
     timings: list[WordTiming],
     out_path: str,
     *,
     clip_duration: float | None = None,
+    style: str = "word",  # "word" = one caption per word; "line" = phrase-level captions
     font_px: int = DEFAULT_FONT_PX,
     primary_colour: str = "&H00FFFFFF",  # white (AABBGGRR)
     font_name: str = "DejaVu Sans",
 ) -> str:
-    """Write an ASS file with one Dialogue per word, timed to the narration."""
+    """Write an ASS file with one Dialogue per word (or per phrase in "line" style)."""
+    if style == "line":
+        timings = group_words_into_lines(timings)
     usable = VIDEO_W - 2 * MARGIN_PX
     header = f"""[Script Info]
 ScriptType: v4.00+

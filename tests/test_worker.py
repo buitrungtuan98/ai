@@ -83,12 +83,17 @@ def test_render_task_full_flow_and_failure(session, user, channel, monkeypatch):
     monkeypatch.setattr(video_worker, "generate_script", lambda **k: _script())
     monkeypatch.setattr(video_worker.video_factory, "produce", lambda **k: _result())
     published = []
-    monkeypatch.setattr(video_worker, "_publish", lambda channel, result, user: published.append(1) or "vid-1")
+    monkeypatch.setattr(video_worker, "_publish",
+                        lambda channel, video_path, metadata, user: published.append(1) or "vid-1")
 
     video_worker.render_task(t.id)
     session.refresh(t)
     session.refresh(cam)
     assert t.status == TaskStatus.COMPLETED and t.progress_pct == 100 and published
+    # Transparency: published link + timing recorded on the task.
+    assert t.published_video_id == "vid-1"
+    assert t.published_url and "vid-1" in t.published_url
+    assert t.started_at is not None and t.finished_at is not None
     buf = session.query(BufferPoolItem).filter_by(campaign_id=cam.id, episode_number=1).one()
     assert buf.status == BufferStatus.consumed and cam.current_episode == 1
 
@@ -107,3 +112,70 @@ def test_render_task_full_flow_and_failure(session, user, channel, monkeypatch):
     video_worker.render_task(t2.id)
     session.refresh(t2)
     assert t2.status == TaskStatus.FAILED and "upload exploded" in (t2.error_message or "")
+
+
+def test_review_mode_awaits_then_publishes(session, user, channel, monkeypatch, tmp_path):
+    """auto_publish=False parks the render for review; publish_task completes it after approval."""
+    from database.models import BufferPoolItem, Campaign, Task
+    from database.types import BufferStatus, CampaignStatus, TaskStatus
+    from workers import video_worker
+
+    video_file = tmp_path / "m.mp4"
+    video_file.write_bytes(b"fake-video")
+
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="Review Me",
+                   current_episode=0, total_episodes=2, status=CampaignStatus.active,
+                   config_json={"language": "en", "auto_publish": False})
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    t = Task(campaign_id=cam.id, user_id=user.id, episode_number=1)
+    session.add(t)
+    session.commit()
+    session.refresh(t)
+
+    from core.video_factory import RenderResult
+
+    monkeypatch.setattr(video_worker, "generate_script", lambda **k: _script())
+    monkeypatch.setattr(
+        video_worker.video_factory, "produce",
+        lambda **k: RenderResult(master_path=str(video_file), thumbnail_path="/no/t.jpg",
+                                 metadata={"title": "TA", "variant": "A"}, duration=10.0, scene_count=3),
+    )
+    published = []
+    monkeypatch.setattr(video_worker, "_publish",
+                        lambda channel, video_path, metadata, user: published.append(video_path) or "vid-9")
+
+    # Render: must STOP at review, not publish.
+    video_worker.render_task(t.id)
+    session.refresh(t)
+    session.refresh(cam)
+    assert t.status == TaskStatus.AWAITING_REVIEW and not published
+    assert cam.current_episode == 0  # not advanced until actually published
+    buf = session.query(BufferPoolItem).filter_by(campaign_id=cam.id, episode_number=1).one()
+    assert buf.status == BufferStatus.awaiting_review and video_file.exists()
+
+    # Approval path: publish_task uploads, completes, advances.
+    video_worker.publish_task(buf.id)
+    session.refresh(t)
+    session.refresh(buf)
+    session.refresh(cam)
+    assert published == [str(video_file)]
+    assert t.status == TaskStatus.COMPLETED and t.published_video_id == "vid-9"
+    assert buf.status == BufferStatus.consumed and cam.current_episode == 1
+    assert not video_file.exists()  # cleaned up after publish
+
+
+def test_hydrate_respects_campaign_buffer_size(session, user, channel):
+    from database.models import Campaign, Task
+    from database.types import CampaignStatus
+    from workers import video_worker
+
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="A", total_episodes=10,
+                   status=CampaignStatus.active, config_json={"buffer_size": 5})
+    session.add(cam)
+    session.commit()
+
+    created = video_worker.hydrate_buffers(session, enqueue=lambda t: f"j{t}")
+    assert len(created) == 5  # per-campaign size wins over the global default (3)
+    assert sorted(t.episode_number for t in session.query(Task).all()) == [1, 2, 3, 4, 5]

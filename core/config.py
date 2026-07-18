@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     ORPHAN_MAX_AGE_MINUTES: int = 60
 
     # --- Scheduler / automation tick ---
+    TIMEZONE: str = "UTC"                   # IANA name (e.g. Asia/Ho_Chi_Minh); posting slots use it
     SCHEDULER_INTERVAL_SECONDS: int = 3600  # hourly buffer-hydration + housekeeping
     SLOT_TOLERANCE_MINUTES: int = 30        # how close to a posting slot counts as "now"
     BUFFER_MAX_AGE_HOURS: int = 72          # expire pre-rendered buffer items older than this

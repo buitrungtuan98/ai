@@ -55,6 +55,21 @@ The `FERNET_KEY` used when the data was encrypted must match, or encrypted colum
 - **GITHUB_PAT**: issue a new fine-grained PAT (single backup repo, `contents:write`, with expiry),
   update `.env`, done. The old one can be revoked immediately.
 
+## Review mode (preview before publish)
+Set a campaign's **Publishing mode** to *Review first*. Each rendered episode then waits in the
+**Asset Pool** with an in-browser player; nothing is uploaded until you click **Approve & publish**
+(Reject deletes the render — the episode can be re-rendered from Task Logs via Retry). You get a
+Telegram ping when an episode is ready for review. Review items do not auto-expire; published items
+have their local files cleaned up immediately.
+
+## Retrying failed episodes
+Task Logs shows every failure with its full error. **Retry** re-runs the episode; if the rendered
+file still exists (upload failed / was awaiting review) only the upload is retried — no re-render.
+
+## Posting-slot timezone
+Slots (e.g. `09:00, 18:30`) are interpreted in `TIMEZONE` from `.env` (IANA name, e.g.
+`Asia/Ho_Chi_Minh`; default UTC). Set it before relying on scheduled posting times.
+
 ## Disk pressure (200 GB SSD)
 - Check: `df -h /data` and `du -sh /data/media/*`.
 - The worker removes each job workspace on completion/error; `sweep_orphans` clears anything > 60 min.

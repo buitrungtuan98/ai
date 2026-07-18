@@ -104,6 +104,23 @@ textarea { min-height: 88px; resize: vertical; }
 .pill.completed, .pill.COMPLETED { background: #3ecf8e22; color: var(--success); }
 .pill.failed, .pill.FAILED { background: #ff6b6b22; color: var(--danger); }
 .pill.PENDING_QUEUE { background: #26304380; color: var(--muted); }
+.pill.AWAITING_REVIEW { background: #ffcf6b22; color: var(--warning); }
+
+/* System health strip + attention banners */
+.health { display: flex; flex-wrap: wrap; gap: 18px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 18px; margin-bottom: 18px; font-size: 13px; color: var(--muted); }
+.health b { color: var(--text); }
+.hitem { display: inline-flex; align-items: center; gap: 7px; }
+.hitem.warn b { color: var(--warning); }
+.dot2 { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+.dot2.ok { background: var(--success); box-shadow: 0 0 8px var(--success); }
+.dot2.bad { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
+.banner { border-radius: var(--radius); padding: 12px 18px; margin-bottom: 14px; font-size: 14px; border: 1px solid; }
+.banner a { font-weight: 600; margin-left: 6px; }
+.banner.danger { background: #ff6b6b14; border-color: #ff6b6b40; color: var(--danger); }
+.banner.info { background: #ffcf6b14; border-color: #ffcf6b40; color: var(--warning); }
+
+/* Asset preview player */
+video.preview { width: 100%; max-height: 340px; border-radius: 10px; background: #000; margin-top: 12px; }
 
 /* Task log table */
 table { width: 100%; border-collapse: collapse; }

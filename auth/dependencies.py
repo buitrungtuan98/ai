@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from auth import firebase
 from core.config import settings
 from database.db_session import get_db
-from database.models import Campaign, Channel, User
+from database.models import BufferPoolItem, Campaign, Channel, User
 
 SOLO_UID = "solo-admin"
 
@@ -93,5 +93,21 @@ def get_owned_channel(
     return channel
 
 
+def get_owned_buffer_item(
+    item_id: int,
+    user: CurrentUser,
+    db: DbDep,
+) -> BufferPoolItem:
+    """Resolve a buffer-pool item whose campaign the current user owns, or 404."""
+    item = db.get(BufferPoolItem, item_id)
+    if item is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Asset not found")
+    campaign = db.get(Campaign, item.campaign_id)
+    if campaign is None or campaign.user_id != user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Asset not found")
+    return item
+
+
 OwnedCampaign = Annotated[Campaign, Depends(get_owned_campaign)]
 OwnedChannel = Annotated[Channel, Depends(get_owned_channel)]
+OwnedBufferItem = Annotated[BufferPoolItem, Depends(get_owned_buffer_item)]

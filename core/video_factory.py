@@ -132,14 +132,34 @@ def build_scene_args(
     return args
 
 
-def build_concat_args(list_file: str, out_path: str) -> list[str]:
-    """Concat demuxer with stream copy — zero re-encode."""
-    return ["-f", "concat", "-safe", "0", "-i", list_file, "-c", "copy", out_path]
+def build_concat_args(
+    list_file: str,
+    out_path: str,
+    music_path: str | None = None,
+    music_volume: float = 0.15,
+) -> list[str]:
+    """Concat demuxer with video stream copy. With background music, the music is looped, ducked
+    to `music_volume`, and mixed under the narration — audio-only re-encode, video still copied."""
+    if not music_path:
+        return ["-f", "concat", "-safe", "0", "-i", list_file, "-c", "copy", out_path]
+    return [
+        "-f", "concat", "-safe", "0", "-i", list_file,
+        "-stream_loop", "-1", "-i", music_path,
+        "-filter_complex",
+        f"[1:a]volume={music_volume:.2f}[m];"
+        "[0:a][m]amix=inputs=2:duration=first:dropout_transition=0[aout]",
+        "-map", "0:v", "-map", "[aout]",
+        "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-shortest",
+        out_path,
+    ]
 
 
-def pick_metadata(script: VideoScript, episode_number: int) -> dict:
-    """A/B rotation: cycle the 3 metadata variations across episodes."""
+def pick_metadata(script: VideoScript, episode_number: int, ab_testing: bool = True) -> dict:
+    """A/B rotation: cycle the 3 metadata variations across episodes. With A/B testing disabled,
+    variant A is always used."""
     variations = script.metadata_variations
+    if not ab_testing:
+        return variations[0].model_dump()
     chosen = variations[(max(episode_number, 1) - 1) % len(variations)]
     return chosen.model_dump()
 
@@ -155,6 +175,10 @@ def produce(
     voice: str | None = None,
     rate_pct: int = 0,
     branding: Branding | None = None,
+    subtitle_style: str = "word",
+    music_path: str | None = None,
+    music_volume: float = 0.15,
+    ab_testing: bool = True,
     extra_blacklist: set[str] | None = None,
     on_progress=None,
 ) -> RenderResult:
@@ -163,6 +187,9 @@ def produce(
     import os
 
     branding = branding or Branding()
+    if music_path and not os.path.exists(music_path):
+        # Explicit failure beats a silently music-less video (config-truth rule).
+        raise FileNotFoundError(f"Background music file not found: {music_path}")
     os.makedirs(output_dir, exist_ok=True)
     lang = script.language
     n_scenes = len(script.scenes)
@@ -206,7 +233,7 @@ def produce(
 
             # 4. Captions + scene render.
             ass_path = ws.path(f"scene_{si}.ass")
-            build_ass(timings, ass_path, clip_duration=d_i)
+            build_ass(timings, ass_path, clip_duration=d_i, style=subtitle_style)
             scene_out = ws.path(f"scene_{si}.mp4")
             args = build_scene_args(clip_paths, audio_path, ass_path, scene_out, d_i, branding)
             run_ffmpeg(
@@ -216,17 +243,17 @@ def produce(
             scene_files.append(scene_out)
             report("prep", (si + 1) / n_scenes * 100)
 
-        # 5. Stitch (no re-encode).
+        # 5. Stitch (video stream copy; audio-only re-encode when music is mixed in).
         list_file = ws.path("concat.txt")
         with open(list_file, "w", encoding="utf-8") as f:
             for sf in scene_files:
                 f.write(f"file '{sf}'\n")
         master = os.path.join(output_dir, f"episode_{episode_number}.mp4")
-        run_ffmpeg(build_concat_args(list_file, master))
+        run_ffmpeg(build_concat_args(list_file, master, music_path, music_volume))
         report("concat", 100)
 
         # 6. Thumbnail + metadata.
-        metadata = pick_metadata(script, episode_number)
+        metadata = pick_metadata(script, episode_number, ab_testing=ab_testing)
         thumb = os.path.join(output_dir, f"episode_{episode_number}.jpg")
         generate_thumbnail(master, thumb, metadata["title"],
                            logo_path=branding.watermark_path)

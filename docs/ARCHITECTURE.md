@@ -121,3 +121,17 @@ session cookie (browsers); unauthenticated browser navigations 303-redirect to `
 existing SessionMiddleware and Google OAuth helper (DRY). Trade-off: a signed session is not
 server-revocable before expiry (disabling a Firebase user takes effect on next login, worst case
 `SESSION_MAX_AGE_DAYS`); acceptable at this scale and documented in the RUNBOOK.
+
+### ADR-010 — Render/publish split with an optional review gate
+**Decision:** Rendering and publishing are separate steps. `render_task` produces the episode into
+the buffer pool; in auto mode it publishes in the same job, in **review mode**
+(`auto_publish=false`) it parks the item as `awaiting_review` and the operator previews the actual
+MP4 in the browser (authenticated ranged streaming) before **Approve** (queues `publish_task`) or
+**Reject** (deletes files; the task fails and is re-renderable via Retry). Publish outcomes
+(`published_video_id`, `published_url`) and timings (`started_at`/`finished_at`) are recorded on
+the task; the campaign episode counter advances only on actual publish.
+**Why:** Trust in an autonomous system comes from a human checkpoint being *available* (not
+mandatory) and from transparency. The split also gives cheap upload-only retries (no re-render for
+a failed upload) and manual publish control. The publish job runs on the same single queue (KISS:
+uploads are short and sequential-safe on one box). The 72h buffer expiry deliberately skips
+`awaiting_review` items — only `ready` items age out.

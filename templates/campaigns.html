@@ -27,6 +27,7 @@
       {% if c.status.value in ['pending','failed'] %}
       <form method="post" action="/campaigns/{{ c.id }}/start"><button class="btn sm" type="submit">▶ Start</button></form>
       {% endif %}
+      <a class="btn ghost sm" href="/campaigns/{{ c.id }}/edit">Edit</a>
       <form method="post" action="/campaigns/{{ c.id }}/delete" onsubmit="return confirm('Delete campaign?')">
         <button class="btn danger sm" type="submit">Delete</button>
       </form>

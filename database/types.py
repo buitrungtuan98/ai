@@ -55,12 +55,15 @@ class TaskStatus(str, enum.Enum):
     AI_GENERATION = "AI_GENERATION"
     AUDIO_SYNCED = "AUDIO_SYNCED"
     RENDERING = "RENDERING"
+    AWAITING_REVIEW = "AWAITING_REVIEW"  # review-mode: rendered, waiting for operator approval
     PUBLISHING = "PUBLISHING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
 
 
 class BufferStatus(str, enum.Enum):
-    ready = "ready"          # pre-rendered, waiting for its publish slot
-    consumed = "consumed"    # published
-    expired = "expired"      # aged out / invalidated
+    ready = "ready"                      # pre-rendered, waiting for its publish slot
+    awaiting_review = "awaiting_review"  # review-mode: waiting for operator approve/reject
+    rejected = "rejected"                # operator rejected in review (files removed)
+    consumed = "consumed"                # published
+    expired = "expired"                  # aged out / invalidated

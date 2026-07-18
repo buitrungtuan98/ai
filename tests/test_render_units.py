@@ -32,7 +32,19 @@ def test_build_concat_args_copy():
     assert build_concat_args("l.txt", "m.mp4") == ["-f", "concat", "-safe", "0", "-i", "l.txt", "-c", "copy", "m.mp4"]
 
 
-def test_ab_rotation():
+def test_build_concat_args_with_music_keeps_video_copy():
+    from core.video_factory import build_concat_args
+
+    args = build_concat_args("l.txt", "m.mp4", music_path="bg.mp3", music_volume=0.2)
+    fc = args[args.index("-filter_complex") + 1]
+    assert "volume=0.20" in fc and "amix=inputs=2:duration=first" in fc
+    assert "-stream_loop" in args            # music loops to cover the video
+    i = args.index("-c:v")
+    assert args[i + 1] == "copy"             # video is never re-encoded for music
+    assert "-shortest" in args and args[-1] == "m.mp4"
+
+
+def test_ab_rotation_and_toggle():
     from core.ai_engine import VideoScript
     from core.video_factory import pick_metadata
 
@@ -44,6 +56,27 @@ def test_ab_rotation():
     assert pick_metadata(vs, 1)["variant"] == "A"
     assert pick_metadata(vs, 2)["variant"] == "B"
     assert pick_metadata(vs, 4)["variant"] == "A"
+    # A/B disabled → always variant A (the toggle is honored, not decorative).
+    assert all(pick_metadata(vs, ep, ab_testing=False)["variant"] == "A" for ep in (1, 2, 3, 4))
+
+
+def test_line_style_captions(tmp_path):
+    from core.captions import build_ass, group_words_into_lines
+    from core.tts import WordTiming
+
+    words = [
+        WordTiming("The", 0.0, 0.2), WordTiming("sun", 0.2, 0.5), WordTiming("is", 0.5, 0.7),
+        WordTiming("hot", 0.7, 1.0),
+        WordTiming("Really", 2.0, 2.4), WordTiming("hot", 2.4, 2.8),  # >0.6s pause → new line
+    ]
+    lines = group_words_into_lines(words)
+    assert [line.text for line in lines] == ["The sun is hot", "Really hot"]
+    assert lines[0].start == 0.0 and lines[0].end == 1.0
+
+    out = str(tmp_path / "line.ass")
+    build_ass(words, out, clip_duration=3.0, style="line")
+    content = open(out).read()
+    assert content.count("Dialogue:") == 2 and "The sun is hot" in content
 
 
 def test_caption_wrap_and_ass(tmp_path):

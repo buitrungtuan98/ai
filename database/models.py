@@ -145,6 +145,12 @@ class Task(Base):
     progress_pct: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str | None] = mapped_column(Text)
     rq_job_id: Mapped[str | None] = mapped_column(String(64))  # correlate row ↔ RQ job
+    # Transparency: timing + publish outcome (surfaced in the Task Logs panel).
+    started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    published_video_id: Mapped[str | None] = mapped_column(String(128))
+    published_url: Mapped[str | None] = mapped_column(String(512))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
