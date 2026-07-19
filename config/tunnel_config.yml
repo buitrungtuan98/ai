@@ -1,0 +1,28 @@
+# Cloudflare Tunnel — documentation of the ingress mapping.
+#
+# We run cloudflared in TOKEN mode (docker-compose passes TUNNEL_TOKEN), which means the
+# authoritative ingress config lives in the Cloudflare Zero-Trust dashboard, NOT this file.
+# This file documents the intended mapping and is the drop-in config if you switch to
+# locally-managed mode (`cloudflared tunnel run <name>` with a credentials file).
+#
+# HARD RULE (ADR-003): the origin is the internal service `web:8000`. No public port is ever
+# opened on the Oracle host. Cloudflare terminates TLS at its edge; the tunnel is outbound-only.
+
+# --- Locally-managed mode fields (unused in token mode) ---
+# tunnel: <TUNNEL_UUID>
+# credentials-file: /etc/cloudflared/<TUNNEL_UUID>.json   # mounted secret, never committed
+
+no-autoupdate: true
+metrics: 0.0.0.0:2000
+loglevel: info
+
+ingress:
+  # Public hostname -> internal FastAPI. Set the hostname to your Cloudflare-managed domain.
+  - hostname: factory.example.com
+    service: http://web:8000
+    originRequest:
+      connectTimeout: 30s
+      # Origin is plain HTTP on the trusted private network; Cloudflare already did edge TLS.
+      noTLSVerify: true
+  # Mandatory catch-all.
+  - service: http_status:404

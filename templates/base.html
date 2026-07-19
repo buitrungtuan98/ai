@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}AI Video Factory{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand"><span class="dot"></span> AI Video Factory</div>
+      <nav class="nav">
+        <a href="/" class="{{ 'active' if nav=='dashboard' else '' }}"><span class="ico">▚</span> Dashboard</a>
+        <a href="/channels" class="{{ 'active' if nav=='channels' else '' }}"><span class="ico">◉</span> Channels</a>
+        <a href="/campaigns" class="{{ 'active' if nav=='campaigns' else '' }}"><span class="ico">▤</span> Campaigns</a>
+        <a href="/assets" class="{{ 'active' if nav=='assets' else '' }}"><span class="ico">▦</span> Asset Pool</a>
+        <a href="/credentials" class="{{ 'active' if nav=='credentials' else '' }}"><span class="ico">⚿</span> Credentials</a>
+        <a href="/tasks" class="{{ 'active' if nav=='tasks' else '' }}"><span class="ico">≣</span> Task Logs</a>
+      </nav>
+      {% if settings.MULTI_TENANT_MODE %}
+      <div class="sidebar-foot">
+        <span class="who" title="{{ request.session.get('email') or '' }}">{{ request.session.get('email') or 'Signed in' }}</span>
+        <form method="post" action="/auth/logout"><button class="btn ghost sm" type="submit">Sign out</button></form>
+      </div>
+      {% endif %}
+    </aside>
+    <main class="main">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

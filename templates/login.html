@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · AI Video Factory</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="auth-body">
+  <div class="auth-card">
+    <div class="brand" style="justify-content:center; margin-bottom: 20px;"><span class="dot"></span> AI Video Factory</div>
+
+    <div class="tabs" style="justify-content:center;">
+      <button type="button" class="tab-btn active" data-mode="signin">Sign in</button>
+      <button type="button" class="tab-btn" data-mode="signup">Create account</button>
+    </div>
+
+    {% if web_api_key %}
+    <form id="auth-form">
+      <div class="form-row"><label>Email</label><input id="email" type="email" required autocomplete="email" placeholder="you@example.com"></div>
+      <div class="form-row"><label>Password</label><input id="password" type="password" required minlength="6" autocomplete="current-password" placeholder="••••••••"></div>
+      <button class="btn" type="submit" style="width:100%" id="submit-btn">Sign in</button>
+    </form>
+    {% else %}
+    <div class="empty">FIREBASE_WEB_API_KEY is not configured — email/password sign-in is unavailable. Set it in .env (Firebase console → Project settings → Web API Key).</div>
+    {% endif %}
+
+    {% if google_enabled %}
+    <div class="divider"><span>or</span></div>
+    <a class="btn ghost" style="width:100%; justify-content:center;" href="/auth/google/login">Continue with Google</a>
+    {% endif %}
+
+    <p id="auth-error" class="err" style="min-height:18px; margin: 14px 0 0; text-align:center;"></p>
+    <p class="hint" style="text-align:center; margin-top:16px;">Accounts are powered by Firebase Authentication. Your API keys and channel tokens are encrypted at rest.</p>
+  </div>
+
+  {% if web_api_key %}
+  <script>
+    (function () {
+      var KEY = {{ web_api_key | tojson }};
+      var mode = "signin";
+      var form = document.getElementById("auth-form");
+      var errEl = document.getElementById("auth-error");
+      var submitBtn = document.getElementById("submit-btn");
+
+      var FRIENDLY = {
+        EMAIL_NOT_FOUND: "Incorrect email or password.",
+        INVALID_PASSWORD: "Incorrect email or password.",
+        INVALID_LOGIN_CREDENTIALS: "Incorrect email or password.",
+        EMAIL_EXISTS: "An account with this email already exists — try signing in.",
+        WEAK_PASSWORD: "Password must be at least 6 characters.",
+        TOO_MANY_ATTEMPTS_TRY_LATER: "Too many attempts — please try again later.",
+        OPERATION_NOT_ALLOWED: "Email/password sign-in is not enabled in the Firebase console.",
+      };
+
+      document.querySelectorAll(".tab-btn").forEach(function (b) {
+        b.addEventListener("click", function () {
+          document.querySelectorAll(".tab-btn").forEach(function (x) { x.classList.remove("active"); });
+          b.classList.add("active");
+          mode = b.dataset.mode;
+          submitBtn.textContent = mode === "signin" ? "Sign in" : "Create account";
+          errEl.textContent = "";
+        });
+      });
+
+      form.addEventListener("submit", function (e) {
+        e.preventDefault();
+        errEl.textContent = "";
+        submitBtn.disabled = true;
+        var endpoint = mode === "signin" ? "accounts:signInWithPassword" : "accounts:signUp";
+        fetch("https://identitytoolkit.googleapis.com/v1/" + endpoint + "?key=" + encodeURIComponent(KEY), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            email: document.getElementById("email").value,
+            password: document.getElementById("password").value,
+            returnSecureToken: true,
+          }),
+        })
+          .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+          .then(function (res) {
+            if (!res.ok) {
+              var code = (res.d.error && res.d.error.message) || "";
+              throw new Error(FRIENDLY[code.split(" ")[0]] || "Sign-in failed (" + code + ").");
+            }
+            return fetch("/auth/session", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ id_token: res.d.idToken }),
+            });
+          })
+          .then(function (s) {
+            if (!s.ok) throw new Error("Could not establish a session — please try again.");
+            window.location.href = "/";
+          })
+          .catch(function (err) { errEl.textContent = err.message; })
+          .finally(function () { submitBtn.disabled = false; });
+      });
+    })();
+  </script>
+  {% endif %}
+</body>
+</html>

@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Asset Pool · AI Video Factory{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>Asset Pool Cache</h1>
+  <p class="subtitle">Pre-rendered episodes. Review-mode videos wait here for your approval — watch them before anything is published.</p></div></div>
+
+{% if items %}
+<div class="grid cols-3">
+  {% for i in items %}
+  {% set camp = camp_by_id.get(i.campaign_id) %}
+  <div class="card">
+    <div class="flex between">
+      <h3>{{ camp.topic_name if camp else 'C' ~ i.campaign_id }} · Ep {{ i.episode_number }}</h3>
+      <span class="pill {{ 'completed' if i.status.value=='consumed' else ('failed' if i.status.value in ['expired','rejected'] else ('AWAITING_REVIEW' if i.status.value=='awaiting_review' else 'active')) }}">
+        {{ i.status.value.replace('_',' ')|title }}</span>
+    </div>
+    <p class="meta">{{ i.metadata_json.get('title','—') }}
+      {% if i.metadata_json.get('variant') %} · Variant {{ i.metadata_json.get('variant') }}{% endif %}<br>
+      {{ i.created_at.strftime('%Y-%m-%d %H:%M') if i.created_at else '' }} UTC</p>
+
+    {% if i.id in previewable %}
+    <video class="preview" controls preload="metadata"
+           {% if i.thumbnail_path %}poster="/assets/{{ i.id }}/thumb"{% endif %}
+           src="/assets/{{ i.id }}/video"></video>
+    {% elif i.status.value == 'consumed' %}
+    <p class="hint">Published — local file cleaned up.</p>
+    {% endif %}
+
+    {% if i.status.value == 'awaiting_review' %}
+    <div class="row-actions mt">
+      <form method="post" action="/assets/{{ i.id }}/approve"><button class="btn sm" type="submit">✓ Approve &amp; publish</button></form>
+    </div>
+    <form method="post" action="/assets/{{ i.id }}/reject" class="mt"
+          onsubmit="return confirm('Reject and delete this render?')">
+      <div class="flex" style="gap:8px;">
+        <input name="reason" placeholder="Why? (teaches the AI — e.g. 'mở đầu chậm quá')" style="flex:1">
+        <button class="btn danger sm" type="submit">✕ Reject</button>
+      </div>
+    </form>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty">Buffer pool is empty. Active campaigns will pre-render episodes here; review-mode campaigns will wait here for your approval.</div>
+{% endif %}
+{% endblock %}

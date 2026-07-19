@@ -1,0 +1,58 @@
+name: backup-verify
+
+# The DB lives only on the Oracle box; a GitHub-hosted runner cannot read it. The server cron
+# (scripts/backup_db.sh) PRODUCES the dump; this workflow VERIFIES the committed dump restores
+# cleanly and enforces retention. See ADR-002.
+#
+# This workflow is intended to run inside the private backups repo (where factory_dump.sql lands).
+
+on:
+  schedule:
+    - cron: "0 5 * * *"          # a couple of hours after the server push
+  workflow_dispatch: {}
+
+permissions:
+  contents: write                 # only to prune/retain history in the backups repo
+
+concurrency:
+  group: backup-verify
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout backups repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure a dump exists
+        run: test -f factory_dump.sql || { echo "no factory_dump.sql to verify"; exit 1; }
+
+      - name: Restore into a throwaway SQLite DB
+        run: sqlite3 restored.db < factory_dump.sql
+
+      - name: Integrity check (a backup you can't restore isn't a backup)
+        run: |
+          result=$(sqlite3 restored.db 'PRAGMA integrity_check;')
+          echo "integrity_check: $result"
+          test "$result" = "ok"
+
+      - name: Sanity — expected tables present
+        run: |
+          for t in users channels campaigns tasks buffer_pool; do
+            sqlite3 restored.db ".schema $t" | grep -q "CREATE TABLE" \
+              || { echo "missing table: $t"; exit 1; }
+          done
+
+      - name: Guard — no plaintext secrets in the dump
+        run: |
+          if grep -Eiq '(FERNET_KEY|BEGIN [A-Z ]*PRIVATE KEY|ghp_[A-Za-z0-9]{20,})' factory_dump.sql; then
+            echo "plaintext secret detected in dump"; exit 1
+          fi
+
+      # Retention: keep history bounded. Example — squash commits older than ~90 days.
+      # Kept as a documented placeholder; enable once backup volume warrants it.
+      - name: Retention note
+        run: echo "Retention/prune runs here (git filter-repo / orphan-branch rotation) when needed."

@@ -1,0 +1,6 @@
+# Dev/test/lint dependencies (not installed in the runtime image).
+-r requirements.txt
+
+pytest==8.3.4
+fakeredis==2.26.1             # in-memory Redis for queue/state tests
+ruff==0.8.4                   # lint + format

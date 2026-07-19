@@ -1,0 +1,191 @@
+"""Pure rendering-logic units: clip selection, ffmpeg arg builders, captions, A/B rotation."""
+from __future__ import annotations
+
+
+def test_select_clips_cycles_to_cover():
+    from core.video_factory import select_clips
+
+    assert select_clips([2.0, 3.0], 4.0) == [0, 1]
+    assert select_clips([10.0], 4.0) == [0]
+    assert select_clips([1.0, 1.0], 3.5) == [0, 1, 0, 1]
+
+
+def test_build_scene_args_single_and_branding():
+    from core.video_factory import Branding, build_scene_args
+
+    a = build_scene_args(["c0.mp4"], "a.mp3", "s.ass", "out.mp4", 8.37, None)
+    fc = a[a.index("-filter_complex") + 1]
+    assert "concat=n=" not in fc and fc.endswith("ass=s.ass[vout]")
+    assert "8.370" in a and a[-1] == "out.mp4"
+
+    b = Branding(watermark_path="logo.png", tint_color="0x1E90FF", tint_opacity=0.15, mirror=True)
+    a2 = build_scene_args(["c0.mp4", "c1.mp4"], "a.mp3", "s.ass", "out.mp4", 5.0, b)
+    fc2 = a2[a2.index("-filter_complex") + 1]
+    # order: mirror -> tint -> overlay -> captions
+    assert fc2.index("hflip") < fc2.index("drawbox") < fc2.index("overlay") < fc2.index("ass=")
+    assert a2.count("-i") == 4  # 2 clips + audio + watermark
+
+
+def test_build_concat_args_copy():
+    from core.video_factory import build_concat_args
+
+    assert build_concat_args("l.txt", "m.mp4") == ["-f", "concat", "-safe", "0", "-i", "l.txt", "-c", "copy", "m.mp4"]
+
+
+def test_build_concat_args_with_music_keeps_video_copy():
+    from core.video_factory import build_concat_args
+
+    args = build_concat_args("l.txt", "m.mp4", music_path="bg.mp3", music_volume=0.2)
+    fc = args[args.index("-filter_complex") + 1]
+    assert "volume=0.20" in fc and "amix=inputs=2:duration=first" in fc
+    assert "-stream_loop" in args            # music loops to cover the video
+    i = args.index("-c:v")
+    assert args[i + 1] == "copy"             # video is never re-encoded for music
+    assert "-shortest" in args and args[-1] == "m.mp4"
+
+
+def test_ab_rotation_and_toggle():
+    from core.ai_engine import VideoScript
+    from core.video_factory import pick_metadata
+
+    vs = VideoScript(
+        language="en", topic="t",
+        scenes=[{"index": i, "narration": "n", "pexels_keywords": ["k"]} for i in range(3)],
+        metadata_variations=[{"variant": v, "title": f"T{v}", "description": "d", "tags": ["a", "b", "c"]} for v in "ABC"],
+    )
+    assert pick_metadata(vs, 1)["variant"] == "A"
+    assert pick_metadata(vs, 2)["variant"] == "B"
+    assert pick_metadata(vs, 4)["variant"] == "A"
+    # A/B disabled → always variant A (the toggle is honored, not decorative).
+    assert all(pick_metadata(vs, ep, ab_testing=False)["variant"] == "A" for ep in (1, 2, 3, 4))
+
+
+def test_line_style_captions(tmp_path):
+    from core.captions import build_ass, group_words_into_lines
+    from core.tts import WordTiming
+
+    words = [
+        WordTiming("The", 0.0, 0.2), WordTiming("sun", 0.2, 0.5), WordTiming("is", 0.5, 0.7),
+        WordTiming("hot", 0.7, 1.0),
+        WordTiming("Really", 2.0, 2.4), WordTiming("hot", 2.4, 2.8),  # >0.6s pause → new line
+    ]
+    lines = group_words_into_lines(words)
+    assert [line.text for line in lines] == ["The sun is hot", "Really hot"]
+    assert lines[0].start == 0.0 and lines[0].end == 1.0
+
+    out = str(tmp_path / "line.ass")
+    build_ass(words, out, clip_duration=3.0, style="line")
+    content = open(out).read()
+    assert content.count("Dialogue:") == 2 and "The sun is hot" in content
+
+
+def test_caption_wrap_and_ass(tmp_path):
+    from core.captions import build_ass, wrap_text
+    from core.tts import WordTiming
+
+    lines = wrap_text("one two three four five six seven eight nine ten", 72, 400)
+    assert len(lines) >= 2
+
+    out = str(tmp_path / "c.ass")
+    timings = [WordTiming("Hello", 0.0, 0.4), WordTiming("world", 0.4, 0.9)]
+    build_ass(timings, out, clip_duration=0.9)
+    content = open(out).read()
+    assert "[Events]" in content and content.count("Dialogue:") == 2 and "PlayResX: 1080" in content
+
+
+def test_motion_filters():
+    from core.video_factory import MOTION_EFFECTS, build_scene_args, motion_filter
+
+    zi = motion_filter("zoom_in", 8.0)
+    assert "zoompan" in zi and "min(zoom+" in zi and "1080x1920" in zi
+    zo = motion_filter("zoom_out", 8.0)
+    assert "zoompan" in zo and "max(zoom-" in zo
+    pan = motion_filter("pan", 8.0)
+    assert "zoompan" not in pan and "crop=1080:1920" in pan and "t/8.000" in pan
+    assert MOTION_EFFECTS == ["zoom_in", "pan", "zoom_out"]  # deterministic rotation
+
+    # Wired into the scene graph before branding/captions; absent when motion is off.
+    args = build_scene_args(["c.mp4"], "a.mp3", "s.ass", "o.mp4", 5.0, None, motion_effect="zoom_in")
+    fc = args[args.index("-filter_complex") + 1]
+    assert "zoompan" in fc and fc.index("zoompan") < fc.index("ass=")
+    args_off = build_scene_args(["c.mp4"], "a.mp3", "s.ass", "o.mp4", 5.0, None, motion_effect=None)
+    assert "zoompan" not in args_off[args_off.index("-filter_complex") + 1]
+
+
+def test_caption_themes(tmp_path):
+    from core.captions import CAPTION_THEMES, POP_TAG, build_ass, hex_to_ass
+    from core.tts import WordTiming
+
+    assert hex_to_ass("#FFCF6B") == "&H006BCFFF"  # RGB → ASS BGR
+    assert set(CAPTION_THEMES) == {"classic", "highlight", "boxed", "neon"}
+
+    timings = [WordTiming("Hello", 0.0, 0.5), WordTiming("world", 0.5, 1.0)]
+
+    boxed = str(tmp_path / "boxed.ass")
+    build_ass(timings, boxed, clip_duration=1.0, theme="boxed")
+    content = open(boxed).read()
+    assert ",3,7," in content and POP_TAG not in content  # BorderStyle=3 opaque box, no pop
+
+    neon = str(tmp_path / "neon.ass")
+    build_ass(timings, neon, clip_duration=1.0, theme="neon")
+    content = open(neon).read()
+    assert r"\blur2" in content and POP_TAG in content
+
+    hl = str(tmp_path / "hl.ass")
+    build_ass(timings, hl, clip_duration=1.0, theme="highlight", accent_hex="#1E90FF")
+    content = open(hl).read()
+    assert "&H00FF901E" in content and POP_TAG in content  # campaign accent colour drives the style
+
+
+def test_search_footage_fallback_chain(monkeypatch):
+    from core import video_factory as vf
+
+    calls = []
+
+    def fake_search(query, key, per_page=10):
+        calls.append(query)
+        # Joined query and first keyword fail; second keyword succeeds.
+        return ["clip"] if query == "fog" else []
+
+    monkeypatch.setattr(vf.pexels, "search_videos", fake_search)
+    assert vf.search_footage(["dòng sông", "fog"], "k") == ["clip"]
+    assert calls == ["dòng sông fog", "dòng sông", "fog"]
+
+    # Everything fails → generic fallback is tried last; empty means truly nothing.
+    calls.clear()
+    monkeypatch.setattr(vf.pexels, "search_videos", lambda q, k, per_page=10: (calls.append(q), [])[1])
+    assert vf.search_footage(["xyz"], "k") == []
+    assert calls[-1] == vf.FALLBACK_FOOTAGE_QUERY
+
+
+def test_pexels_keywords_prompt_demands_english():
+    from core.ai_engine import Scene, build_script_prompt
+
+    assert "English" in (Scene.model_fields["pexels_keywords"].description or "")
+    assert "ENGLISH" in build_script_prompt("chuyện ma", "vi", 30, 1)
+
+
+def test_ffmpeg_runner_uses_nice_threads(monkeypatch):
+    """run_ffmpeg composes the command with nice + -threads without executing (Popen mocked)."""
+    import core.ffmpeg_runner as fr
+
+    captured = {}
+
+    class FakeProc:
+        stdout = iter([])
+        stderr = None
+        returncode = 0
+
+        def wait(self):
+            return 0
+
+    def fake_popen(cmd, **kw):
+        captured["cmd"] = cmd
+        return FakeProc()
+
+    monkeypatch.setattr(fr.subprocess, "Popen", fake_popen)
+    fr.run_ffmpeg(["-i", "x.mp4", "out.mp4"])
+    cmd = captured["cmd"]
+    assert "ffmpeg" in cmd and "-threads" in cmd and "-progress" in cmd
+    if fr.shutil.which("nice"):
+        assert cmd[0] == "nice"

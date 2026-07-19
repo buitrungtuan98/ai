@@ -1,0 +1,41 @@
+# Runtime dependencies. Pinned for reproducibility; all have aarch64 (ARM) manylinux wheels.
+# NOTE: ffmpeg/ffprobe are system binaries installed via apt in the Dockerfile, NOT pip packages.
+
+# --- Web ---
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+jinja2==3.1.4
+python-multipart==0.0.12
+itsdangerous==2.2.0            # signed session cookies / OAuth state
+
+# --- Data ---
+SQLAlchemy==2.0.36
+pydantic==2.10.4
+pydantic-settings==2.7.0
+python-dotenv==1.0.1
+tzdata==2024.2                # zoneinfo data for TIMEZONE-aware posting slots (slim images lack it)
+
+# --- Queue ---
+rq==1.16.2
+redis==5.2.1
+# (periodic ticks run in an in-process daemon thread — see workers/scheduler.py — no rq-scheduler)
+
+# --- Security ---
+cryptography==44.0.0
+
+# --- AI / media ---
+google-generativeai==0.8.3
+edge-tts==6.1.12
+Pillow==10.4.0
+
+# --- Auth (multi-tenant) ---
+firebase-admin==6.6.0
+
+# --- Google / YouTube publishing ---
+google-auth==2.37.0
+google-auth-oauthlib==1.2.1
+google-api-python-client==2.156.0
+
+# --- HTTP ---
+httpx==0.28.1
+requests==2.32.3

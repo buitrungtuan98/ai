@@ -1,0 +1,51 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+config/firebase_credentials.json
+*.pem
+*.key
+
+# Databases & WAL sidecars
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+factory_dump.sql
+factory_snapshot.db
+
+# Media / render scratch
+/data/
+media/
+work/
+*.mp4
+*.mp3
+*.wav
+*.ass
+*.srt
+!static/**/*.mp4
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node / Tailwind build tooling (only built CSS is committed)
+node_modules/
+package-lock.json
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
