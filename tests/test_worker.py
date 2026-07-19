@@ -279,6 +279,93 @@ def test_auto_music_flows_into_render(session, user, channel, monkeypatch, tmp_p
     assert buf.metadata_json["music_credit"]["title"] == "Dark Drone"  # per-episode transparency
 
 
+def _qc_campaign(session, user, channel, **cfg_extra):
+    from database.models import Campaign, Task
+    from database.types import CampaignStatus
+
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="QC", total_episodes=3,
+                   status=CampaignStatus.active, config_json={"language": "en", **cfg_extra})
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    t = Task(campaign_id=cam.id, user_id=user.id, episode_number=1)
+    session.add(t)
+    session.commit()
+    session.refresh(t)
+    return cam, t
+
+
+def test_auto_qc_pass_publishes_with_verdict(session, user, channel, monkeypatch):
+    from core import qc
+    from database.models import BufferPoolItem
+    from database.types import TaskStatus
+    from workers import video_worker
+
+    cam, t = _qc_campaign(session, user, channel)
+    produce_calls = []
+    monkeypatch.setattr(video_worker, "generate_script", lambda **k: _script())
+    monkeypatch.setattr(video_worker.video_factory, "produce",
+                        lambda **k: produce_calls.append(k) or _result())
+    monkeypatch.setattr(qc, "run_final_qc",
+                        lambda path, *, api_key, context="": qc.QCResult(passed=True, score=9))
+    monkeypatch.setattr(video_worker, "_publish", lambda *a, **k: "vid-qc")
+
+    video_worker.render_task(t.id)
+    session.refresh(t)
+    assert t.status == TaskStatus.COMPLETED
+    assert len(produce_calls) == 1 and produce_calls[0]["vet_clip"] is not None  # vetter wired in
+    buf = session.query(BufferPoolItem).filter_by(campaign_id=cam.id, episode_number=1).one()
+    assert buf.metadata_json["qc"] == {"passed": True, "score": 9, "issues": [], "attempts": 1}
+
+
+def test_auto_qc_double_failure_parks_for_review(session, user, channel, monkeypatch):
+    """QC fail → one re-render; fail again → park for human review, never publish (ADR-013)."""
+    from core import qc
+    from database.models import BufferPoolItem
+    from database.types import BufferStatus, TaskStatus
+    from workers import video_worker
+
+    cam, t = _qc_campaign(session, user, channel, auto_publish=True)
+    produce_calls = []
+    monkeypatch.setattr(video_worker, "generate_script", lambda **k: _script())
+    monkeypatch.setattr(video_worker.video_factory, "produce",
+                        lambda **k: produce_calls.append(k) or _result())
+    monkeypatch.setattr(qc, "run_final_qc",
+                        lambda path, *, api_key, context="": qc.QCResult(
+                            passed=False, score=3, issues=["captions clipped"]))
+    monkeypatch.setattr(video_worker, "_publish",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not publish")))
+
+    video_worker.render_task(t.id)
+    session.refresh(t)
+    assert len(produce_calls) == 2  # exactly one automatic re-render
+    assert t.status == TaskStatus.AWAITING_REVIEW  # human review is the backstop
+    buf = session.query(BufferPoolItem).filter_by(campaign_id=cam.id, episode_number=1).one()
+    assert buf.status == BufferStatus.awaiting_review
+    assert buf.metadata_json["qc"] == {"passed": False, "score": 3,
+                                       "issues": ["captions clipped"], "attempts": 2}
+
+
+def test_auto_qc_off_skips_gate(session, user, channel, monkeypatch):
+    from core import qc
+    from database.types import TaskStatus
+    from workers import video_worker
+
+    cam, t = _qc_campaign(session, user, channel, auto_qc="off")
+    produce_calls = []
+    monkeypatch.setattr(video_worker, "generate_script", lambda **k: _script())
+    monkeypatch.setattr(video_worker.video_factory, "produce",
+                        lambda **k: produce_calls.append(k) or _result())
+    monkeypatch.setattr(qc, "run_final_qc",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("QC must not run")))
+    monkeypatch.setattr(video_worker, "_publish", lambda *a, **k: "vid-x")
+
+    video_worker.render_task(t.id)
+    session.refresh(t)
+    assert t.status == TaskStatus.COMPLETED
+    assert produce_calls[0]["vet_clip"] is None  # no vision vetting when the gate is off
+
+
 def test_hydrate_respects_campaign_buffer_size(session, user, channel):
     from database.models import Campaign, Task
     from database.types import CampaignStatus

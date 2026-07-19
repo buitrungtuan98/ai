@@ -263,6 +263,9 @@ def render_task(task_id: int) -> None:
     # With posting slots configured, auto mode renders ahead into the buffer and the scheduler
     # publishes exactly one episode per slot (ADR-011). Without slots: publish right after render.
     slot_scheduled = auto_publish and bool(cfg.get("posting_slots"))
+    # Auto-QC gate (ADR-013): vision-vet footage during render + judge the finished master.
+    # Default ON; every check fails open, so a vision-API outage never blocks an episode.
+    auto_qc = cfg.get("auto_qc", "on") != "off"
 
     try:
         gemini_key, pexels_key = _resolve_keys(user)
@@ -304,23 +307,50 @@ def render_task(task_id: int) -> None:
         _set_status(db, task, TaskStatus.RENDERING, 10)
         output_dir = os.path.join(settings.MEDIA_ROOT, "buffer", str(campaign.id))
         music_path, music_credit = _resolve_music(cfg)
-        result = video_factory.produce(
-            script=script,
-            episode_number=task.episode_number,
-            pexels_api_key=pexels_key,
-            job_id=str(task.id),
-            output_dir=output_dir,
-            voice=cfg.get("voice"),
-            rate_pct=int(cfg.get("rate_pct", 0)),
-            branding=_branding_from_config(cfg),
-            subtitle_style=cfg.get("subtitle_style", "word"),
-            caption_theme=cfg.get("caption_theme", "highlight"),
-            motion=cfg.get("motion", "on") != "off",
-            music_path=music_path,
-            music_volume=float(cfg.get("music_volume", 0.15)),
-            ab_testing=bool(cfg.get("ab_testing", True)),
-            on_progress=lambda p: set_progress(task_id, 10 + p * 0.8),
-        )
+
+        vet_clip = None
+        if auto_qc:
+            from core import qc  # lazy, like the publishing services
+
+            vet_clip = qc.make_footage_vetter(gemini_key)
+
+        # Render, then let the machine review its own output. A failing verdict triggers exactly
+        # one re-render; if it still fails, the episode is parked for human review (the backup).
+        qc_report: dict | None = None
+        for attempt in (1, 2):
+            result = video_factory.produce(
+                script=script,
+                episode_number=task.episode_number,
+                pexels_api_key=pexels_key,
+                job_id=str(task.id),
+                output_dir=output_dir,
+                voice=cfg.get("voice"),
+                rate_pct=int(cfg.get("rate_pct", 0)),
+                branding=_branding_from_config(cfg),
+                subtitle_style=cfg.get("subtitle_style", "word"),
+                caption_theme=cfg.get("caption_theme", "highlight"),
+                motion=cfg.get("motion", "on") != "off",
+                color_grade=cfg.get("color_grade"),
+                music_path=music_path,
+                music_volume=float(cfg.get("music_volume", 0.15)),
+                ab_testing=bool(cfg.get("ab_testing", True)),
+                vet_clip=vet_clip,
+                on_progress=lambda p: set_progress(task_id, 10 + p * 0.8),
+            )
+            if not auto_qc:
+                break
+            verdict = qc.run_final_qc(
+                result.master_path, api_key=gemini_key,
+                context=f"The narration language is '{cfg.get('language', 'en')}'.",
+            )
+            qc_report = {**verdict.as_dict(), "attempts": attempt}
+            if verdict.passed:
+                break
+            if attempt == 1:
+                logger.info("Auto-QC rejected episode %s (score %s, issues %s) — re-rendering once",
+                            task.episode_number, verdict.score, verdict.issues)
+                _safe_remove(result.master_path, result.thumbnail_path)
+        qc_failed = qc_report is not None and not qc_report["passed"]
         _set_status(db, task, TaskStatus.AUDIO_SYNCED, 88)
 
         # Carry distribution settings into the stored metadata so the publish step (now or after
@@ -329,7 +359,11 @@ def render_task(task_id: int) -> None:
         result.metadata.setdefault("privacy", cfg.get("privacy", "public"))
         if music_credit:
             result.metadata["music_credit"] = music_credit  # per-episode transparency (CC0)
+        if qc_report:
+            result.metadata["qc"] = qc_report  # machine verdict, visible in the Asset Pool
 
+        # A double Auto-QC failure never publishes: it degrades to review mode for this episode.
+        parked_for_review = not auto_publish or qc_failed
         buf = BufferPoolItem(
             campaign_id=campaign.id,
             channel_id=channel.id,
@@ -337,13 +371,19 @@ def render_task(task_id: int) -> None:
             video_path=result.master_path,
             thumbnail_path=result.thumbnail_path,
             metadata_json=result.metadata,
-            status=BufferStatus.ready if auto_publish else BufferStatus.awaiting_review,
+            status=BufferStatus.awaiting_review if parked_for_review else BufferStatus.ready,
         )
         db.add(buf)
         db.commit()
         db.refresh(buf)
 
-        if not auto_publish:
+        if qc_failed:
+            task.finished_at = datetime.utcnow()
+            _set_status(db, task, TaskStatus.AWAITING_REVIEW, 90)
+            issues = "; ".join((qc_report or {}).get("issues") or []) or "low quality score"
+            _notify(user, f"🔍 Episode {task.episode_number} of '{campaign.topic_name}' failed "
+                          f"Auto-QC twice ({issues}). It is parked in the Asset Pool for your review.")
+        elif not auto_publish:
             task.finished_at = datetime.utcnow()
             _set_status(db, task, TaskStatus.AWAITING_REVIEW, 90)
             _notify(user, f"🎬 Episode {task.episode_number} of '{campaign.topic_name}' is rendered "

@@ -85,6 +85,21 @@ freesound.org/apiv2 and set `FREESOUND_API_KEY` in `.env`. If the API is unreach
 renders without music (never fails). The chosen track (title/author/id) is recorded per episode in
 the buffer metadata for transparency.
 
+## Auto-QC (machine review — makes hands-off publishing safe)
+Every campaign has **Auto-QC** ON by default (Distribution tab). Per episode it:
+1. **Vets footage** — a frame from each leading stock-clip candidate is shown to Gemini vision with
+   the scene's narration; clips that don't match are swapped for the next candidate before render.
+2. **Judges the finished video** — 4 sampled frames are checked for readable captions and coherent
+   visuals. Fail → the episode is automatically re-rendered once. Fail again → it is **parked in
+   the Asset Pool for your review** (with the issues listed) instead of publishing, and you get a
+   Telegram ping. The verdict (score/issues/attempts) is shown on each Asset Pool card.
+It uses your existing Gemini key and **fails open**: if the vision API is down, episodes render and
+publish exactly as if QC were off — quality gating never becomes an availability problem.
+Recommended rollout: run new campaigns in *Review first* mode for the first ~2 weeks; once you
+trust what Auto-QC lets through, switch to auto-publish and review only what QC rejects.
+Related quality knobs: **Colour grade** (Aesthetics tab) gives a channel one consistent look;
+audio loudness is always normalized to −14 LUFS (the YouTube/Reels target) — no knob needed.
+
 ## Retrying failed episodes
 Task Logs shows every failure with its full error. **Retry** re-runs the episode; if the rendered
 file still exists (upload failed / was awaiting review) only the upload is retried — no re-render.

@@ -354,6 +354,72 @@ def generate_script(
         return script
 
 
+# ── Vision judging (Auto-QC: the machine watches the footage and the output) ─
+def _call_gemini_vision(
+    *,
+    api_key: str,
+    model: str,
+    prompt: str,
+    image_paths: list[str],
+    temperature: float = 0.2,
+    max_output_tokens: int = 1024,
+) -> str:
+    """Single point that calls Gemini with images. Returns raw response text."""
+    import google.generativeai as genai
+    from PIL import Image
+
+    genai.configure(api_key=api_key)
+    gen_model = genai.GenerativeModel(
+        model_name=model,
+        generation_config={
+            "temperature": temperature,
+            "max_output_tokens": max_output_tokens,
+            "response_mime_type": "application/json",
+        },
+    )
+    resp = gen_model.generate_content([prompt, *[Image.open(p) for p in image_paths]])
+    return resp.text
+
+
+class FootageVerdict(BaseModel):
+    match_score: int = Field(ge=1, le=10, description="How well the footage fits the narration.")
+    reason: str = ""
+
+
+def judge_footage(frame_path: str, narration: str, *, api_key: str,
+                  model: str = DEFAULT_MODEL) -> FootageVerdict:
+    """Does this stock clip actually fit what's being said? Single attempt — callers fail open."""
+    schema_hint = json.dumps(FootageVerdict.model_json_schema(), ensure_ascii=False)
+    raw = _call_gemini_vision(
+        api_key=api_key, model=model, image_paths=[frame_path],
+        prompt=("This frame is from a stock clip chosen as background for a short-form video "
+                f"scene whose narration is:\n\"{narration}\"\n"
+                "Judge whether the visual genuinely fits the narration's subject and mood. "
+                f"Return ONLY JSON matching this schema:\n{schema_hint}"),
+    )
+    return FootageVerdict.model_validate_json(_strip_code_fence(raw))
+
+
+class VideoQCVerdict(BaseModel):
+    quality_score: int = Field(ge=1, le=10)
+    issues: list[str] = Field(default_factory=list, max_length=6)
+
+
+def judge_video_frames(frame_paths: list[str], *, api_key: str, context: str = "",
+                       model: str = DEFAULT_MODEL) -> VideoQCVerdict:
+    """Final-output spot check: are captions readable, visuals coherent, nothing broken?"""
+    schema_hint = json.dumps(VideoQCVerdict.model_json_schema(), ensure_ascii=False)
+    raw = _call_gemini_vision(
+        api_key=api_key, model=model, image_paths=frame_paths,
+        prompt=("These are frames sampled from an automatically produced vertical (9:16) short "
+                f"video. {context}\n"
+                "Check: captions present and readable (not clipped), visuals look coherent and "
+                "intentional (no broken/black/garbled frames), overall watchable quality. "
+                f"Return ONLY JSON matching this schema:\n{schema_hint}"),
+    )
+    return VideoQCVerdict.model_validate_json(_strip_code_fence(raw))
+
+
 # ── Critic pass (Loop 1: every video improves before it is even rendered) ────
 class ScriptCritique(BaseModel):
     hook_score: int = Field(ge=1, le=10, description="Does the first sentence grab within 2s?")

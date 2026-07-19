@@ -73,7 +73,8 @@ def _seed_campaign(client):
     client.post("/campaigns", data={"topic_name": "Space", "channel_id": str(cid), "total_episodes": "5",
                                     "language": "en", "publish_mode": "review", "privacy": "unlisted",
                                     "buffer_size": "2", "watermark_path": "/data/logo.png",
-                                    "tint_opacity": "0.1", "tint_color": "#1e90ff"},
+                                    "tint_opacity": "0.1", "tint_color": "#1e90ff",
+                                    "color_grade": "cinematic", "auto_qc": "off"},
                 follow_redirects=False)
     db = SessionLocal()
     cam = db.query(Campaign).first()
@@ -89,6 +90,7 @@ def test_campaign_config_persists_all_settings(client):
     assert cfg["buffer_size"] == 2
     assert cfg["branding"]["watermark_path"] == "/data/logo.png"
     assert cfg["branding"]["tint_opacity"] == 0.1
+    assert cfg["color_grade"] == "cinematic" and cfg["auto_qc"] == "off"  # Phase 17 fields honored
 
 
 def test_persona_and_continuity_persist_and_duplicate(client):

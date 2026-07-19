@@ -175,3 +175,24 @@ the floor immediately; the data loop optimises for what this channel's real audi
 Bounded, guarded and transparent by design — learning refines tactics, never overrides the persona
 or safety rules, and never becomes a black box. All of it stays $0 (free-tier Gemini calls, free
 Analytics API, motion/captions ride the existing encode pass).
+
+### ADR-013 — Auto-QC gate: the machine reviews its own output; human review is the backup
+**Decision:** A per-campaign **Auto-QC** gate (default ON) makes review-free operation safe.
+(1) **Footage vetting** — before a scene renders, up to 3 leading Pexels candidates are judged by
+Gemini vision (one extracted frame vs the scene's narration); the first accepted clip leads,
+rejected leaders are dropped, downloads are reused. (2) **Colour grade** — an optional
+per-campaign look (cinematic/warm/cool/vivid/noir) baked into the existing single encode pass,
+applied before captions so text is never graded. (3) **Loudness** — the final stitch normalizes
+audio to −14 LUFS (`loudnorm=I=-14:TP=-1.5:LRA=11`), the short-form platform target, so every
+episode publishes at the same perceived volume; audio-only re-encode, video stays stream-copied.
+(4) **Final verdict** — 4 frames sampled across the finished master are judged for readable
+captions and coherent visuals; a failing verdict triggers exactly **one** automatic re-render, and
+a second failure parks the episode in the Asset Pool as AWAITING_REVIEW with the issues listed —
+it is never published. The verdict is stored in the episode metadata (visible in the Asset Pool).
+**Why:** the operator wants "perfect with no human touch — manual is just in case". That demands
+the pipeline judge itself with the same signal a human reviewer uses (looking at frames), while
+keeping two safety properties: **fail-open** (a vision-API outage degrades to the pre-QC pipeline,
+never blocks an episode — availability of the nightly upload beats a stricter gate) and
+**fail-closed on quality** (a video the machine judged bad twice waits for a human instead of
+publishing). Costs stay $0: a handful of extra free-tier Gemini vision calls per episode; grade
+and loudnorm ride existing encode passes on the CPU-only box.

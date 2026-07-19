@@ -91,6 +91,15 @@
           <option value="off" {{ 'selected' if cfg.get('motion')=='off' }}>Off — static clips</option>
         </select>
       </div>
+      <div class="form-row"><label>Colour grade (channel look, baked into every clip)</label>
+        <select name="color_grade">
+          <option value="" {{ 'selected' if not cfg.get('color_grade') }}>None — footage as shot</option>
+          {% for g, label in [('cinematic','Cinematic — filmic contrast, teal shadows'), ('warm','Warm — golden, cosy'), ('cool','Cool — blue, moody'), ('vivid','Vivid — punchy colour'), ('noir','Noir — black & white')] %}
+          <option value="{{ g }}" {{ 'selected' if cfg.get('color_grade')==g }}>{{ label }}</option>
+          {% endfor %}
+        </select>
+        <p class="hint">Pick one per channel and keep it — a consistent look is what makes a feed feel curated.</p>
+      </div>
       <div class="form-row"><label>Voice profile (edge-tts, optional)</label>
         <input name="voice" placeholder="en-US-AriaNeural" value="{{ cfg.get('voice') or '' }}"></div>
       <div class="form-row"><label>Audio speed adjustment: <span id="rate-val">{{ cfg.get('rate_pct', 0) }}</span>%</label>
@@ -134,6 +143,15 @@
           <option value="review" {{ 'selected' if not cfg.get('auto_publish', true) }}>Review first — I preview &amp; approve each video</option>
         </select>
         <p class="hint">Review mode parks each rendered video in the Asset Pool with an in-browser player.</p>
+      </div>
+      <div class="form-row"><label>Auto-QC (the machine reviews every video before it goes out)</label>
+        <select name="auto_qc">
+          <option value="on" {{ 'selected' if cfg.get('auto_qc','on')!='off' }}>On — AI vets footage &amp; judges the final video (recommended)</option>
+          <option value="off" {{ 'selected' if cfg.get('auto_qc')=='off' }}>Off — render without machine review</option>
+        </select>
+        <p class="hint">Footage that doesn't match the narration is swapped before render; a finished video that fails the
+          quality check is re-rendered once, and if it fails again it waits in the Asset Pool for you instead of publishing.
+          Uses your Gemini key; if the vision API is unavailable the pipeline continues as if QC were off.</p>
       </div>
       <div class="form-row"><label>Privacy on the platform</label>
         <select name="privacy">
