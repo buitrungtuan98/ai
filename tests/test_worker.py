@@ -238,6 +238,47 @@ def test_episode_memory_flows_into_prompt(session, user, channel, monkeypatch):
     assert t3.synopsis == "Căn nhà cuối xóm có tiếng ru"
 
 
+def test_auto_music_flows_into_render(session, user, channel, monkeypatch, tmp_path):
+    """music_mode=auto resolves a CC0 track and the credit lands in the episode metadata."""
+    from core.config import settings
+    from database.models import BufferPoolItem, Campaign, Task
+    from database.types import CampaignStatus
+    from services import music_service
+    from workers import video_worker
+
+    monkeypatch.setattr(settings, "FREESOUND_API_KEY", "fs-key")
+    track = tmp_path / "freesound_101.mp3"
+    track.write_bytes(b"mp3")
+    credit = {"source": "freesound", "id": 101, "title": "Dark Drone", "author": "artistA", "license": "CC0"}
+    monkeypatch.setattr(music_service, "pick_music", lambda mood, key, cache: (str(track), credit))
+
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="Horror", total_episodes=3,
+                   status=CampaignStatus.active,
+                   config_json={"language": "vi", "auto_publish": False,
+                                "music_mode": "auto", "music_mood": "dark ambient"})
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    t = Task(campaign_id=cam.id, user_id=user.id, episode_number=1)
+    session.add(t)
+    session.commit()
+    session.refresh(t)
+
+    captured = {}
+
+    def fake_produce(**kwargs):
+        captured.update(kwargs)
+        return _result()
+
+    monkeypatch.setattr(video_worker, "generate_script", lambda **k: _script())
+    monkeypatch.setattr(video_worker.video_factory, "produce", fake_produce)
+
+    video_worker.render_task(t.id)
+    assert captured["music_path"] == str(track)  # the picked CC0 file reached the renderer
+    buf = session.query(BufferPoolItem).filter_by(campaign_id=cam.id, episode_number=1).one()
+    assert buf.metadata_json["music_credit"]["title"] == "Dark Drone"  # per-episode transparency
+
+
 def test_hydrate_respects_campaign_buffer_size(session, user, channel):
     from database.models import Campaign, Task
     from database.types import CampaignStatus

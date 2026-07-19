@@ -357,6 +357,7 @@ def _build_campaign_config(
     persona: str, style_examples: str, catchphrase_open: str, catchphrase_close: str,
     continuity: str, timezone: str,
     motion: str = "on", caption_theme: str = "highlight", self_critique: str = "on",
+    music_mode: str = "none", music_mood: str = "",
 ) -> dict:
     """One place turns the campaign form into config_json (DRY: shared by create and edit)."""
     config: dict = {
@@ -378,6 +379,9 @@ def _build_campaign_config(
         "motion": "off" if motion == "off" else "on",
         "caption_theme": caption_theme if caption_theme in ("classic", "highlight", "boxed", "neon") else "highlight",
         "self_critique": "off" if self_critique == "off" else "on",
+        # Music: none | auto (random CC0 by mood, per episode) | file (operator-supplied path).
+        "music_mode": music_mode if music_mode in ("none", "auto", "file") else "none",
+        "music_mood": music_mood.strip() or None,
     }
     if watermark_path or (tint_color and tint_opacity > 0) or mirror:
         config["branding"] = {
@@ -421,6 +425,8 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
     motion: str = Form("on"),
     caption_theme: str = Form("highlight"),
     self_critique: str = Form("on"),
+    music_mode: str = Form("none"),
+    music_mood: str = Form(""),
 ) -> dict:
     return {
         "topic_name": topic_name, "channel_id": channel_id, "total_episodes": total_episodes,
@@ -433,6 +439,7 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
             persona=persona, style_examples=style_examples, catchphrase_open=catchphrase_open,
             catchphrase_close=catchphrase_close, continuity=continuity, timezone=timezone,
             motion=motion, caption_theme=caption_theme, self_critique=self_critique,
+            music_mode=music_mode, music_mood=music_mood,
         ),
     }
 

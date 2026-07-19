@@ -51,6 +51,32 @@ def _resolve_keys(user: User) -> tuple[str, str]:
     return gemini, pexels
 
 
+def _resolve_music(cfg: dict) -> tuple[str | None, dict | None]:
+    """Resolve the campaign's music mode to a local file path (+ credit for transparency).
+
+    Modes: "auto" = random CC0 track by mood via Freesound (cached; degrades to no music on
+    failure); "file" = operator-supplied path (fails loudly if missing — config truth);
+    "none"/absent = narration only. Legacy configs with only music_path behave as "file".
+    """
+    mode = cfg.get("music_mode") or ("file" if cfg.get("music_path") else "none")
+    if mode == "file":
+        return cfg.get("music_path") or None, None
+    if mode == "auto" and settings.FREESOUND_API_KEY:
+        from services import music_service
+
+        picked = music_service.pick_music(
+            cfg.get("music_mood") or "ambient background",
+            settings.FREESOUND_API_KEY,
+            os.path.join(settings.MEDIA_ROOT, "music_cache"),
+        )
+        if picked:
+            return picked
+        logger.warning("Auto-music unavailable — rendering without music")
+    elif mode == "auto":
+        logger.warning("music_mode=auto but FREESOUND_API_KEY is not set — rendering without music")
+    return None, None
+
+
 def _branding_from_config(cfg: dict) -> Branding:
     b = cfg.get("branding") or {}
     return Branding(
@@ -277,6 +303,7 @@ def render_task(task_id: int) -> None:
 
         _set_status(db, task, TaskStatus.RENDERING, 10)
         output_dir = os.path.join(settings.MEDIA_ROOT, "buffer", str(campaign.id))
+        music_path, music_credit = _resolve_music(cfg)
         result = video_factory.produce(
             script=script,
             episode_number=task.episode_number,
@@ -289,7 +316,7 @@ def render_task(task_id: int) -> None:
             subtitle_style=cfg.get("subtitle_style", "word"),
             caption_theme=cfg.get("caption_theme", "highlight"),
             motion=cfg.get("motion", "on") != "off",
-            music_path=cfg.get("music_path") or None,
+            music_path=music_path,
             music_volume=float(cfg.get("music_volume", 0.15)),
             ab_testing=bool(cfg.get("ab_testing", True)),
             on_progress=lambda p: set_progress(task_id, 10 + p * 0.8),
@@ -300,6 +327,8 @@ def render_task(task_id: int) -> None:
         # review) has everything it needs.
         result.metadata.setdefault("cta", cfg.get("cta"))
         result.metadata.setdefault("privacy", cfg.get("privacy", "public"))
+        if music_credit:
+            result.metadata["music_credit"] = music_credit  # per-episode transparency (CC0)
 
         buf = BufferPoolItem(
             campaign_id=campaign.id,

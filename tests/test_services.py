@@ -69,6 +69,65 @@ def test_facebook_load():
         fs._load(Channel(platform=Platform.facebook, channel_name="X", encrypted_credentials="{}"))
 
 
+def test_pick_music_cc0_search_and_cache(monkeypatch, tmp_path):
+    import random
+
+    import requests
+
+    from services import music_service as ms
+
+    downloads = []
+
+    class SearchResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"results": [
+                {"id": 101, "name": "Dark Drone", "username": "artistA",
+                 "previews": {"preview-hq-mp3": "https://cdn.example/101.mp3"}},
+                {"id": 202, "name": "No Preview", "username": "artistB", "previews": {}},
+            ]}
+
+    class DownloadResp:
+        def raise_for_status(self):
+            pass
+
+        def iter_content(self, chunk_size):
+            return iter([b"mp3-bytes"])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_get(url, params=None, stream=False, timeout=None):
+        if url == ms.FREESOUND_SEARCH_URL:
+            assert 'license:"Creative Commons 0"' in params["filter"]  # CC0-only, always
+            assert params["query"] == "dark ambient horror"
+            return SearchResp()
+        downloads.append(url)
+        return DownloadResp()
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(random, "choice", lambda pool: pool[0])  # deterministic for the test
+
+    cache = str(tmp_path / "cache")
+    path, credit = ms.pick_music("dark ambient horror", "fs-key", cache)
+    assert path.endswith("freesound_101.mp3") and open(path, "rb").read() == b"mp3-bytes"
+    assert credit["license"] == "CC0" and credit["author"] == "artistA"
+    assert downloads == ["https://cdn.example/101.mp3"]
+
+    # Cached: second pick of the same track downloads nothing.
+    path2, _ = ms.pick_music("dark ambient horror", "fs-key", cache)
+    assert path2 == path and downloads == ["https://cdn.example/101.mp3"]
+
+    # Any failure degrades to None (episode renders without music, never fails).
+    monkeypatch.setattr(requests, "get", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("api down")))
+    assert ms.pick_music("mood", "fs-key", cache) is None
+
+
 def test_telegram_send(monkeypatch):
     import requests
 

@@ -96,7 +96,17 @@
       <div class="form-row"><label>Audio speed adjustment: <span id="rate-val">{{ cfg.get('rate_pct', 0) }}</span>%</label>
         <input name="rate_pct" type="range" min="-20" max="20" value="{{ cfg.get('rate_pct', 0) }}"
                oninput="document.getElementById('rate-val').textContent=this.value"></div>
-      <div class="form-row"><label>Background music file on the server (optional — must be YOUR licensed/royalty-free audio)</label>
+      <div class="form-row"><label>Background music</label>
+        <select name="music_mode">
+          <option value="none" {{ 'selected' if (cfg.get('music_mode') or ('file' if cfg.get('music_path') else 'none'))=='none' }}>None — narration only</option>
+          <option value="auto" {{ 'selected' if cfg.get('music_mode')=='auto' }}>Auto — random free CC0 track by mood, new one each episode</option>
+          <option value="file" {{ 'selected' if (cfg.get('music_mode') or ('file' if cfg.get('music_path') else ''))=='file' }}>My file on the server</option>
+        </select>
+        <p class="hint">Auto uses Freesound.org filtered to CC0 (public domain) — safe for monetized videos, no attribution needed. Requires FREESOUND_API_KEY in .env (free).</p>
+      </div>
+      <div class="form-row"><label>Music mood (for Auto — in English)</label>
+        <input name="music_mood" placeholder="dark ambient horror drone" value="{{ cfg.get('music_mood') or '' }}"></div>
+      <div class="form-row"><label>Music file path (for "My file" — must be YOUR licensed audio)</label>
         <input name="music_path" placeholder="/data/media/music/bg.mp3" value="{{ cfg.get('music_path') or '' }}"></div>
       <div class="form-row"><label>Music volume under narration: <span id="mvol-val">{{ cfg.get('music_volume', 0.15) }}</span></label>
         <input name="music_volume" type="range" min="0.05" max="0.5" step="0.05" value="{{ cfg.get('music_volume', 0.15) }}"

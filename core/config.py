@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     # --- Optional global fallback provider keys (per-user keys take priority) ---
     GEMINI_MODEL: str = "gemini-1.5-flash"  # swap when Google ships a better free-tier model
     GEMINI_API_KEY: str | None = None
+    # Free key from freesound.org — enables per-campaign automatic CC0 background music.
+    FREESOUND_API_KEY: str | None = None
     PEXELS_API_KEY: str | None = None
     TELEGRAM_BOT_TOKEN: str | None = None
     TELEGRAM_CHAT_ID: str | None = None

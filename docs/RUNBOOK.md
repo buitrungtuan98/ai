@@ -76,6 +76,15 @@ Every campaign improves automatically on two levels (see ADR-012):
    reconnect (adds the read-only `yt-analytics.readonly` scope).
 Model upgrades: set `GEMINI_MODEL` in `.env` when Google ships a better free-tier model.
 
+## Automatic background music (zero manual work)
+Set a campaign's **Background music** to *Auto* and give a mood in English (e.g. "dark ambient
+horror drone"). Each episode gets a **random CC0 (public-domain) track** matching the mood from
+Freesound.org — safe for commercial/monetized videos, no attribution required — downloaded once
+into `/data/media/music_cache/` and mixed under the narration. Setup: register a free API key at
+freesound.org/apiv2 and set `FREESOUND_API_KEY` in `.env`. If the API is unreachable, the episode
+renders without music (never fails). The chosen track (title/author/id) is recorded per episode in
+the buffer metadata for transparency.
+
 ## Retrying failed episodes
 Task Logs shows every failure with its full error. **Retry** re-runs the episode; if the rendered
 file still exists (upload failed / was awaiting review) only the upload is retried — no re-render.
