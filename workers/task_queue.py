@@ -88,6 +88,15 @@ def clear_progress(task_id: int) -> None:
     conn.hdel(_PROGRESS_KEY, str(task_id))
 
 
+def active_render_task_ids() -> set[str]:
+    """Task ids with a live progress entry — i.e. a render in flight. The orphan sweeper uses this
+    to never delete the workspace of the job that is rendering right now (even under disk pressure)."""
+    try:
+        return {k.decode() if isinstance(k, bytes) else str(k) for k in conn.hkeys(_PROGRESS_KEY)}
+    except Exception:  # noqa: BLE001 — never let housekeeping raise
+        return set()
+
+
 def worker_alive() -> bool:
     """True if at least one RQ worker is registered (used by the worker healthcheck)."""
     try:

@@ -128,18 +128,23 @@ def test_reap_stuck_tasks(session, user, channel):
                 status=TaskStatus.RENDERING, updated_at=now - timedelta(hours=3))
     alive = Task(campaign_id=cam.id, user_id=user.id, episode_number=2,
                  status=TaskStatus.RENDERING, updated_at=now - timedelta(minutes=5))
-    queued = Task(campaign_id=cam.id, user_id=user.id, episode_number=3,
-                  status=TaskStatus.PENDING_QUEUE, updated_at=now - timedelta(hours=6))
-    session.add_all([dead, alive, queued])
+    # A PENDING_QUEUE task stuck far past any real backlog (3× job timeout ≈ 2.25h) is dead-lettered
+    # (e.g. its job failed to acquire a stale lock) — reap it so Retry works.
+    queued_stuck = Task(campaign_id=cam.id, user_id=user.id, episode_number=3,
+                        status=TaskStatus.PENDING_QUEUE, updated_at=now - timedelta(hours=6))
+    # A recently-queued task waiting behind a legitimate backlog is left alone.
+    queued_recent = Task(campaign_id=cam.id, user_id=user.id, episode_number=4,
+                         status=TaskStatus.PENDING_QUEUE, updated_at=now - timedelta(minutes=10))
+    session.add_all([dead, alive, queued_stuck, queued_recent])
     session.commit()
 
-    assert sch.reap_stuck_tasks(session, now=now) == 1
-    session.refresh(dead)
-    session.refresh(alive)
-    session.refresh(queued)
+    assert sch.reap_stuck_tasks(session, now=now) == 2
+    for t in (dead, alive, queued_stuck, queued_recent):
+        session.refresh(t)
     assert dead.status == TaskStatus.FAILED and "Retry" in dead.error_message
+    assert queued_stuck.status == TaskStatus.FAILED   # long-stranded queue entry → recoverable
     assert alive.status == TaskStatus.RENDERING       # recent progress → untouched
-    assert queued.status == TaskStatus.PENDING_QUEUE  # waiting in a deep queue is legitimate
+    assert queued_recent.status == TaskStatus.PENDING_QUEUE  # legitimate backlog → untouched
 
 
 def test_collect_stats_eligibility(session, user, channel, monkeypatch):
@@ -234,3 +239,31 @@ def test_expire_stale_buffers(session, user, channel, tmp_path):
     n = sch.expire_stale_buffers(session, now=datetime(2026, 7, 17, 10, 0))
     session.refresh(item)
     assert n == 1 and item.status == BufferStatus.expired and not os.path.exists(vp)
+
+
+def test_expire_recovers_scheduled_task(session, user, channel, tmp_path):
+    """A slot-scheduled task whose pre-rendered buffer expires must not strand in SCHEDULED — it is
+    failed so Retry can re-render it (otherwise no reaper/retry/publish path ever reaches it)."""
+    from database.models import BufferPoolItem, Campaign, Task
+    from database.types import BufferStatus, CampaignStatus, TaskStatus
+    from workers import scheduler as sch
+
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="A", total_episodes=3,
+                   status=CampaignStatus.active)
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    vp = str(tmp_path / "sched.mp4")
+    open(vp, "w").write("x")
+    item = BufferPoolItem(campaign_id=cam.id, channel_id=channel.id, episode_number=1,
+                          video_path=vp, status=BufferStatus.ready)
+    task = Task(campaign_id=cam.id, user_id=user.id, episode_number=1, status=TaskStatus.SCHEDULED)
+    session.add_all([item, task])
+    session.commit()
+    session.refresh(item)
+    item.created_at = datetime(2000, 1, 1)
+    session.commit()
+
+    sch.expire_stale_buffers(session, now=datetime(2026, 7, 17, 10, 0))
+    session.refresh(task)
+    assert task.status == TaskStatus.FAILED and "Retry" in task.error_message

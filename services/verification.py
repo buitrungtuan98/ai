@@ -21,8 +21,9 @@ def verify_gemini(api_key: str) -> tuple[bool, str]:
         if resp.status_code == 200:
             return True, "Gemini key is valid."
         return False, f"Gemini rejected the key (HTTP {resp.status_code})."
-    except Exception as exc:  # noqa: BLE001
-        return False, f"Could not reach Gemini: {exc}"
+    except Exception as exc:  # noqa: BLE001 — the exception text embeds the URL (?key=…); never expose it
+        logger.warning("Gemini verification network error: %s", type(exc).__name__)
+        return False, "Could not reach Gemini (network error)."
 
 
 def verify_pexels(api_key: str) -> tuple[bool, str]:
@@ -39,7 +40,8 @@ def verify_pexels(api_key: str) -> tuple[bool, str]:
             return True, "Pexels key is valid."
         return False, f"Pexels rejected the key (HTTP {resp.status_code})."
     except Exception as exc:  # noqa: BLE001
-        return False, f"Could not reach Pexels: {exc}"
+        logger.warning("Pexels verification network error: %s", type(exc).__name__)
+        return False, "Could not reach Pexels (network error)."
 
 
 def verify_telegram(token: str, chat_id: str | None = None) -> tuple[bool, str]:
@@ -60,5 +62,6 @@ def verify_telegram(token: str, chat_id: str | None = None) -> tuple[bool, str]:
                 return False, f"Token OK (@{bot}) but sending to chat {chat_id} failed — check the chat ID."
             return True, f"Token OK (@{bot}) — test message sent."
         return True, f"Token OK (@{bot}). Add a chat ID to test delivery."
-    except Exception as exc:  # noqa: BLE001
-        return False, f"Could not reach Telegram: {exc}"
+    except Exception as exc:  # noqa: BLE001 — the exception text embeds the URL (/bot<token>/); never expose it
+        logger.warning("Telegram verification network error: %s", type(exc).__name__)
+        return False, "Could not reach Telegram (network error)."

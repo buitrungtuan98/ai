@@ -85,6 +85,19 @@ def expire_stale_buffers(db, *, max_age_hours: int | None = None, now: datetime 
                     pass
             item.status = BufferStatus.expired
             expired += 1
+            # A slot-scheduled task points at this now-deleted buffer; without this it would sit in
+            # SCHEDULED forever (no reaper/retry reaches it). Fail it so Retry can re-render.
+            task = db.scalar(select(Task).where(
+                Task.campaign_id == item.campaign_id,
+                Task.episode_number == item.episode_number,
+                Task.status == TaskStatus.SCHEDULED,
+            ))
+            if task is not None:
+                task.status = TaskStatus.FAILED
+                task.finished_at = now
+                task.error_message = (
+                    f"Pre-rendered episode expired before its posting slot (buffer older than "
+                    f"{max_age_hours}h). Use Retry to re-render.")
     if expired:
         db.commit()
         logger.info("Expired %d stale buffer item(s)", expired)
@@ -152,14 +165,23 @@ _STUCK_STATUSES = [TaskStatus.AI_GENERATION, TaskStatus.AUDIO_SYNCED,
 def reap_stuck_tasks(db, now: datetime | None = None) -> int:
     now = now or datetime.utcnow()
     cutoff = now - timedelta(seconds=settings.JOB_TIMEOUT_SECONDS * 2)
-    stuck = db.scalars(
+    stuck = list(db.scalars(
         select(Task).where(Task.status.in_(_STUCK_STATUSES), Task.updated_at <= cutoff)
-    ).all()
+    ).all())
+    # PENDING_QUEUE tasks can strand if their job was dead-lettered (e.g. a stale lock at restart)
+    # or an enqueue raised after the row was committed — no reaper/retry reaches them and hydration
+    # counts them as active, freezing the campaign. Anything queued far longer than any real
+    # backlog (3× the job timeout) is definitively stuck. A larger cutoff avoids failing a task
+    # that is legitimately waiting behind a deep buffer.
+    pending_cutoff = now - timedelta(seconds=settings.JOB_TIMEOUT_SECONDS * 3)
+    stuck += list(db.scalars(
+        select(Task).where(Task.status == TaskStatus.PENDING_QUEUE, Task.updated_at <= pending_cutoff)
+    ).all())
     for task in stuck:
         task.status = TaskStatus.FAILED
         task.finished_at = now
-        task.error_message = ("Worker crashed or timed out mid-job (no progress for over "
-                              f"{settings.JOB_TIMEOUT_SECONDS * 2 // 60} minutes). Use Retry.")
+        task.error_message = ("Worker crashed, timed out, or the job was lost (no progress for a "
+                              "long time). Use Retry.")
     if stuck:
         db.commit()
         logger.warning("Reaped %d stuck task(s)", len(stuck))
@@ -231,21 +253,29 @@ def periodic_tick(db=None, now: datetime | None = None) -> dict:
     summary = {"swept": 0, "expired": 0, "hydrated": [], "published": [], "learning": None, "reaped": 0}
     try:
         summary["reaped"] = reap_stuck_tasks(db)
-        # Disk hygiene.
-        summary["swept"] = sweep_orphans()
+        # Disk hygiene. Never sweep the workspace of a render in flight (its dir mtime goes stale
+        # during a long single-scene encode), even under disk pressure.
+        active = task_queue.active_render_task_ids()
+        summary["swept"] = sweep_orphans(skip=active)
         if disk_usage_pct(settings.MEDIA_ROOT) >= settings.DISK_PRESSURE_PCT:
             logger.warning("Disk pressure high on %s — sweeping aggressively", settings.MEDIA_ROOT)
-            summary["swept"] += sweep_orphans(max_age_minutes=5)
+            summary["swept"] += sweep_orphans(max_age_minutes=5, skip=active)
         summary["expired"] = expire_stale_buffers(db)
 
         campaigns = db.scalars(select(Campaign).where(Campaign.status == CampaignStatus.active)).all()
         for campaign in campaigns:
-            # Render eagerly — a full buffer is what makes on-the-dot slot publishing possible.
-            summary["hydrated"] += video_worker.hydrate_campaign(db, campaign)
-            # Publish exactly one pre-rendered episode if this campaign's slot is now.
-            published = publish_due_campaign(db, campaign, now=now)
-            if published is not None:
-                summary["published"].append(published)
+            # Isolate each campaign — one campaign's fault must not starve the others' hydration or
+            # cost them their posting slot this tick.
+            try:
+                # Render eagerly — a full buffer is what makes on-the-dot slot publishing possible.
+                summary["hydrated"] += video_worker.hydrate_campaign(db, campaign)
+                # Publish exactly one pre-rendered episode if this campaign's slot is now.
+                published = publish_due_campaign(db, campaign, now=now)
+                if published is not None:
+                    summary["published"].append(published)
+            except Exception:  # noqa: BLE001 — keep processing the remaining campaigns
+                logger.warning("Tick failed for campaign %s", campaign.id, exc_info=True)
+                db.rollback()
 
         # Self-improvement pass at most once per day (Redis NX guard across ticks/restarts).
         try:

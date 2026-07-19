@@ -51,11 +51,15 @@ def pick_music(mood: str, api_key: str, cache_dir: str) -> tuple[str, dict] | No
         os.makedirs(cache_dir, exist_ok=True)
         path = os.path.join(cache_dir, f"freesound_{track['id']}.mp3")
         if not os.path.exists(path):
+            # Download to a temp file then atomically rename — a mid-stream failure must never leave
+            # a truncated file at the final path where os.path.exists would treat it as a cache hit.
+            tmp = path + ".part"
             with requests.get(track["previews"]["preview-hq-mp3"], stream=True, timeout=120) as dl:
                 dl.raise_for_status()
-                with open(path, "wb") as f:
+                with open(tmp, "wb") as f:
                     for chunk in dl.iter_content(chunk_size=1 << 16):
                         f.write(chunk)
+            os.replace(tmp, path)
         credit = {
             "source": "freesound",
             "id": track["id"],

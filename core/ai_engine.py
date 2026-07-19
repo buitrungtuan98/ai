@@ -103,10 +103,17 @@ def _call_gemini(
     resp = gen_model.generate_content(prompt)
 
     # Distinguish a safety block from a normal empty response.
-    for cand in getattr(resp, "candidates", []) or []:
+    candidates = getattr(resp, "candidates", None) or []
+    for cand in candidates:
         reason = getattr(cand, "finish_reason", None)
         if reason and str(reason).upper().endswith(("SAFETY", "RECITATION")):
             raise GeminiBlockedError(f"Gemini blocked the response (finish_reason={reason}).")
+    # A prompt-level block yields NO candidates (reason lives in prompt_feedback). Reading resp.text
+    # then raises a bare ValueError that the retry loop would misread as a repairable parse error —
+    # surface it as a non-retryable block instead.
+    if not candidates:
+        feedback = getattr(resp, "prompt_feedback", None)
+        raise GeminiBlockedError(f"Gemini returned no candidates (prompt_feedback={feedback}).")
     return resp.text
 
 
@@ -166,11 +173,17 @@ def generate_structured(
 
 
 def _strip_code_fence(text: str) -> str:
-    """Tolerate a ```json ... ``` fence if the model adds one despite JSON mode."""
+    """Tolerate a ```json ... ``` fence if the model adds one despite JSON mode — including a
+    single-line fence with no newline after the language tag."""
     s = text.strip()
-    if s.startswith("```"):
-        s = s.split("\n", 1)[-1] if "\n" in s else s
-        s = s.rsplit("```", 1)[0]
+    if not s.startswith("```"):
+        return s
+    s = s[3:]                       # drop the opening ```
+    if s[:4].lower() == "json":     # optional language tag
+        s = s[4:]
+    if s.startswith("\n"):
+        s = s[1:]
+    s = s.rsplit("```", 1)[0]       # drop the closing fence
     return s.strip()
 
 

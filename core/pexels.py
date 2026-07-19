@@ -44,12 +44,17 @@ def search_videos(
         files = video.get("video_files", [])
         if not files:
             continue
+        # A missing/zero duration is unusable for coverage math (it would make select_clips cycle
+        # up to its safety valve and build a pathological command). Skip such clips.
+        duration = float(video.get("duration", 0) or 0)
+        if duration <= 0:
+            continue
         # Prefer a portrait rendition >= 1080 wide; else the largest available.
         best = _best_file(files)
         clips.append(
             PexelsClip(
                 id=video["id"],
-                duration=float(video.get("duration", 0)),
+                duration=duration,
                 width=best.get("width") or 0,
                 height=best.get("height") or 0,
                 download_url=best["link"],

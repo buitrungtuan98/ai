@@ -28,6 +28,10 @@ BACKUP_BRANCH="${BACKUP_BRANCH:-main}"
 GITHUB_PAT="${GITHUB_PAT:?set GITHUB_PAT (fine-grained, single repo, contents:write)}"
 CLONE_DIR="${WORK_DIR}/backup_repo"
 
+# The clone contains .git/config with the PAT embedded in the remote URL. Always wipe it on exit
+# (success OR failure under `set -e`) so the PAT never persists on disk.
+trap 'rm -rf "$CLONE_DIR"' EXIT
+
 # Allow-list of tables to export. A NEW table is not exported until added here — safer than
 # a deny-list (a new secret-bearing table can't leak silently).
 TABLES=(users channels campaigns tasks buffer_pool)
@@ -65,8 +69,9 @@ log "Dumping tables: ${TABLES[*]}"
 sqlite3 "$SNAPSHOT" ".dump ${TABLES[*]}" > "$DUMP"
 
 # --- 6. Plaintext-secret guard ----------------------------------------------
-# Fernet tokens start with 'gAAAAA'. Bare high-entropy secret patterns that must never appear:
-if grep -Eiq '(FERNET_KEY|-----BEGIN [A-Z ]*PRIVATE KEY-----|ghp_[A-Za-z0-9]{20,})' "$DUMP"; then
+# Fernet tokens start with 'gAAAAA'. Bare high-entropy secret patterns that must never appear —
+# covers classic (ghp_) AND fine-grained (github_pat_) PATs plus Google/Gemini (AIza) keys.
+if grep -Eiq '(FERNET_KEY|-----BEGIN [A-Z ]*PRIVATE KEY-----|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z_-]{30,})' "$DUMP"; then
   log "ERROR: dump appears to contain a plaintext secret. Aborting push."
   rm -f "$SNAPSHOT" "$DUMP"
   exit 1
@@ -76,8 +81,10 @@ fi
 log "Pushing to ${BACKUP_REPO}@${BACKUP_BRANCH}..."
 rm -rf "$CLONE_DIR"
 remote="https://x-access-token:${GITHUB_PAT}@github.com/${BACKUP_REPO}.git"
+# stderr is silenced on every git op touching $remote: a failure message would echo the PAT-bearing
+# URL into the cron log.
 git clone --depth 1 --branch "$BACKUP_BRANCH" "$remote" "$CLONE_DIR" 2>/dev/null \
-  || git clone --depth 1 "$remote" "$CLONE_DIR"
+  || git clone --depth 1 "$remote" "$CLONE_DIR" 2>/dev/null
 cp "$DUMP" "$CLONE_DIR/factory_dump.sql"
 (
   cd "$CLONE_DIR"
@@ -89,12 +96,13 @@ cp "$DUMP" "$CLONE_DIR/factory_dump.sql"
     log "No changes since last backup."
   else
     git commit -m "Backup $(date -u +%FT%TZ) [${rows}]"
-    git push origin "HEAD:${BACKUP_BRANCH}"
+    git push origin "HEAD:${BACKUP_BRANCH}" 2>/dev/null  # silence: a push error would echo the PAT URL
     log "Pushed."
   fi
 )
 
 # --- 8. Cleanup --------------------------------------------------------------
+# $CLONE_DIR is also removed by the EXIT trap (covers failure paths).
 rm -rf "$CLONE_DIR"
 rm -f "$SNAPSHOT" "$DUMP"
 log "Done."

@@ -142,6 +142,22 @@ Done). Legend: `DONE` · `WIP` · `TODO` · `BLOCKED`.
 - [DONE] `P17.7` Form toggles (`auto_qc` default on, `color_grade`), ADR-013, RUNBOOK section
 - Verified: 85 tests passing (8 new — vetter threshold + fail-open, final-QC pass/fail/fail-open + frame sampling, candidate reorder/reuse/bounded, grade filter placement + unknown-grade no-op, loudnorm arg builders both paths, worker gate publish-with-verdict / double-fail-parks / off-skips).
 
+## Pre-deployment hardening pass (full-codebase review) `DONE`
+Reviewed every module (parallel readers + per-finding adversarial verification), fixed the
+confirmed defects (see ADR-014). Highlights: campaign completion off-by-one; reject→retry buffer
+unique-constraint fail loop; idempotent publish; SCHEDULED-task recovery on buffer expiry; stale
+render-lock crash recovery + PENDING_QUEUE reaping; scheduler per-campaign isolation; ffmpeg
+stderr deadlock + zombie-on-callback-error; monotonic progress; encoder `-threads`; fail-safe
+footage search/vetting/music; safety-filter no longer falls back to raw text; sweeper spares the
+live render; multi-tenant SECRET_KEY fail-fast; OAuth `state` CSRF hole; Secure cookie; credential
+verifier no longer leaks keys; `.dockerignore` keeps `.env` out of the image; backup PAT never
+persisted/printed; YouTube refresh preserves scopes + rehydrates expiry.
+- Verified: 91 tests passing (6 new — campaign-completion semantics, PENDING_QUEUE reaping,
+  buffer-replace on re-render, publish idempotency, SCHEDULED-expiry recovery, Range suffix/416,
+  monotonic progress, zero-duration clip skip), ruff clean, docs guard green.
+- Deferred (documented in ADR-014/RUNBOOK, non-blocking): zoom-motion visual verification on the
+  box; `WORK_ROOT` must avoid spaces/quotes; raise `JOB_TIMEOUT_SECONDS` for very long renders.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

@@ -191,5 +191,20 @@ The host key does **not** change when you change the port, so `SSH_KNOWN_HOSTS` 
 
 **Rollback:** on the box, `cd ~/ai && git reset --hard <previous-good-sha> && bash scripts/deploy.sh`.
 
+## Operational notes from the hardening review (ADR-014)
+- **`WORK_ROOT` / `MEDIA_ROOT` paths:** keep them free of spaces and quotes (the defaults
+  `/data/media/...` are fine). Scene render passes embed the subtitle path into an ffmpeg filter
+  graph, which is not shell-escaped for exotic characters.
+- **Very long renders + Auto-QC:** a QC failure re-renders once, so a single episode can render
+  twice inside one job. If your renders routinely approach `JOB_TIMEOUT_SECONDS` (default 45 min),
+  raise it so the re-render isn't cut off (it also widens the stuck-task reaper window, which is
+  fine).
+- **Motion effects:** the subtle zoom-in/zoom-out are ffmpeg-`zoompan`-based; on some builds they
+  can look static. Eyeball one rendered video; the pan effect always works, and captions/grade are
+  unaffected. It's cosmetic only.
+- **Multi-tenant mode requires a real `SECRET_KEY`:** the app now refuses to boot in
+  `MULTI_TENANT_MODE=true` with an empty or default `SECRET_KEY` (sessions are signed with it).
+  Generate one with `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
+
 ## Emergency: take the app offline
 `docker compose stop cloudflared` removes public access instantly while leaving data intact.

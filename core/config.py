@@ -10,6 +10,10 @@ from __future__ import annotations
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# The stand-in session key for solo/dev use. In multi-tenant mode this (or an empty value) is
+# rejected at boot — a known signing key would let anyone forge a session cookie (account takeover).
+_INSECURE_SECRET_KEY = "dev-insecure-session-key-change-me"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -72,15 +76,20 @@ class Settings(BaseSettings):
 
     # --- App ---
     LOG_LEVEL: str = "INFO"
-    SECRET_KEY: str = Field(default="dev-insecure-session-key-change-me")
+    SECRET_KEY: str = Field(default=_INSECURE_SECRET_KEY)
     SESSION_MAX_AGE_DAYS: int = 7  # signed browser session lifetime (multi-tenant login)
 
     @model_validator(mode="after")
-    def _require_firebase_in_multi_tenant(self) -> "Settings":
-        """Fail fast at boot (not at first login) if public mode lacks Firebase credentials."""
+    def _validate_multi_tenant(self) -> "Settings":
+        """Fail fast at boot (not at first login) if public mode is missing security prerequisites."""
         if self.MULTI_TENANT_MODE and not self.FIREBASE_CREDENTIALS_PATH:
             raise ValueError(
                 "MULTI_TENANT_MODE=true requires FIREBASE_CREDENTIALS_PATH to be set."
+            )
+        if self.MULTI_TENANT_MODE and (not self.SECRET_KEY or self.SECRET_KEY == _INSECURE_SECRET_KEY):
+            raise ValueError(
+                "MULTI_TENANT_MODE=true requires a strong SECRET_KEY in .env — sessions are signed "
+                'with it. Generate one: python -c "import secrets; print(secrets.token_urlsafe(48))".'
             )
         return self
 

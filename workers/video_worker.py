@@ -102,7 +102,10 @@ def advance_campaign(db, campaign: Campaign) -> AdvanceEvents:
     """
     events = AdvanceEvents()
     campaign.current_episode += 1
-    if campaign.current_episode > campaign.total_episodes:
+    # current_episode counts episodes published (starts at 0). The campaign is done once that count
+    # REACHES total_episodes — `>` never fires (only N episodes ever publish, so it stops at N == N)
+    # and the campaign would sit "active" at N/N forever, never completing or activating the next.
+    if campaign.current_episode >= campaign.total_episodes:
         campaign.status = CampaignStatus.completed
         db.commit()
         events.completed = True
@@ -255,19 +258,22 @@ def render_task(task_id: int) -> None:
         db.close()
         return
 
-    campaign = db.get(Campaign, task.campaign_id)
-    channel = db.get(Channel, campaign.channel_id)
-    user = db.get(User, task.user_id)
-    cfg = campaign.config_json or {}
-    auto_publish = bool(cfg.get("auto_publish", True))
-    # With posting slots configured, auto mode renders ahead into the buffer and the scheduler
-    # publishes exactly one episode per slot (ADR-011). Without slots: publish right after render.
-    slot_scheduled = auto_publish and bool(cfg.get("posting_slots"))
-    # Auto-QC gate (ADR-013): vision-vet footage during render + judge the finished master.
-    # Default ON; every check fails open, so a vision-API outage never blocks an episode.
-    auto_qc = cfg.get("auto_qc", "on") != "off"
-
+    # Loaded inside the try so a transient DB error here can't escape the finally (which closes the
+    # session and clears progress) — otherwise the task would strand and the session would leak.
+    campaign = channel = user = None
     try:
+        campaign = db.get(Campaign, task.campaign_id)
+        channel = db.get(Channel, campaign.channel_id)
+        user = db.get(User, task.user_id)
+        cfg = campaign.config_json or {}
+        auto_publish = bool(cfg.get("auto_publish", True))
+        # With posting slots configured, auto mode renders ahead into the buffer and the scheduler
+        # publishes exactly one episode per slot (ADR-011). Without slots: publish right after render.
+        slot_scheduled = auto_publish and bool(cfg.get("posting_slots"))
+        # Auto-QC gate (ADR-013): vision-vet footage during render + judge the finished master.
+        # Default ON; every check fails open, so a vision-API outage never blocks an episode.
+        auto_qc = cfg.get("auto_qc", "on") != "off"
+
         gemini_key, pexels_key = _resolve_keys(user)
         task.started_at = datetime.utcnow()
 
@@ -362,6 +368,17 @@ def render_task(task_id: int) -> None:
         if qc_report:
             result.metadata["qc"] = qc_report  # machine verdict, visible in the Asset Pool
 
+        # A re-render (e.g. Retry after a reject, or an expired slot item) supersedes any prior
+        # buffer row for this episode. Remove it first — (campaign, episode) is unique, so a blind
+        # insert would raise IntegrityError and dead-end the Retry in a re-render→fail loop.
+        for old in db.scalars(select(BufferPoolItem).where(
+            BufferPoolItem.campaign_id == campaign.id,
+            BufferPoolItem.episode_number == task.episode_number,
+        )).all():
+            _safe_remove(old.video_path, old.thumbnail_path)
+            db.delete(old)
+        db.flush()
+
         # A double Auto-QC failure never publishes: it degrades to review mode for this episode.
         parked_for_review = not auto_publish or qc_failed
         buf = BufferPoolItem(
@@ -395,11 +412,23 @@ def render_task(task_id: int) -> None:
         else:
             _publish_buffer(db, task, buf, campaign, channel, user)
 
-        # Keep the render pipeline fed.
-        hydrate_buffers(db)
+        # Keep the render pipeline fed — but isolated: a hydration hiccup (a race inserting the next
+        # episode, a transient enqueue error) must NOT flip this just-completed episode to FAILED.
+        try:
+            hydrate_buffers(db)
+        except Exception:  # noqa: BLE001
+            logger.warning("post-publish hydration failed for campaign %s", campaign.id, exc_info=True)
 
     except Exception as exc:  # noqa: BLE001 — record, alert, and continue the queue
-        _fail_task(db, task, user, campaign, exc, "render_task")
+        if campaign is not None and user is not None:
+            _fail_task(db, task, user, campaign, exc, "render_task")
+        else:  # failed before the campaign/user loaded — mark FAILED without the Telegram path
+            db.rollback()
+            task.status = TaskStatus.FAILED
+            task.finished_at = datetime.utcnow()
+            task.error_message = f"render_task setup failed: {exc}"
+            db.commit()
+            logger.exception("render_task setup failed for task %s", task_id)
     finally:
         clear_progress(task_id)
         db.close()
@@ -411,6 +440,14 @@ def publish_task(buffer_item_id: int) -> None:
     buf = db.get(BufferPoolItem, buffer_item_id)
     if buf is None:
         logger.error("publish_task: no BufferPoolItem %s", buffer_item_id)
+        db.close()
+        return
+    # Idempotency: a slot tick re-enqueue or a double-clicked Approve can queue this buffer twice.
+    # Only ready/awaiting_review items are publishable — anything else was already handled; bail so
+    # we never upload the same episode twice or resurrect a consumed row against a deleted file.
+    if buf.status not in (BufferStatus.ready, BufferStatus.awaiting_review):
+        logger.info("publish_task: buffer %s already handled (status=%s) — skipping",
+                    buffer_item_id, buf.status)
         db.close()
         return
     campaign = db.get(Campaign, buf.campaign_id)

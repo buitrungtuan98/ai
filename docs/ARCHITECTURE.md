@@ -196,3 +196,43 @@ never blocks an episode — availability of the nightly upload beats a stricter 
 **fail-closed on quality** (a video the machine judged bad twice waits for a human instead of
 publishing). Costs stay $0: a handful of extra free-tier Gemini vision calls per episode; grade
 and loudnorm ride existing encode passes on the CPU-only box.
+
+### ADR-014 — Pre-deployment hardening pass
+**Decision:** A full-codebase review (four parallel readers, then per-finding adversarial
+verification against the live code) surfaced and fixed a set of correctness, robustness, and
+secrets-hygiene defects before first production use. The fixes, grouped:
+- **Campaign lifecycle:** completion is `current_episode >= total_episodes` (was `>`, so a
+  campaign never completed and the next pending campaign never auto-activated); a re-render
+  (Retry-after-reject, or an expired slot item) now REPLACES the prior buffer row for that episode
+  instead of colliding on the `(campaign, episode)` unique constraint (which had dead-ended Retry
+  in a re-render→fail loop); `publish_task` is idempotent (a double-enqueued slot/Approve can't
+  upload twice); an expired pre-rendered buffer fails its stranded SCHEDULED task so Retry recovers
+  it; post-publish hydration is isolated so a hydration hiccup can't flip a just-published episode
+  to FAILED.
+- **Crash recovery:** a render lock present at worker startup is cleared (single-worker topology →
+  it's a crash artifact) so a hard crash mid-render can't dead-letter the whole queue; the stuck
+  reaper also reaps long-stranded `PENDING_QUEUE` tasks; the scheduler tick isolates each campaign
+  so one tenant's fault can't starve the others.
+- **Render engine:** ffmpeg stderr is drained to a temp file (a >64 KB stderr burst could deadlock
+  the reader and hang the single-render box until timeout); a callback error now kills+reaps the
+  child instead of leaving a zombie; global progress is monotonic (was a per-scene sawtooth); the
+  encoder honors `-threads` (it was only reaching the input decoder); footage search, footage
+  vetting, and background-music download all fail safe; the brand-safety filter no longer falls
+  back to the raw text when it strips a scene to empty; the orphan sweeper never deletes the
+  workspace of the render in flight, even under disk pressure.
+- **Auth / secrets:** multi-tenant boot now fails fast on a missing/insecure `SECRET_KEY`; OAuth
+  callbacks reject a missing/mismatched `state` (closing the `None != None` hole) and consume the
+  pending-user id; the session cookie is `Secure`; credential-test errors never echo the URL that
+  embeds the API key/bot token; `.dockerignore` keeps `.env` and the Firebase key out of image
+  layers; the backup script wipes the PAT-bearing clone on every exit and never prints the PAT.
+- **Publishing:** YouTube token refresh preserves the originally-granted scopes (a fixed subset had
+  downscoped the refreshed token and silently killed the analytics/self-improvement loop) and
+  rehydrates the stored expiry so proactive refresh actually runs.
+**Deferred (documented, not code-changed):** the two zoom motion effects may render subtly on some
+ffmpeg builds (verify on the box; the pan effect is unaffected); `WORK_ROOT` must stay free of
+spaces/quotes (the `ass=` filtergraph path isn't shell-escaped — default paths are safe); a very
+long render that fails Auto-QC could exceed the single job timeout on its re-render (raise
+`JOB_TIMEOUT_SECONDS` if renders routinely run long). None block deployment.
+**Why:** the operator asked for a hands-off factory; these were the seams where "hands-off" could
+strand a campaign, hang the box, publish twice, or leak a secret. Every fix keeps the existing
+architecture — the changes harden the edges, they don't reshape the system.

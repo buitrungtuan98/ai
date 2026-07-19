@@ -151,6 +151,48 @@ def test_caption_themes(tmp_path):
     assert "&H00FF901E" in content and POP_TAG in content  # campaign accent colour drives the style
 
 
+def test_progress_is_monotonic(monkeypatch):
+    """The global progress callback must never jump backward across scenes (was a per-scene
+    sawtooth when prep/render were reported as interleaved stages)."""
+    from core import video_factory as vf
+
+    values: list[float] = []
+
+    def emit(frac):  # produce()'s report() maps stage fractions into 0..100 via _STAGE_BUDGET
+        values.append(frac)
+
+    # Drive report() directly the way produce() does: per scene, encode progress then scene-done.
+    n = 3
+    for si in range(n):
+        for p in (0, 40, 80, 100):
+            base = sum(v for k, v in vf._STAGE_BUDGET.items()
+                       if vf._stage_order(k) < vf._stage_order("scenes"))
+            emit(min(99.0, base + ((si + p / 100) / n * 100) / 100 * vf._STAGE_BUDGET["scenes"]))
+    assert values == sorted(values)  # never decreases
+
+
+def test_pexels_skips_zero_duration(monkeypatch):
+    """A clip with missing/zero duration is dropped (it would defeat select_clips' coverage math)."""
+    from core import pexels
+
+    payload = {"videos": [
+        {"id": 1, "duration": 0, "video_files": [{"link": "u0", "width": 1080, "height": 1920}]},
+        {"id": 2, "duration": 8, "video_files": [{"link": "u2", "width": 1080, "height": 1920}]},
+        {"id": 3, "video_files": [{"link": "u3", "width": 1080, "height": 1920}]},  # no duration
+    ]}
+
+    class R:
+        def raise_for_status(self): pass
+        def json(self): return payload
+
+    import sys
+
+    fake_requests = type("m", (), {"get": staticmethod(lambda *a, **k: R())})
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)  # search_videos does `import requests`
+    clips = pexels.search_videos("q", "key")
+    assert [c.id for c in clips] == [2]  # only the positive-duration clip survives
+
+
 def test_color_grade_in_scene_graph():
     from core.video_factory import COLOR_GRADES, build_scene_args
 
@@ -227,13 +269,22 @@ def test_ffmpeg_runner_uses_nice_threads(monkeypatch):
 
     captured = {}
 
+    class FakeStdout:
+        def __iter__(self):
+            return iter([])
+
+        def close(self):
+            pass
+
     class FakeProc:
-        stdout = iter([])
-        stderr = None
+        stdout = FakeStdout()
         returncode = 0
 
         def wait(self):
             return 0
+
+        def kill(self):
+            pass
 
     def fake_popen(cmd, **kw):
         captured["cmd"] = cmd

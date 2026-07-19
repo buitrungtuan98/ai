@@ -21,6 +21,28 @@ def test_health(client):
     assert client.get("/health").json() == {"status": "ok"}
 
 
+def test_ranged_response_suffix_and_unsatisfiable(tmp_path):
+    """The preview streamer handles suffix ranges (last N bytes) and rejects unsatisfiable ranges
+    with a 416 instead of a broken 206 with a negative Content-Length."""
+    import main
+
+    f = tmp_path / "v.bin"
+    f.write_bytes(b"0123456789")  # 10 bytes
+
+    def req(rng):
+        return type("R", (), {"headers": {"range": rng}})()
+
+    r = main._ranged_file_response(str(f), req("bytes=0-"), "application/octet-stream")
+    assert r.status_code == 206 and r.headers["Content-Range"] == "bytes 0-9/10"
+
+    r = main._ranged_file_response(str(f), req("bytes=-3"), "application/octet-stream")  # last 3 bytes
+    assert r.status_code == 206 and r.headers["Content-Range"] == "bytes 7-9/10"
+    assert r.headers["Content-Length"] == "3"
+
+    r = main._ranged_file_response(str(f), req("bytes=1000-"), "application/octet-stream")  # past EOF
+    assert r.status_code == 416 and r.headers["Content-Range"] == "bytes */10"
+
+
 def test_all_pages_render(client):
     for path in ["/", "/channels", "/campaigns", "/campaigns/new", "/credentials", "/assets", "/tasks"]:
         r = client.get(path)
