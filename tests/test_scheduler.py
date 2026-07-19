@@ -112,6 +112,36 @@ def test_publish_due_campaign_skips_continuous_and_review(session, user, channel
     assert sch.publish_due_campaign(session, review, now=datetime(2026, 7, 17, 21, 0), enqueue=enq) is None
 
 
+def test_reap_stuck_tasks(session, user, channel):
+    from datetime import timedelta
+    from database.models import Campaign, Task
+    from database.types import CampaignStatus, TaskStatus
+    from workers import scheduler as sch
+
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="A", total_episodes=9,
+                   status=CampaignStatus.active)
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    now = datetime.utcnow()
+    dead = Task(campaign_id=cam.id, user_id=user.id, episode_number=1,
+                status=TaskStatus.RENDERING, updated_at=now - timedelta(hours=3))
+    alive = Task(campaign_id=cam.id, user_id=user.id, episode_number=2,
+                 status=TaskStatus.RENDERING, updated_at=now - timedelta(minutes=5))
+    queued = Task(campaign_id=cam.id, user_id=user.id, episode_number=3,
+                  status=TaskStatus.PENDING_QUEUE, updated_at=now - timedelta(hours=6))
+    session.add_all([dead, alive, queued])
+    session.commit()
+
+    assert sch.reap_stuck_tasks(session, now=now) == 1
+    session.refresh(dead)
+    session.refresh(alive)
+    session.refresh(queued)
+    assert dead.status == TaskStatus.FAILED and "Retry" in dead.error_message
+    assert alive.status == TaskStatus.RENDERING       # recent progress → untouched
+    assert queued.status == TaskStatus.PENDING_QUEUE  # waiting in a deep queue is legitimate
+
+
 def test_collect_stats_eligibility(session, user, channel, monkeypatch):
     from datetime import timedelta
     from database.models import Campaign, Task

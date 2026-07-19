@@ -181,6 +181,22 @@ def build_concat_args(
     ]
 
 
+FALLBACK_FOOTAGE_QUERY = "abstract dark background"
+
+
+def search_footage(keywords: list[str], api_key: str) -> list:
+    """Resilient footage search: joined keywords → each keyword alone → generic fallback.
+    One weak keyword (or a non-English slip) must not fail the whole episode."""
+    queries = [" ".join(keywords), *keywords, FALLBACK_FOOTAGE_QUERY]
+    for query in queries:
+        found = pexels.search_videos(query, api_key, per_page=10)
+        if found:
+            if query != queries[0]:
+                logger.info("Footage fallback used: %r", query)
+            return found
+    return []
+
+
 def pick_metadata(script: VideoScript, episode_number: int, ab_testing: bool = True) -> dict:
     """A/B rotation: cycle the 3 metadata variations across episodes. With A/B testing disabled,
     variant A is always used."""
@@ -245,12 +261,12 @@ def produce(
             d_i = media.probe_duration(audio_path)
             durations.append(d_i)
 
-            # 3. Fetch footage to cover d_i.
+            # 3. Fetch footage to cover d_i (with keyword fallback chain).
             safety_filter.assert_licensed_footage("pexels")
-            query = " ".join(scene.pexels_keywords)
-            found = pexels.search_videos(query, pexels_api_key, per_page=10)
+            found = search_footage(scene.pexels_keywords, pexels_api_key)
             if not found:
-                raise RuntimeError(f"No Pexels footage for scene {si} (query={query!r})")
+                raise RuntimeError(
+                    f"No Pexels footage for scene {si} (keywords={scene.pexels_keywords!r})")
             picks = select_clips([c.duration for c in found], d_i)
             # Download each unique clip once, then expand `picks` (which may repeat) to file paths.
             path_by_idx: dict[int, str] = {}

@@ -142,6 +142,29 @@ def publish_due_campaign(db, campaign: Campaign, now: datetime | None = None,
 DISTILL_MIN_EPISODES = 5     # need this many measured episodes before learning anything
 DISTILL_EVERY_DAYS = 7       # refresh the playbook at most weekly
 
+# A hard-killed worker (OOM, power loss) can leave a task frozen in a working state with no job
+# behind it. Anything untouched for 2× the job timeout is definitively dead — fail it so the
+# operator sees it and the Retry button works.
+_STUCK_STATUSES = [TaskStatus.AI_GENERATION, TaskStatus.AUDIO_SYNCED,
+                   TaskStatus.RENDERING, TaskStatus.PUBLISHING]
+
+
+def reap_stuck_tasks(db, now: datetime | None = None) -> int:
+    now = now or datetime.utcnow()
+    cutoff = now - timedelta(seconds=settings.JOB_TIMEOUT_SECONDS * 2)
+    stuck = db.scalars(
+        select(Task).where(Task.status.in_(_STUCK_STATUSES), Task.updated_at <= cutoff)
+    ).all()
+    for task in stuck:
+        task.status = TaskStatus.FAILED
+        task.finished_at = now
+        task.error_message = ("Worker crashed or timed out mid-job (no progress for over "
+                              f"{settings.JOB_TIMEOUT_SECONDS * 2 // 60} minutes). Use Retry.")
+    if stuck:
+        db.commit()
+        logger.warning("Reaped %d stuck task(s)", len(stuck))
+    return len(stuck)
+
 
 def maybe_distill_campaign(db, campaign: Campaign, now: datetime | None = None) -> bool:
     """Update the campaign's playbook from real performance data — bounded, guarded, best-effort."""
@@ -205,8 +228,9 @@ def periodic_tick(db=None, now: datetime | None = None) -> dict:
     UTC internally to match DB timestamps. Returns a small summary dict."""
     own_session = db is None
     db = db or SessionLocal()
-    summary = {"swept": 0, "expired": 0, "hydrated": [], "published": [], "learning": None}
+    summary = {"swept": 0, "expired": 0, "hydrated": [], "published": [], "learning": None, "reaped": 0}
     try:
+        summary["reaped"] = reap_stuck_tasks(db)
         # Disk hygiene.
         summary["swept"] = sweep_orphans()
         if disk_usage_pct(settings.MEDIA_ROOT) >= settings.DISK_PRESSURE_PCT:

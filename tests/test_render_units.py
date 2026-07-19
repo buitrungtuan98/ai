@@ -137,6 +137,34 @@ def test_caption_themes(tmp_path):
     assert "&H00FF901E" in content and POP_TAG in content  # campaign accent colour drives the style
 
 
+def test_search_footage_fallback_chain(monkeypatch):
+    from core import video_factory as vf
+
+    calls = []
+
+    def fake_search(query, key, per_page=10):
+        calls.append(query)
+        # Joined query and first keyword fail; second keyword succeeds.
+        return ["clip"] if query == "fog" else []
+
+    monkeypatch.setattr(vf.pexels, "search_videos", fake_search)
+    assert vf.search_footage(["dòng sông", "fog"], "k") == ["clip"]
+    assert calls == ["dòng sông fog", "dòng sông", "fog"]
+
+    # Everything fails → generic fallback is tried last; empty means truly nothing.
+    calls.clear()
+    monkeypatch.setattr(vf.pexels, "search_videos", lambda q, k, per_page=10: (calls.append(q), [])[1])
+    assert vf.search_footage(["xyz"], "k") == []
+    assert calls[-1] == vf.FALLBACK_FOOTAGE_QUERY
+
+
+def test_pexels_keywords_prompt_demands_english():
+    from core.ai_engine import Scene, build_script_prompt
+
+    assert "English" in (Scene.model_fields["pexels_keywords"].description or "")
+    assert "ENGLISH" in build_script_prompt("chuyện ma", "vi", 30, 1)
+
+
 def test_ffmpeg_runner_uses_nice_threads(monkeypatch):
     """run_ffmpeg composes the command with nice + -threads without executing (Popen mocked)."""
     import core.ffmpeg_runner as fr

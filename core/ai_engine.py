@@ -36,7 +36,9 @@ class Scene(BaseModel):
         default=None, max_length=60, description="Optional short on-screen headline for the scene."
     )
     pexels_keywords: list[str] = Field(
-        min_length=1, max_length=4, description="Stock-footage search terms, best first."
+        min_length=1, max_length=4,
+        description="Stock-footage search terms, best first — ALWAYS in English regardless of "
+                    "the narration language (stock libraries are indexed in English).",
     )
 
 
@@ -261,7 +263,9 @@ def build_script_prompt(
         "on-screen caption hook, and 1-4 stock-footage keywords. Also produce exactly 3 distinct "
         "A/B metadata variations (variant A/B/C) each with a title (<=100 chars), a description, "
         "and 5-15 tags, all in the same persona/voice. Include a one-sentence 'synopsis' of this "
-        "episode's specific premise. Keep it original and engaging."
+        "episode's specific premise. Keep it original and engaging. "
+        "IMPORTANT: pexels_keywords must be ENGLISH visual search terms (e.g. 'river night fog'), "
+        "even when the narration language is not English."
     )
     prev = [s for s in (previous_synopses or []) if s]
     if continuity == "no_repeat" and prev:

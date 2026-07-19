@@ -120,6 +120,12 @@ Done). Legend: `DONE` · `WIP` · `TODO` · `BLOCKED`.
 - [DONE] `P15.4` GEMINI_MODEL env setting (free model upgrades without code change)
 - Verified: 72 tests passing (9 new — motion filters + wiring, caption themes/accent/pop, critic loop pass/rewrite/failure, distiller prompt, compose playbook/avoid, stats eligibility windows, distill guards + preservation of operator notes, reject-reason learning, performance page + reset).
 
+## Pre-flight hardening (before first production use) `DONE`
+- [DONE] Pexels keywords forced to English (schema + prompt) — Vietnamese campaigns no longer fail footage search
+- [DONE] Footage fallback chain: joined query → each keyword → generic backdrop (one weak keyword can't kill an episode)
+- [DONE] Stuck-task reaper: tasks frozen in a working state for 2× job timeout (worker crash/OOM) → FAILED with Retry available
+- Verified: 75 tests passing (3 new).
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download
