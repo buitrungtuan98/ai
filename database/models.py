@@ -112,6 +112,9 @@ class Campaign(Base):
     )
     # Generation params: language, system_prompt, voice, rate, subtitle style, branding, slots, CTA…
     config_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    # System-managed learning state (playbook, best_examples, reject_reasons, distilled_at).
+    # Separate column from config_json so editing the campaign form can never wipe what it learned.
+    learning_json: Mapped[dict | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     user: Mapped["User"] = relationship(back_populates="campaigns")
@@ -153,6 +156,8 @@ class Task(Base):
     published_url: Mapped[str | None] = mapped_column(String(512))
     # Episode memory: one-line premise, fed into later episodes' prompts (no-repeat/serial modes).
     synopsis: Mapped[str | None] = mapped_column(String(300))
+    # Platform performance (views, avg_pct_viewed, likes, fetched_at) — feeds the playbook distiller.
+    stats_json: Mapped[dict | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()

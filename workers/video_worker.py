@@ -252,6 +252,7 @@ def render_task(task_id: int) -> None:
                 .order_by(Task.episode_number)
             ).all()
         ][-15:]
+        learning = campaign.learning_json or {}
         script = generate_script(
             topic=campaign.topic_name,
             language=cfg.get("language", "en"),
@@ -265,6 +266,10 @@ def render_task(task_id: int) -> None:
             catchphrase_close=cfg.get("catchphrase_close"),
             continuity=cfg.get("continuity", "none"),
             previous_synopses=previous,
+            playbook=learning.get("playbook"),
+            best_examples=learning.get("best_examples"),
+            avoid=learning.get("reject_reasons"),
+            self_critique=cfg.get("self_critique", "on") != "off",
         )
         if script.synopsis:
             task.synopsis = script.synopsis[:300]
@@ -282,6 +287,8 @@ def render_task(task_id: int) -> None:
             rate_pct=int(cfg.get("rate_pct", 0)),
             branding=_branding_from_config(cfg),
             subtitle_style=cfg.get("subtitle_style", "word"),
+            caption_theme=cfg.get("caption_theme", "highlight"),
+            motion=cfg.get("motion", "on") != "off",
             music_path=cfg.get("music_path") or None,
             music_volume=float(cfg.get("music_volume", 0.15)),
             ab_testing=bool(cfg.get("ab_testing", True)),

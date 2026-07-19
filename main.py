@@ -63,6 +63,9 @@ YOUTUBE_SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube.readonly",
     "https://www.googleapis.com/auth/youtube.force-ssl",
+    # Read-only performance data (retention/views) for the self-improvement loop. Channels
+    # connected before this scope existed need a one-click reconnect to grant it.
+    "https://www.googleapis.com/auth/yt-analytics.readonly",
 ]
 LOGIN_SCOPES = [  # Google SSO login (identity only — no YouTube access)
     "openid",
@@ -353,6 +356,7 @@ def _build_campaign_config(
     watermark_path: str, tint_color: str, tint_opacity: float, mirror: bool,
     persona: str, style_examples: str, catchphrase_open: str, catchphrase_close: str,
     continuity: str, timezone: str,
+    motion: str = "on", caption_theme: str = "highlight", self_critique: str = "on",
 ) -> dict:
     """One place turns the campaign form into config_json (DRY: shared by create and edit)."""
     config: dict = {
@@ -370,6 +374,10 @@ def _build_campaign_config(
         "catchphrase_close": catchphrase_close or None,
         "continuity": continuity if continuity in ("none", "no_repeat", "serial") else "none",
         "timezone": timezone.strip() or None,
+        # Cinema Polish + critic loop — "on"/"off" strings so an absent field means ON (default).
+        "motion": "off" if motion == "off" else "on",
+        "caption_theme": caption_theme if caption_theme in ("classic", "highlight", "boxed", "neon") else "highlight",
+        "self_critique": "off" if self_critique == "off" else "on",
     }
     if watermark_path or (tint_color and tint_opacity > 0) or mirror:
         config["branding"] = {
@@ -410,6 +418,9 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
     catchphrase_close: str = Form(""),
     continuity: str = Form("none"),
     timezone: str = Form(""),
+    motion: str = Form("on"),
+    caption_theme: str = Form("highlight"),
+    self_critique: str = Form("on"),
 ) -> dict:
     return {
         "topic_name": topic_name, "channel_id": channel_id, "total_episodes": total_episodes,
@@ -421,6 +432,7 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
             tint_color=tint_color, tint_opacity=tint_opacity, mirror=mirror,
             persona=persona, style_examples=style_examples, catchphrase_open=catchphrase_open,
             catchphrase_close=catchphrase_close, continuity=continuity, timezone=timezone,
+            motion=motion, caption_theme=caption_theme, self_critique=self_critique,
         ),
     }
 
@@ -617,7 +629,7 @@ def approve_asset(db: DbDep, item=Depends(get_owned_buffer_item)):
 
 
 @app.post("/assets/{item_id}/reject")
-def reject_asset(db: DbDep, item=Depends(get_owned_buffer_item)):
+def reject_asset(db: DbDep, item=Depends(get_owned_buffer_item), reason: str = Form("")):
     if item.status != BufferStatus.awaiting_review:
         raise HTTPException(400, "Only items awaiting review can be rejected")
     for path in (item.video_path, item.thumbnail_path):
@@ -627,13 +639,46 @@ def reject_asset(db: DbDep, item=Depends(get_owned_buffer_item)):
         except OSError:
             logger.warning("Could not remove %s", path)
     item.status = BufferStatus.rejected
+    reason = reason.strip()[:200]
     task = db.scalar(select(Task).where(
         Task.campaign_id == item.campaign_id, Task.episode_number == item.episode_number))
     if task is not None:
         task.status = TaskStatus.FAILED
-        task.error_message = "Rejected in review by the operator. Use Retry to re-render."
+        task.error_message = ("Rejected in review: " + reason) if reason else \
+            "Rejected in review by the operator. Use Retry to re-render."
+    # Feed the operator's reason into the campaign's avoid-list (Loop 1 learning signal).
+    if reason:
+        campaign = db.get(Campaign, item.campaign_id)
+        if campaign is not None:
+            learning = dict(campaign.learning_json or {})
+            reasons = (learning.get("reject_reasons") or [])[-9:]
+            learning["reject_reasons"] = reasons + [reason]
+            campaign.learning_json = learning
     db.commit()
     return RedirectResponse("/assets", status_code=303)
+
+
+# ── Performance & learning (self-improvement transparency) ──────────────────
+@app.get("/campaigns/{campaign_id}/performance", response_class=HTMLResponse)
+def campaign_performance(request: Request, user: CurrentUser, db: DbDep,
+                         campaign=Depends(get_owned_campaign)):
+    episodes = db.scalars(
+        select(Task).where(Task.campaign_id == campaign.id).order_by(Task.episode_number)
+    ).all()
+    measured = [t for t in episodes if t.stats_json]
+    best = max(measured, key=lambda t: t.stats_json.get("avg_pct_viewed", 0), default=None)
+    return templates.TemplateResponse(
+        request, "performance.html",
+        {"request": request, "user": user, "nav": "campaigns", "campaign": campaign,
+         "episodes": episodes, "learning": campaign.learning_json or {}, "best_id": best.id if best else None},
+    )
+
+
+@app.post("/campaigns/{campaign_id}/learning/reset")
+def reset_learning(db: DbDep, campaign=Depends(get_owned_campaign)):
+    campaign.learning_json = None
+    db.commit()
+    return RedirectResponse(f"/campaigns/{campaign.id}/performance", status_code=303)
 
 
 # ── Real-Time Task Logs ──────────────────────────────────────────────────────

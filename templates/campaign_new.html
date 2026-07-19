@@ -46,6 +46,12 @@
         </select>
         <p class="hint">The AI remembers a one-line synopsis of each past episode and writes accordingly.</p>
       </div>
+      <div class="form-row"><label>Self-critique (an AI editor reviews every script before render)</label>
+        <select name="self_critique">
+          <option value="on" {{ 'selected' if cfg.get('self_critique','on')!='off' }}>On — critic pass + rewrite when weak (recommended)</option>
+          <option value="off" {{ 'selected' if cfg.get('self_critique')=='off' }}>Off — first draft goes straight to render</option>
+        </select>
+      </div>
       <div class="form-row"><label>Custom system prompt (optional)</label>
         <textarea name="system_prompt" placeholder="Tone, style, constraints for the scriptwriter…">{{ cfg.get('system_prompt') or '' }}</textarea></div>
     </div>
@@ -70,6 +76,19 @@
         <select name="subtitle_style">
           <option value="word" {{ 'selected' if cfg.get('subtitle_style','word')=='word' }}>Word-by-word</option>
           <option value="line" {{ 'selected' if cfg.get('subtitle_style')=='line' }}>Line (phrases)</option>
+        </select>
+      </div>
+      <div class="form-row"><label>Caption theme</label>
+        <select name="caption_theme">
+          {% for t, label in [('highlight','Highlight — word pops in accent colour (viral style)'), ('classic','Classic — clean white'), ('boxed','Boxed — word on dark box'), ('neon','Neon — glowing outline')] %}
+          <option value="{{ t }}" {{ 'selected' if cfg.get('caption_theme','highlight')==t }}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="form-row"><label>Clip motion (subtle zoom/pan on every clip)</label>
+        <select name="motion">
+          <option value="on" {{ 'selected' if cfg.get('motion','on')!='off' }}>On — cinematic movement (recommended)</option>
+          <option value="off" {{ 'selected' if cfg.get('motion')=='off' }}>Off — static clips</option>
         </select>
       </div>
       <div class="form-row"><label>Voice profile (edge-tts, optional)</label>

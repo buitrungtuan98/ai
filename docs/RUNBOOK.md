@@ -62,6 +62,20 @@ Set a campaign's **Publishing mode** to *Review first*. Each rendered episode th
 Telegram ping when an episode is ready for review. Review items do not auto-expire; published items
 have their local files cleaned up immediately.
 
+## The self-improvement loops
+Every campaign improves automatically on two levels (see ADR-012):
+1. **Critic pass (immediate):** an AI editor reviews every script before render — weak hook,
+   essay-like sentences, persona slips or repeated premises trigger one rewrite. On by default;
+   per-campaign toggle in the form. When you reject a video in review mode, **type the reason** —
+   it becomes an explicit avoid-instruction for all future scripts of that campaign.
+2. **Data loop (after ~2 weeks of publishing):** stats (retention %, views, likes) are pulled
+   daily for videos 2–30 days old; weekly, each campaign with ≥5 measured episodes gets its
+   **Playbook** re-distilled — bounded lessons learned from what this channel's real audience
+   rewards, injected into every future script. Inspect/reset it on the campaign's
+   **📊 Performance** page. YouTube channels connected before this feature need a one-click
+   reconnect (adds the read-only `yt-analytics.readonly` scope).
+Model upgrades: set `GEMINI_MODEL` in `.env` when Google ships a better free-tier model.
+
 ## Retrying failed episodes
 Task Logs shows every failure with its full error. **Retry** re-runs the episode; if the rendered
 file still exists (upload failed / was awaiting review) only the upload is retried — no re-render.

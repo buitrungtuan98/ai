@@ -93,6 +93,50 @@ def test_caption_wrap_and_ass(tmp_path):
     assert "[Events]" in content and content.count("Dialogue:") == 2 and "PlayResX: 1080" in content
 
 
+def test_motion_filters():
+    from core.video_factory import MOTION_EFFECTS, build_scene_args, motion_filter
+
+    zi = motion_filter("zoom_in", 8.0)
+    assert "zoompan" in zi and "min(zoom+" in zi and "1080x1920" in zi
+    zo = motion_filter("zoom_out", 8.0)
+    assert "zoompan" in zo and "max(zoom-" in zo
+    pan = motion_filter("pan", 8.0)
+    assert "zoompan" not in pan and "crop=1080:1920" in pan and "t/8.000" in pan
+    assert MOTION_EFFECTS == ["zoom_in", "pan", "zoom_out"]  # deterministic rotation
+
+    # Wired into the scene graph before branding/captions; absent when motion is off.
+    args = build_scene_args(["c.mp4"], "a.mp3", "s.ass", "o.mp4", 5.0, None, motion_effect="zoom_in")
+    fc = args[args.index("-filter_complex") + 1]
+    assert "zoompan" in fc and fc.index("zoompan") < fc.index("ass=")
+    args_off = build_scene_args(["c.mp4"], "a.mp3", "s.ass", "o.mp4", 5.0, None, motion_effect=None)
+    assert "zoompan" not in args_off[args_off.index("-filter_complex") + 1]
+
+
+def test_caption_themes(tmp_path):
+    from core.captions import CAPTION_THEMES, POP_TAG, build_ass, hex_to_ass
+    from core.tts import WordTiming
+
+    assert hex_to_ass("#FFCF6B") == "&H006BCFFF"  # RGB → ASS BGR
+    assert set(CAPTION_THEMES) == {"classic", "highlight", "boxed", "neon"}
+
+    timings = [WordTiming("Hello", 0.0, 0.5), WordTiming("world", 0.5, 1.0)]
+
+    boxed = str(tmp_path / "boxed.ass")
+    build_ass(timings, boxed, clip_duration=1.0, theme="boxed")
+    content = open(boxed).read()
+    assert ",3,7," in content and POP_TAG not in content  # BorderStyle=3 opaque box, no pop
+
+    neon = str(tmp_path / "neon.ass")
+    build_ass(timings, neon, clip_duration=1.0, theme="neon")
+    content = open(neon).read()
+    assert r"\blur2" in content and POP_TAG in content
+
+    hl = str(tmp_path / "hl.ass")
+    build_ass(timings, hl, clip_duration=1.0, theme="highlight", accent_hex="#1E90FF")
+    content = open(hl).read()
+    assert "&H00FF901E" in content and POP_TAG in content  # campaign accent colour drives the style
+
+
 def test_ffmpeg_runner_uses_nice_threads(monkeypatch):
     """run_ffmpeg composes the command with nice + -threads without executing (Popen mocked)."""
     import core.ffmpeg_runner as fr

@@ -224,6 +224,62 @@ def test_asset_review_flow(client, tmp_path):
     db.close()
 
 
+def test_reject_reason_feeds_learning(client, tmp_path):
+    from database.db_session import SessionLocal
+    from database.models import BufferPoolItem, Campaign, Task
+    from database.types import BufferStatus, TaskStatus
+
+    cam = _seed_campaign(client)
+    video = tmp_path / "e.mp4"
+    video.write_bytes(b"x")
+    db = SessionLocal()
+    t = Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=1, status=TaskStatus.AWAITING_REVIEW)
+    buf = BufferPoolItem(campaign_id=cam.id, channel_id=cam.channel_id, episode_number=1,
+                         video_path=str(video), status=BufferStatus.awaiting_review)
+    db.add_all([t, buf])
+    db.commit()
+    db.refresh(buf)
+    db.close()
+
+    r = client.post(f"/assets/{buf.id}/reject", data={"reason": "mở đầu chậm quá"}, follow_redirects=False)
+    assert r.status_code == 303
+    db = SessionLocal()
+    cam2 = db.get(Campaign, cam.id)
+    assert cam2.learning_json["reject_reasons"] == ["mở đầu chậm quá"]
+    t2 = db.query(Task).filter_by(campaign_id=cam.id, episode_number=1).one()
+    assert "mở đầu chậm quá" in t2.error_message
+    db.close()
+
+
+def test_performance_page_and_reset(client):
+    from database.db_session import SessionLocal
+    from database.models import Campaign, Task
+    from database.types import TaskStatus
+
+    cam = _seed_campaign(client)
+    db = SessionLocal()
+    cam_db = db.get(Campaign, cam.id)
+    cam_db.learning_json = {"playbook": ["Open with a question"], "best_examples": ["Ex1"],
+                            "distilled_at": "2026-07-18T00:00:00"}
+    db.add(Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=1,
+                status=TaskStatus.COMPLETED, synopsis="the floating market ghost",
+                published_url="https://www.youtube.com/shorts/x1",
+                stats_json={"views": 900, "avg_pct_viewed": 72.5, "likes": 40,
+                            "fetched_at": "2026-07-18T00:00:00"}))
+    db.commit()
+    db.close()
+
+    page = client.get(f"/campaigns/{cam.id}/performance")
+    assert page.status_code == 200
+    assert "Open with a question" in page.text and "72.5%" in page.text and "🏆" in page.text
+
+    r = client.post(f"/campaigns/{cam.id}/learning/reset", follow_redirects=False)
+    assert r.status_code == 303
+    db = SessionLocal()
+    assert db.get(Campaign, cam.id).learning_json is None
+    db.close()
+
+
 def test_asset_stream_404s(client, tmp_path):
     # Missing item and missing file both 404 (never leak paths).
     assert client.get("/assets/424242/video").status_code == 404

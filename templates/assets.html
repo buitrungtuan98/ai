@@ -29,9 +29,14 @@
     {% if i.status.value == 'awaiting_review' %}
     <div class="row-actions mt">
       <form method="post" action="/assets/{{ i.id }}/approve"><button class="btn sm" type="submit">✓ Approve &amp; publish</button></form>
-      <form method="post" action="/assets/{{ i.id }}/reject" onsubmit="return confirm('Reject and delete this render?')">
-        <button class="btn danger sm" type="submit">✕ Reject</button></form>
     </div>
+    <form method="post" action="/assets/{{ i.id }}/reject" class="mt"
+          onsubmit="return confirm('Reject and delete this render?')">
+      <div class="flex" style="gap:8px;">
+        <input name="reason" placeholder="Why? (teaches the AI — e.g. 'mở đầu chậm quá')" style="flex:1">
+        <button class="btn danger sm" type="submit">✕ Reject</button>
+      </div>
+    </form>
     {% endif %}
   </div>
   {% endfor %}

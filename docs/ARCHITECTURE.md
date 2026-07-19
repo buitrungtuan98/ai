@@ -153,3 +153,25 @@ was for. Memory and persona are what separate "content factory" output from a re
 creator: consistency + non-repetition + local voice. Compliance: a persona is a creative character,
 not an impersonation of a real person; operators must follow platform synthetic-content disclosure
 rules (see RUNBOOK).
+
+### ADR-012 — Cinema Polish + the two-loop self-improvement engine
+**Decision:** (1) **Cinema Polish**: every clip gets subtle motion (zoom-in/pan/zoom-out rotating
+deterministically per scene, baked into the single encode pass) and captions get themes
+(classic/highlight/boxed/neon) with per-word pop animation and the campaign accent colour;
+defaults ON for every campaign. (2) **Loop 1 — critic pass** (works from video #1): a second
+Gemini call reviews each script as a harsh editor (hook ≤2s, spoken-ness, persona fidelity,
+freshness); a 'rewrite' verdict triggers exactly one revision with the concrete issues injected;
+critic failures never block a render. Operators rejecting a review-mode video give a one-line
+reason that becomes an avoid-instruction for future scripts. (3) **Loop 2 — data loop**: a daily
+pass (Redis NX guard) pulls per-video stats — retention % above all — from the free YouTube
+Analytics API (new `yt-analytics.readonly` scope; pre-existing channels need a reconnect) and FB
+insights into `Task.stats_json`; weekly, per campaign with ≥5 measured episodes, a distiller call
+rewrites the channel's bounded **Playbook** (≤15 lessons + top-3 examples, patterns must span ≥3
+videos) stored in `Campaign.learning_json` — a separate column so form edits can never wipe it.
+The playbook, best examples and avoid-notes are composed into every future generation, and are
+fully visible/resettable on the Performance page.
+**Why:** "Better every video" requires a closed loop: measure → learn → inject. The critic raises
+the floor immediately; the data loop optimises for what this channel's real audience rewards.
+Bounded, guarded and transparent by design — learning refines tactics, never overrides the persona
+or safety rules, and never becomes a black box. All of it stays $0 (free-tier Gemini calls, free
+Analytics API, motion/captions ride the existing encode pass).

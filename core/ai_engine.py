@@ -17,12 +17,14 @@ from typing import Literal, TypeVar
 
 from pydantic import BaseModel, Field, ValidationError
 
+from core.config import settings
+
 logger = logging.getLogger(__name__)
 
 Language = Literal["vi", "en", "es"]
 T = TypeVar("T", bound=BaseModel)
 
-DEFAULT_MODEL = "gemini-1.5-flash"
+DEFAULT_MODEL = settings.GEMINI_MODEL  # swap models via .env, no code change
 _BACKOFF_BASE_SECONDS = 1.0  # patched to 0 in tests
 
 
@@ -189,7 +191,10 @@ NATURAL_STYLE_RULES = (
     "'game-changer', no numbered-list cadence, no starting every sentence the same way.\n"
     "- Titles and descriptions must sound like a real creator typed them on their phone — "
     "specific and curious, not clickbait-formula. Tags stay plain.\n"
-    "- Stay in character 100% of the time, including in titles and descriptions."
+    "- Stay in character 100% of the time, including in titles and descriptions.\n"
+    "- THE HOOK RULE: the very first sentence must grab attention within 2 seconds — a question, "
+    "a shock, or mid-action. Never open with greetings or introductions (a signature catchphrase "
+    "is the only exception, and it must lead straight into the hook)."
 )
 
 
@@ -201,9 +206,13 @@ def compose_system_prompt(
     style_examples: str | None = None,
     catchphrase_open: str | None = None,
     catchphrase_close: str | None = None,
+    playbook: list[str] | None = None,
+    best_examples: list[str] | None = None,
+    avoid: list[str] | None = None,
 ) -> str:
     """Assemble the full character sheet the model writes as. One place (DRY) so script, titles,
-    descriptions and (via narration) subtitles all speak with the same human voice."""
+    descriptions and (via narration) subtitles all speak with the same human voice — and learn:
+    the channel's distilled playbook, its own best-performing examples, and operator avoid-notes."""
     parts = [_SYSTEM_BY_LANG.get(language, _SYSTEM_BY_LANG["en"]), NATURAL_STYLE_RULES]
     if persona:
         parts.append(f"YOUR CHARACTER (stay in this persona everywhere):\n{persona}")
@@ -221,6 +230,16 @@ def compose_system_prompt(
             cues.append(f"The LAST scene's narration must end with (or naturally weave in): "
                         f"\"{catchphrase_close}\"")
         parts.append("SIGNATURE CATCHPHRASES (fans recognise these):\n" + "\n".join(cues))
+    if playbook:
+        parts.append("CHANNEL PLAYBOOK — lessons learned from this channel's real performance "
+                     "data; apply them (they refine tactics, never override the persona):\n"
+                     + "\n".join(f"- {p}" for p in playbook[:15]))
+    if best_examples:
+        parts.append("THIS CHANNEL'S TOP PERFORMERS — write with the same energy (not the same "
+                     "content):\n" + "\n".join(f"- {e}" for e in best_examples[:3]))
+    if avoid:
+        parts.append("AVOID — the operator rejected recent videos for these reasons; do not "
+                     "repeat these mistakes:\n" + "\n".join(f"- {a}" for a in avoid[:10]))
     if custom_system_prompt:
         parts.append(custom_system_prompt)
     return "\n\n".join(parts)
@@ -277,6 +296,10 @@ def generate_script(
     catchphrase_close: str | None = None,
     continuity: str = "none",
     previous_synopses: list[str] | None = None,
+    playbook: list[str] | None = None,
+    best_examples: list[str] | None = None,
+    avoid: list[str] | None = None,
+    self_critique: bool = True,
     model: str = DEFAULT_MODEL,
 ) -> VideoScript:
     system = compose_system_prompt(
@@ -286,15 +309,118 @@ def generate_script(
         style_examples=style_examples,
         catchphrase_open=catchphrase_open,
         catchphrase_close=catchphrase_close,
+        playbook=playbook,
+        best_examples=best_examples,
+        avoid=avoid,
     )
     prompt = build_script_prompt(
         topic, language, total_episodes, episode,
         continuity=continuity, previous_synopses=previous_synopses,
     )
-    return generate_structured(
+    temperature = 0.85 if continuity != "none" else 0.7
+    script = generate_structured(
         prompt=prompt, schema=VideoScript, api_key=api_key, system_prompt=system,
-        model=model, temperature=0.85 if continuity != "none" else 0.7,
+        model=model, temperature=temperature,
     )
+    if not self_critique:
+        return script
+
+    # Generator→critic loop: one harsh editorial review; on 'rewrite', one revision with the
+    # concrete issues injected. A critic failure never blocks the video (best-effort quality gate).
+    try:
+        review = critique_script(script, api_key=api_key, persona=persona,
+                                 previous_synopses=previous_synopses, model=model)
+    except Exception:  # noqa: BLE001
+        logger.warning("Critic pass failed — keeping the first draft.")
+        return script
+    if review.verdict == "pass":
+        return script
+    logger.info("Critic requested a rewrite (hook=%d natural=%d persona=%d fresh=%d)",
+                review.hook_score, review.natural_score, review.persona_score, review.fresh_score)
+    fixes = "\n".join(f"- {i}" for i in review.issues) or "- strengthen the hook and spoken rhythm"
+    try:
+        return generate_structured(
+            prompt=prompt + "\n\nAn editor reviewed your previous draft and demands these fixes "
+                            "(rewrite fully, do not patch):\n" + fixes,
+            schema=VideoScript, api_key=api_key, system_prompt=system,
+            model=model, temperature=temperature,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("Rewrite failed — keeping the first draft.")
+        return script
+
+
+# ── Critic pass (Loop 1: every video improves before it is even rendered) ────
+class ScriptCritique(BaseModel):
+    hook_score: int = Field(ge=1, le=10, description="Does the first sentence grab within 2s?")
+    natural_score: int = Field(ge=1, le=10, description="Does it sound like a real person talking?")
+    persona_score: int = Field(ge=1, le=10, description="Is it 100% in character?")
+    fresh_score: int = Field(ge=1, le=10, description="Is the premise fresh vs previous episodes?")
+    verdict: Literal["pass", "rewrite"]
+    issues: list[str] = Field(default_factory=list, max_length=6,
+                              description="Concrete fixes if verdict is rewrite.")
+
+
+_CRITIC_SYSTEM = (
+    "You are a ruthless short-form video editor. Viewers swipe away in under 2 seconds; judge "
+    "this script like their thumb is already moving. Score harshly. Verdict 'rewrite' whenever "
+    "the hook is weak, any sentence reads like an essay or AI text, the persona slips, or the "
+    "premise repeats an earlier episode. Issues must be concrete, actionable edits."
+)
+
+
+def critique_script(
+    script: VideoScript,
+    *,
+    api_key: str,
+    persona: str | None = None,
+    previous_synopses: list[str] | None = None,
+    model: str = DEFAULT_MODEL,
+) -> ScriptCritique:
+    prev = "\n".join(f"- {s}" for s in (previous_synopses or [])[-15:]) or "(none)"
+    prompt = (
+        f"Review this short-form video script:\n{script.model_dump_json()}\n\n"
+        f"Persona it must embody: {persona or '(none set)'}\n"
+        f"Previous episodes (must not repeat): {prev}"
+    )
+    return generate_structured(prompt=prompt, schema=ScriptCritique, api_key=api_key,
+                               system_prompt=_CRITIC_SYSTEM, model=model, temperature=0.2)
+
+
+# ── Playbook distiller (Loop 2: learn from real performance data) ────────────
+class PlaybookUpdate(BaseModel):
+    playbook: list[str] = Field(max_length=15,
+                                description="Short, actionable lessons for future episodes.")
+    best_examples: list[str] = Field(default_factory=list, max_length=3,
+                                     description="The strongest hooks/titles to emulate.")
+
+
+_DISTILLER_SYSTEM = (
+    "You are a channel growth analyst. You receive per-episode performance data (retention % is "
+    "the most important metric, then views). Extract ONLY patterns supported by at least 3 "
+    "episodes — never generalise from a single video. Keep lessons short, concrete and about "
+    "craft (hooks, pacing, premise types, wording), not vague advice. Carry forward still-valid "
+    "old lessons; drop disproven ones. Maximum 15 lessons."
+)
+
+
+def distill_playbook(
+    *,
+    api_key: str,
+    performance_summary: str,
+    current_playbook: list[str] | None = None,
+    reject_reasons: list[str] | None = None,
+    model: str = DEFAULT_MODEL,
+) -> PlaybookUpdate:
+    """Turn episode stats + operator feedback into an updated, bounded channel playbook."""
+    prompt = (
+        f"EPISODE PERFORMANCE DATA:\n{performance_summary}\n\n"
+        f"CURRENT PLAYBOOK:\n" + ("\n".join(f"- {p}" for p in (current_playbook or [])) or "(empty)") +
+        "\n\nOPERATOR REJECTION NOTES:\n" + ("\n".join(f"- {r}" for r in (reject_reasons or [])) or "(none)") +
+        "\n\nProduce the updated playbook and pick the strongest hooks/titles as best_examples."
+    )
+    return generate_structured(prompt=prompt, schema=PlaybookUpdate, api_key=api_key,
+                               system_prompt=_DISTILLER_SYSTEM, model=model, temperature=0.3)
 
 
 def regenerate_metadata(*, topic: str, language: str, api_key: str, model: str = DEFAULT_MODEL) -> MetadataSet:

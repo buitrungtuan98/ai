@@ -139,12 +139,73 @@ def publish_due_campaign(db, campaign: Campaign, now: datetime | None = None,
     return buf.id
 
 
+DISTILL_MIN_EPISODES = 5     # need this many measured episodes before learning anything
+DISTILL_EVERY_DAYS = 7       # refresh the playbook at most weekly
+
+
+def maybe_distill_campaign(db, campaign: Campaign, now: datetime | None = None) -> bool:
+    """Update the campaign's playbook from real performance data — bounded, guarded, best-effort."""
+    from core.ai_engine import distill_playbook
+    from database.models import Task, User
+
+    now = now or datetime.utcnow()
+    learning = dict(campaign.learning_json or {})
+    last = learning.get("distilled_at")
+    if last and datetime.fromisoformat(last) > now - timedelta(days=DISTILL_EVERY_DAYS):
+        return False
+    rows = db.scalars(
+        select(Task).where(Task.campaign_id == campaign.id, Task.stats_json.isnot(None))
+        .order_by(Task.episode_number)
+    ).all()
+    if len(rows) < DISTILL_MIN_EPISODES:
+        return False
+    user = db.get(User, campaign.user_id)
+    api_key = (user.gemini_api_key if user else None) or settings.GEMINI_API_KEY
+    if not api_key:
+        return False
+    summary_lines = [
+        f"Ep {t.episode_number}: '{t.synopsis or '?'}' — "
+        f"retention {t.stats_json.get('avg_pct_viewed', '?')}%, views {t.stats_json.get('views', '?')}, "
+        f"likes {t.stats_json.get('likes', '?')}"
+        for t in rows
+    ]
+    try:
+        update = distill_playbook(
+            api_key=api_key,
+            performance_summary="\n".join(summary_lines),
+            current_playbook=learning.get("playbook"),
+            reject_reasons=learning.get("reject_reasons"),
+        )
+    except Exception:  # noqa: BLE001 — learning must never break the factory
+        logger.warning("Playbook distillation failed for campaign %s", campaign.id, exc_info=True)
+        return False
+    learning["playbook"] = update.playbook[:15]
+    learning["best_examples"] = update.best_examples[:3]
+    learning["distilled_at"] = now.isoformat()
+    campaign.learning_json = learning
+    db.commit()
+    logger.info("Campaign %s playbook updated (%d lessons)", campaign.id, len(update.playbook))
+    return True
+
+
+def daily_learning_pass(db, now: datetime | None = None) -> dict:
+    """Once-a-day: collect platform stats, then re-distill playbooks that have enough data."""
+    from services.analytics_service import collect_stats
+
+    result = {"stats_updated": 0, "distilled": 0}
+    result["stats_updated"] = collect_stats(db, now=now)
+    for campaign in db.scalars(select(Campaign)).all():
+        if maybe_distill_campaign(db, campaign, now=now):
+            result["distilled"] += 1
+    return result
+
+
 def periodic_tick(db=None, now: datetime | None = None) -> dict:
     """One automation cycle. `now` (local time) drives the posting-slot check; buffer expiry uses
     UTC internally to match DB timestamps. Returns a small summary dict."""
     own_session = db is None
     db = db or SessionLocal()
-    summary = {"swept": 0, "expired": 0, "hydrated": [], "published": []}
+    summary = {"swept": 0, "expired": 0, "hydrated": [], "published": [], "learning": None}
     try:
         # Disk hygiene.
         summary["swept"] = sweep_orphans()
@@ -161,6 +222,13 @@ def periodic_tick(db=None, now: datetime | None = None) -> dict:
             published = publish_due_campaign(db, campaign, now=now)
             if published is not None:
                 summary["published"].append(published)
+
+        # Self-improvement pass at most once per day (Redis NX guard across ticks/restarts).
+        try:
+            if task_queue.conn.set("learning:daily-pass", "1", nx=True, ex=86400):
+                summary["learning"] = daily_learning_pass(db)
+        except Exception:  # noqa: BLE001
+            logger.warning("Daily learning pass failed", exc_info=True)
         return summary
     finally:
         if own_session:

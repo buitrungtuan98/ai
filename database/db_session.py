@@ -73,6 +73,10 @@ _COLUMN_UPGRADES: dict[str, dict[str, str]] = {
         "published_video_id": "VARCHAR(128)",
         "published_url": "VARCHAR(512)",
         "synopsis": "VARCHAR(300)",
+        "stats_json": "TEXT",
+    },
+    "campaigns": {
+        "learning_json": "TEXT",
     },
 }
 

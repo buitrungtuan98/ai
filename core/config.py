@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     FIREBASE_WEB_API_KEY: str | None = None
 
     # --- Optional global fallback provider keys (per-user keys take priority) ---
+    GEMINI_MODEL: str = "gemini-1.5-flash"  # swap when Google ships a better free-tier model
     GEMINI_API_KEY: str | None = None
     PEXELS_API_KEY: str | None = None
     TELEGRAM_BOT_TOKEN: str | None = None

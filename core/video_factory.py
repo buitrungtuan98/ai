@@ -72,6 +72,28 @@ def select_clips(clip_durations: list[float], target: float) -> list[int]:
     return chosen
 
 
+# Cinema Polish: subtle motion baked into the same encode pass. Effects rotate deterministically
+# per scene (zoom in → pan → zoom out), so cuts feel edited without any randomness to break tests.
+MOTION_EFFECTS = ["zoom_in", "pan", "zoom_out"]
+_MOTION_MAX_ZOOM = 1.08
+
+
+def motion_filter(effect: str, duration: float) -> str:
+    frames = max(int(duration * FPS), 1)
+    rate = (_MOTION_MAX_ZOOM - 1.0) / frames
+    center = "x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+    if effect == "zoom_in":
+        return (f"zoompan=z='min(zoom+{rate:.6f},{_MOTION_MAX_ZOOM})':{center}"
+                f":d=1:s={TARGET_W}x{TARGET_H}:fps={FPS}")
+    if effect == "zoom_out":
+        return (f"zoompan=z='if(eq(on,1),{_MOTION_MAX_ZOOM},max(zoom-{rate:.6f},1.0))':{center}"
+                f":d=1:s={TARGET_W}x{TARGET_H}:fps={FPS}")
+    # pan: overscan then glide horizontally across the extra width for the scene duration
+    ow, oh = int(TARGET_W * 1.12), int(TARGET_H * 1.12)
+    return (f"scale={ow}:{oh},crop={TARGET_W}:{TARGET_H}"
+            f":x='(in_w-out_w)*min(t/{max(duration, 0.1):.3f},1)':y='(in_h-out_h)/2'")
+
+
 def build_scene_args(
     clip_paths: list[str],
     audio_path: str,
@@ -79,6 +101,7 @@ def build_scene_args(
     out_path: str,
     duration: float,
     branding: Branding | None = None,
+    motion_effect: str | None = None,
 ) -> list[str]:
     """Build the ffmpeg args (after the `ffmpeg` binary) for one re-encoded scene."""
     branding = branding or Branding()
@@ -105,6 +128,10 @@ def build_scene_args(
         concat_in = "".join(f"[v{i}]" for i in range(len(clip_paths)))
         filters.append(f"{concat_in}concat=n={len(clip_paths)}:v=1:a=0[vc]")
         cur = "[vc]"
+
+    if motion_effect:
+        filters.append(f"{cur}{motion_filter(motion_effect, duration)}[vmn]")
+        cur = "[vmn]"
 
     if branding.mirror:
         filters.append(f"{cur}hflip[vm]")
@@ -176,6 +203,8 @@ def produce(
     rate_pct: int = 0,
     branding: Branding | None = None,
     subtitle_style: str = "word",
+    caption_theme: str = "highlight",
+    motion: bool = True,
     music_path: str | None = None,
     music_volume: float = 0.15,
     ab_testing: bool = True,
@@ -231,11 +260,14 @@ def produce(
                 path_by_idx[idx] = p
             clip_paths = [path_by_idx[idx] for idx in picks]
 
-            # 4. Captions + scene render.
+            # 4. Captions + scene render (motion + theme baked into the same pass).
             ass_path = ws.path(f"scene_{si}.ass")
-            build_ass(timings, ass_path, clip_duration=d_i, style=subtitle_style)
+            build_ass(timings, ass_path, clip_duration=d_i, style=subtitle_style,
+                      theme=caption_theme, accent_hex=branding.tint_color)
             scene_out = ws.path(f"scene_{si}.mp4")
-            args = build_scene_args(clip_paths, audio_path, ass_path, scene_out, d_i, branding)
+            effect = MOTION_EFFECTS[si % len(MOTION_EFFECTS)] if motion else None
+            args = build_scene_args(clip_paths, audio_path, ass_path, scene_out, d_i, branding,
+                                    motion_effect=effect)
             run_ffmpeg(
                 args, total_duration=d_i,
                 on_progress=lambda p, s=si: report("render", (s + p / 100) / n_scenes * 100),

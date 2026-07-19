@@ -87,6 +87,33 @@ def _ass_escape(text: str) -> str:
     return text.replace("\n", " ").replace("{", "(").replace("}", ")")
 
 
+def hex_to_ass(hex_color: str) -> str:
+    """'#RRGGBB' → ASS '&H00BBGGRR' (ASS colours are BGR)."""
+    h = hex_color.lstrip("#")
+    if len(h) != 6:
+        return "&H00FFFFFF"
+    r, g, b = h[0:2], h[2:4], h[4:6]
+    return f"&H00{b}{g}{r}".upper()
+
+
+# Caption themes (Cinema Polish). Each is a full ASS style recipe; "pop" adds a quick per-word
+# scale bounce via \t transforms — the dominant viral-Shorts caption look. All render in the same
+# single encode pass (zero extra cost).
+CAPTION_THEMES: dict[str, dict] = {
+    "classic": {"primary": "&H00FFFFFF", "outline": "&H00000000", "back": "&H80000000",
+                 "border_style": 1, "outline_w": 4, "pop": False, "blur": 0},
+    "highlight": {"primary": None,  # accent colour (campaign tint or warm yellow)
+                  "outline": "&H00000000", "back": "&H80000000",
+                  "border_style": 1, "outline_w": 4, "pop": True, "blur": 0},
+    "boxed": {"primary": "&H00FFFFFF", "outline": "&H00181010", "back": "&HA0181010",
+              "border_style": 3, "outline_w": 7, "pop": False, "blur": 0},
+    "neon": {"primary": "&H0050FFB0", "outline": "&H00206040", "back": "&H80000000",
+             "border_style": 1, "outline_w": 5, "pop": True, "blur": 2},
+}
+DEFAULT_ACCENT_ASS = "&H006BCFFF"  # warm yellow (#FFCF6B) in ASS BGR
+POP_TAG = r"{\fscx82\fscy82\t(0,120,\fscx106\fscy106)\t(120,240,\fscx100\fscy100)}"
+
+
 # Line-style grouping: break a line when it grows past this many characters or the narration
 # pauses longer than this gap (a natural phrase boundary).
 LINE_MAX_CHARS = 28
@@ -116,13 +143,23 @@ def build_ass(
     *,
     clip_duration: float | None = None,
     style: str = "word",  # "word" = one caption per word; "line" = phrase-level captions
+    theme: str = "highlight",
+    accent_hex: str | None = None,  # '#RRGGBB' (e.g. campaign brand tint) for accent themes
     font_px: int = DEFAULT_FONT_PX,
-    primary_colour: str = "&H00FFFFFF",  # white (AABBGGRR)
     font_name: str = "DejaVu Sans",
 ) -> str:
-    """Write an ASS file with one Dialogue per word (or per phrase in "line" style)."""
+    """Write an ASS file with one Dialogue per word (or per phrase in "line" style), styled by a
+    caption theme (classic / highlight / boxed / neon)."""
     if style == "line":
         timings = group_words_into_lines(timings)
+    spec = CAPTION_THEMES.get(theme, CAPTION_THEMES["classic"])
+    primary = spec["primary"] or (hex_to_ass(accent_hex) if accent_hex else DEFAULT_ACCENT_ASS)
+    prefix = ""
+    if spec["blur"]:
+        prefix += r"{\blur%d}" % spec["blur"]
+    if spec["pop"]:
+        prefix += POP_TAG
+
     usable = VIDEO_W - 2 * MARGIN_PX
     header = f"""[Script Info]
 ScriptType: v4.00+
@@ -133,7 +170,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Word,{font_name},{font_px},{primary_colour},&H00000000,&H80000000,1,0,1,4,2,2,{MARGIN_PX},{MARGIN_PX},280,1
+Style: Word,{font_name},{font_px},{primary},{spec['outline']},{spec['back']},1,0,{spec['border_style']},{spec['outline_w']},2,2,{MARGIN_PX},{MARGIN_PX},280,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -149,7 +186,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if end <= start:
             end = start + 0.05
         text = "\\N".join(wrap_text(_ass_escape(wt.text), font_px, usable))
-        lines.append(f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Word,,0,0,0,,{text}\n")
+        lines.append(f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Word,,0,0,0,,{prefix}{text}\n")
 
     content = "".join(lines)
     with open(out_path, "w", encoding="utf-8") as f:

@@ -125,6 +125,99 @@ def test_compose_system_prompt_persona_layer():
     assert NATURAL_STYLE_RULES in bare and "CHARACTER" not in bare
 
 
+def test_compose_includes_playbook_and_avoid():
+    from core.ai_engine import compose_system_prompt
+
+    system = compose_system_prompt(
+        "en",
+        playbook=["Question-hooks retain 20% better", "Keep episodes under 100 words"],
+        best_examples=["Why the river never froze"],
+        avoid=["opening too slow"],
+    )
+    assert "CHANNEL PLAYBOOK" in system and "Question-hooks retain" in system
+    assert "TOP PERFORMERS" in system and "river never froze" in system
+    assert "AVOID" in system and "opening too slow" in system
+    assert "THE HOOK RULE" in system  # always-on
+
+
+def _critique_json(verdict="rewrite"):
+    import json
+
+    return json.dumps({"hook_score": 4, "natural_score": 6, "persona_score": 7, "fresh_score": 8,
+                       "verdict": verdict, "issues": ["hook too slow", "sentence 2 reads like an essay"]})
+
+
+def test_generate_script_critic_loop(monkeypatch):
+    import json
+
+    import core.ai_engine as ai
+
+    draft = dict(VALID, topic="Draft")
+    improved = dict(VALID, topic="Improved")
+    calls = []
+
+    def fake_call(**kwargs):
+        calls.append(kwargs["prompt"])
+        if len(calls) == 1:
+            return json.dumps(draft)          # generator draft
+        if len(calls) == 2:
+            return _critique_json("rewrite")  # harsh critic
+        return json.dumps(improved)           # rewrite with fixes injected
+
+    monkeypatch.setattr(ai, "_call_gemini", fake_call)
+    script = ai.generate_script(topic="t", language="en", total_episodes=5, episode=1,
+                                api_key="k", self_critique=True)
+    assert script.topic == "Improved" and len(calls) == 3
+    assert "hook too slow" in calls[2]  # the critic's issues drive the rewrite
+
+    # Critic passes → no rewrite call.
+    calls.clear()
+
+    def fake_pass(**kwargs):
+        calls.append(1)
+        return json.dumps(draft) if len(calls) == 1 else _critique_json("pass")
+
+    monkeypatch.setattr(ai, "_call_gemini", fake_pass)
+    script = ai.generate_script(topic="t", language="en", total_episodes=5, episode=1,
+                                api_key="k", self_critique=True)
+    assert script.topic == "Draft" and len(calls) == 2
+
+    # Critic blowing up must never block the video.
+    calls.clear()
+
+    def fake_broken(**kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            return json.dumps(draft)
+        raise RuntimeError("critic down")
+
+    monkeypatch.setattr(ai, "_call_gemini", fake_broken)
+    script = ai.generate_script(topic="t", language="en", total_episodes=5, episode=1,
+                                api_key="k", self_critique=True)
+    assert script.topic == "Draft"
+
+
+def test_distill_playbook(monkeypatch):
+    import json
+
+    import core.ai_engine as ai
+
+    captured = {}
+
+    def fake_call(**kwargs):
+        captured["prompt"] = kwargs["prompt"]
+        return json.dumps({"playbook": ["Hooks phrased as questions win"],
+                           "best_examples": ["Why the market floats"]})
+
+    monkeypatch.setattr(ai, "_call_gemini", fake_call)
+    update = ai.distill_playbook(api_key="k",
+                                 performance_summary="Ep 1: retention 80%\nEp 2: retention 40%",
+                                 current_playbook=["old lesson"], reject_reasons=["too slow"])
+    assert update.playbook == ["Hooks phrased as questions win"]
+    assert "retention 80%" in captured["prompt"] and "old lesson" in captured["prompt"]
+    assert "too slow" in captured["prompt"]
+
+
 def test_build_script_prompt_episode_memory():
     from core.ai_engine import build_script_prompt
 
