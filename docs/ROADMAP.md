@@ -158,6 +158,15 @@ persisted/printed; YouTube refresh preserves scopes + rehydrates expiry.
 - Deferred (documented in ADR-014/RUNBOOK, non-blocking): zoom-motion visual verification on the
   box; `WORK_ROOT` must avoid spaces/quotes; raise `JOB_TIMEOUT_SECONDS` for very long renders.
 
+## Registry-based CD (build in Actions → GHCR → VPS pulls) `DONE`
+Moved the Docker build off the render box (ADR-015). `deploy.yml` now builds the `linux/arm64`
+image in GitHub Actions, pushes it to GHCR (`:latest` + `:<sha>`), and the deploy job ships
+compose + deploy.sh, logs the box into GHCR with the run's ephemeral token, and pulls + restarts.
+`docker-compose.yml` runs the GHCR image (tag pinned via `AVF_IMAGE_TAG`, `build: .` kept for local
+builds); `deploy.sh` pulls instead of building. Box bootstrap is now just `.env` — no source
+checkout, no deploy key, no stored registry secret. Instant rollback via `AVF_IMAGE_TAG=<sha>`.
+- Note: private repo → ARM build runs under QEMU (slow first build, then Actions-cached).
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

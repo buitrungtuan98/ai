@@ -236,3 +236,23 @@ long render that fails Auto-QC could exceed the single job timeout on its re-ren
 **Why:** the operator asked for a hands-off factory; these were the seams where "hands-off" could
 strand a campaign, hang the box, publish twice, or leak a secret. Every fix keeps the existing
 architecture — the changes harden the edges, they don't reshape the system.
+
+### ADR-015 — Registry-based CD (build in Actions, pull on the VPS)
+**Decision:** CD no longer builds on the box. `deploy.yml` builds the `linux/arm64` image in GitHub
+Actions and pushes it to GHCR (`ghcr.io/<owner>/<repo>`, tagged `latest` + the git SHA); the deploy
+job then SSHes in, ships `docker-compose.yml` + `scripts/deploy.sh`, logs the box into GHCR with the
+workflow's ephemeral `GITHUB_TOKEN` (piped to `docker login --password-stdin`, never stored), and
+runs `docker compose pull` + `up -d` on the pinned SHA tag. `docker-compose.yml` references
+`ghcr.io/<owner>/<repo>:${AVF_IMAGE_TAG:-latest}` (with `build: .` kept for local builds). The box
+now holds only its `.env` (and the two shipped files) — no source checkout, no deploy key, no
+long-lived registry secret.
+**Why:** the render box is a single CPU-only ARM instance with a hard "never lock it up" rule and
+CPU-bound renders. Building the image there (compiling grpcio et al.) competed with rendering and
+required a full git checkout + read credential on the box — the exact bootstrap that made the first
+deploy fail. Moving the build into Actions keeps the box's CPU for rendering, shrinks its footprint
+to one hand-placed file (`.env`), and gives immutable, per-SHA images with instant rollback
+(`AVF_IMAGE_TAG=<sha>`). **Trade-off:** the repo is private, so ARM builds run under QEMU emulation
+on x86 runners (slow first build, then Actions-cached) rather than on free native-ARM runners
+(public-repo only). Accepted: deploys are infrequent and the cache makes steady-state builds
+reasonable; keeping build load off the render box is worth more than build latency. Secrets posture
+is unchanged — `.env` still lives only on the box, and GHCR auth uses the run's short-lived token.

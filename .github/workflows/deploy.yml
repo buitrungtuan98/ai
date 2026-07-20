@@ -1,10 +1,10 @@
 name: deploy
 
-# Continuous deployment to the Oracle VPS. Triggers when code lands on `main`
-# (merge the feature branch to release), plus a manual button. Uses raw ssh with
-# host-key pinning — no third-party action. Every credential comes from repo
-# Secrets; the VPS keeps its own .env (never transmitted here). See docs/RUNBOOK.md
-# for the required secrets and one-time VPS bootstrap.
+# Continuous deployment to the Oracle ARM VPS (registry model, ADR-015):
+#   build job  — build the linux/arm64 image in Actions and push it to GHCR
+#   deploy job — SSH to the box, log in to GHCR with the run's ephemeral token, pull, restart
+# The box holds no source and no long-lived registry secret — only docker-compose.yml (shipped
+# each run), scripts/deploy.sh (shipped each run) and its own .env. See docs/RUNBOOK.md.
 
 on:
   push:
@@ -15,18 +15,52 @@ on:
         description: "Override SSH port for this run (optional; else uses the SSH_PORT variable/secret)"
         required: false
 
-# Port resolution order (easy to change without editing this file):
-#   1. manual-run input  2. repo Variable SSH_PORT  3. Secret SSH_PORT  4. default 22
-# Change the port anytime in Settings → Secrets and variables → Actions → Variables (SSH_PORT).
-
 concurrency:
   group: deploy-production
   cancel-in-progress: false        # never interrupt an in-flight deploy
 
+env:
+  IMAGE: ghcr.io/${{ github.repository }}   # ghcr.io/<owner>/<repo>, always lowercase
+
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write               # push the image to GHCR under this repo
     steps:
+      - uses: actions/checkout@v4
+      - name: Set up QEMU (arm64 emulation on x86 runners)
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push linux/arm64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max     # first build is slow under QEMU, then cached
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read                # the box pulls the private image with this run's token
+    steps:
+      - uses: actions/checkout@v4     # for docker-compose.yml + scripts/deploy.sh to ship
+
       - name: Configure SSH (key + host-key pinning)
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
@@ -43,31 +77,59 @@ jobs:
           printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_deploy
           chmod 600 ~/.ssh/id_deploy
           port="${INPUT_PORT:-${VAR_PORT:-${SECRET_PORT:-22}}}"   # input > variable > secret > 22
+          echo "PORT=$port" >> "$GITHUB_ENV"
           echo "Using SSH port: $port"
           if [ -n "$SSH_KNOWN_HOSTS" ]; then
             printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts       # pinned (recommended)
           else
             echo "::warning::SSH_KNOWN_HOSTS not set — using ssh-keyscan (trust-on-first-use)."
-            ssh-keyscan -p "$port" -H "$SSH_HOST" > ~/.ssh/known_hosts 2>/dev/null || true
+            ssh-keyscan -p "$port" "$SSH_HOST" > ~/.ssh/known_hosts 2>/dev/null || true
           fi
           chmod 600 ~/.ssh/known_hosts
 
-      - name: Deploy over SSH
+      - name: Ship compose + deploy script to the VPS
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
-          INPUT_PORT: ${{ github.event.inputs.ssh_port }}
-          VAR_PORT: ${{ vars.SSH_PORT }}
-          SECRET_PORT: ${{ secrets.SSH_PORT }}
           SSH_USER: ${{ secrets.SSH_USER }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
           set -euo pipefail
-          port="${INPUT_PORT:-${VAR_PORT:-${SECRET_PORT:-22}}}"   # input > variable > secret > 22
           user="${SSH_USER:-ubuntu}"
-          path="${DEPLOY_PATH:-ai}"          # relative to the SSH home dir, or an absolute path
-          branch="main"
-          echo "Deploying '$branch' to ${user}@${SSH_HOST}:${port} (${path})"
-          # One remote command string: update git to the target branch, then run the deploy script.
-          remote="cd \"$path\" && git fetch --all --prune && git checkout \"$branch\" && git reset --hard \"origin/$branch\" && bash scripts/deploy.sh"
-          ssh -i ~/.ssh/id_deploy -p "$port" -o IdentitiesOnly=yes -o BatchMode=yes \
-            "${user}@${SSH_HOST}" "$remote"
+          path="${DEPLOY_PATH:-ai}"
+          ssh_opts="-i $HOME/.ssh/id_deploy -o IdentitiesOnly=yes -o BatchMode=yes"
+          # These two files (+ the box's own .env) are all the box needs — no source checkout.
+          ssh $ssh_opts -p "$PORT" "${user}@${SSH_HOST}" "mkdir -p '$path/scripts'"
+          scp $ssh_opts -P "$PORT" docker-compose.yml "${user}@${SSH_HOST}:$path/docker-compose.yml"
+          scp $ssh_opts -P "$PORT" scripts/deploy.sh "${user}@${SSH_HOST}:$path/scripts/deploy.sh"
+
+      - name: Log in to GHCR on the VPS
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_USER: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          user="${SSH_USER:-ubuntu}"
+          ssh_opts="-i $HOME/.ssh/id_deploy -o IdentitiesOnly=yes -o BatchMode=yes"
+          # Token travels over the encrypted channel and is piped straight into docker login —
+          # never written to a file or visible in the process list. Discarded at the end of deploy.
+          printf '%s' "$REGISTRY_TOKEN" | ssh $ssh_opts -p "$PORT" "${user}@${SSH_HOST}" \
+            "docker login ghcr.io -u '$REGISTRY_USER' --password-stdin"
+
+      - name: Pull the new image and restart on the VPS
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          set -euo pipefail
+          user="${SSH_USER:-ubuntu}"
+          path="${DEPLOY_PATH:-ai}"
+          tag="${{ github.sha }}"
+          ssh_opts="-i $HOME/.ssh/id_deploy -o IdentitiesOnly=yes -o BatchMode=yes"
+          echo "Deploying ${IMAGE}:${tag} to ${user}@${SSH_HOST}:${PORT} (${path})"
+          # deploy.sh pulls the pinned tag and recreates the containers; log out afterwards
+          # regardless of outcome, then propagate its exit code.
+          ssh $ssh_opts -p "$PORT" "${user}@${SSH_HOST}" \
+            "cd '$path' && AVF_IMAGE_TAG='$tag' bash scripts/deploy.sh; rc=\$?; docker logout ghcr.io >/dev/null 2>&1 || true; exit \$rc"
