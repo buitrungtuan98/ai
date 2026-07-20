@@ -37,8 +37,11 @@ services:
     cpus: 0.5
 
   web:
+    # Pulled from GHCR in production (built by CI, ADR-015); `build: .` still lets you build
+    # locally with `docker compose build`/`up --build`. AVF_IMAGE_TAG pins the exact image the CD
+    # deployed (a git SHA); it falls back to `latest` for manual/local use.
     build: .
-    image: ai-video-factory:latest
+    image: ghcr.io/buitrungtuan98/ai:${AVF_IMAGE_TAG:-latest}
     platform: linux/arm64
     command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
     # NO `ports:` — expose keeps 8000 on the internal network only (cloudflared reaches web:8000).
@@ -63,7 +66,7 @@ services:
 
   worker:
     build: .
-    image: ai-video-factory:latest
+    image: ghcr.io/buitrungtuan98/ai:${AVF_IMAGE_TAG:-latest}
     platform: linux/arm64
     command: ["python", "run_worker.py"]
     env_file: .env
