@@ -22,6 +22,13 @@
 
   <div class="tab-panel active" id="core">
     <div class="card">
+      <div class="form-row" id="ai-propose-row">
+        <button type="button" class="btn ghost" id="ai-propose">✨ Propose full campaign with AI</button>
+        <p class="hint">Type a topic below (or leave it blank) and let Gemini design the persona, voice,
+          captions, look, music &amp; schedule for you — review and tweak anything before saving.
+          Click again for a completely fresh idea.</p>
+        <p class="hint" id="ai-rationale" style="display:none"></p>
+      </div>
       <div class="form-row"><label>Topic name</label>
         <input name="topic_name" required placeholder="Amazing space facts" value="{{ campaign.topic_name if editing else (source.topic_name if dup else '') }}"></div>
       <div class="form-row"><label>Target channel</label>
@@ -190,5 +197,61 @@
       document.getElementById(b.dataset.tab).classList.add("active");
     });
   });
+
+  // ✨ AI campaign designer: ask the server for a full proposal and fill the form for review.
+  const proposeBtn = document.getElementById("ai-propose");
+  if (proposeBtn) {
+    proposeBtn.addEventListener("click", async function () {
+      const form = proposeBtn.closest("form");
+      const orig = proposeBtn.textContent;
+      proposeBtn.disabled = true;
+      proposeBtn.textContent = "✨ Designing…";
+      const setVal = (name, val) => {
+        const el = form.elements[name];
+        if (el && val !== null && val !== undefined) el.value = val;
+      };
+      try {
+        const body = new URLSearchParams();
+        body.set("topic", (form.elements["topic_name"].value || "").trim());
+        body.set("language", form.elements["language"].value || "");
+        const r = await fetch("/campaigns/propose", { method: "POST", body });
+        const p = await r.json();
+        if (!r.ok) throw new Error(p.error || "AI proposal failed");
+        setVal("topic_name", p.topic_name);
+        setVal("total_episodes", p.total_episodes);
+        setVal("language", p.language);
+        setVal("persona", p.persona);
+        setVal("style_examples", p.style_examples);
+        setVal("catchphrase_open", p.catchphrase_open);
+        setVal("catchphrase_close", p.catchphrase_close);
+        setVal("continuity", p.continuity);
+        setVal("voice", p.voice);
+        setVal("rate_pct", p.rate_pct);
+        setVal("subtitle_style", p.subtitle_style);
+        setVal("caption_theme", p.caption_theme);
+        setVal("motion", p.motion);
+        setVal("color_grade", p.color_grade === "none" ? "" : p.color_grade);
+        setVal("music_mode", p.music_mode);
+        setVal("music_mood", p.music_mood);
+        setVal("privacy", p.privacy);
+        setVal("cta", p.cta);
+        setVal("posting_slots", p.posting_slots);
+        const ab = form.elements["ab_testing"];
+        if (ab) ab.checked = !!p.ab_testing;
+        const rv = document.getElementById("rate-val");
+        if (rv) rv.textContent = form.elements["rate_pct"].value;
+        const note = document.getElementById("ai-rationale");
+        if (note) {
+          note.textContent = p.rationale ? ("💡 " + p.rationale) : "";
+          note.style.display = p.rationale ? "block" : "none";
+        }
+      } catch (e) {
+        alert(e.message || "AI proposal failed — please try again.");
+      } finally {
+        proposeBtn.disabled = false;
+        proposeBtn.textContent = orig;
+      }
+    });
+  }
 </script>
 {% endblock %}

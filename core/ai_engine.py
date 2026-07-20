@@ -187,6 +187,81 @@ def _strip_code_fence(text: str) -> str:
     return s.strip()
 
 
+# ── AI campaign designer (propose a whole campaign from a title, or from scratch) ─
+class CampaignProposal(BaseModel):
+    """A complete, ready-to-review campaign configuration proposed by Gemini."""
+    topic_name: str = Field(min_length=1, max_length=120)
+    language: Language
+    total_episodes: int = Field(ge=1, le=365)
+    persona: str = Field(min_length=1)
+    style_examples: str = ""
+    catchphrase_open: str = ""
+    catchphrase_close: str = ""
+    continuity: Literal["none", "no_repeat", "serial"] = "none"
+    voice: str = ""
+    rate_pct: int = Field(default=0, ge=-20, le=20)
+    subtitle_style: Literal["word", "line"] = "word"
+    caption_theme: Literal["classic", "highlight", "boxed", "neon"] = "highlight"
+    color_grade: Literal["none", "cinematic", "warm", "cool", "vivid", "noir"] = "none"
+    motion: Literal["on", "off"] = "on"
+    music_mode: Literal["none", "auto"] = "auto"
+    music_mood: str = ""
+    ab_testing: bool = True
+    privacy: Literal["public", "unlisted", "private"] = "public"
+    cta: str = ""
+    posting_slots: str = Field(default="", description="One daily slot as HH:MM, or empty.")
+    rationale: str = Field(default="", max_length=400, description="One sentence on the angle.")
+
+
+# Curated edge-tts voices the designer may choose from (validated server-side so it can't invent
+# an unusable voice name that would break TTS).
+PROPOSABLE_VOICES: dict[str, list[str]] = {
+    "en": ["en-US-AriaNeural", "en-US-GuyNeural", "en-US-JennyNeural", "en-GB-SoniaNeural"],
+    "vi": ["vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural"],
+    "es": ["es-ES-ElviraNeural", "es-MX-DaliaNeural", "es-ES-AlvaroNeural"],
+}
+
+
+def propose_campaign(
+    *,
+    topic: str | None = None,
+    language: str | None = None,
+    api_key: str,
+    model: str = DEFAULT_MODEL,
+    nonce: int = 0,
+) -> CampaignProposal:
+    """Design one complete, standout campaign config. With no topic, it invents a concept; high
+    temperature + a variation `nonce` make each call distinct. The chosen voice is validated
+    against PROPOSABLE_VOICES (an invented voice is dropped to the language default)."""
+    topic_line = (f'Design the campaign around this title/topic: "{topic}".' if topic
+                  else "Invent a fresh, specific, non-generic channel concept and topic yourself.")
+    lang_line = (f"The target language MUST be '{language}'." if language in ("vi", "en", "es")
+                 else "Choose the most fitting target language (vi, en or es).")
+    voices = ", ".join(v for vs in PROPOSABLE_VOICES.values() for v in vs)
+    prompt = (
+        "You are a senior short-form video channel strategist. Propose ONE complete, standout "
+        "campaign configuration for an automated vertical-shorts factory. "
+        f"{topic_line} {lang_line} "
+        "Make it distinctive and genuinely good — a real creator's channel, never a bland template. "
+        "Choose: a vivid, specific persona (region/age/speech habits, written in the target "
+        "language); 2-3 short style-example lines in that voice; signature opening and closing "
+        "catchphrases; a caption theme and colour grade that fit the mood; a music mood in a few "
+        "English words (music_mode 'auto' unless silence truly fits, then 'none'); an edge-tts "
+        f"voice chosen ONLY from this list: {voices}; a sensible total_episodes; one daily posting "
+        "slot as HH:MM; a continuity mode; and a short call-to-action. "
+        f"Variation seed {nonce}: make this proposal clearly different from any previous one. "
+        "Include a one-sentence 'rationale' for the creative angle."
+    )
+    proposal = generate_structured(
+        prompt=prompt, schema=CampaignProposal, api_key=api_key, model=model,
+        temperature=1.1, max_output_tokens=1500,
+    )
+    allowed = {v for vs in PROPOSABLE_VOICES.values() for v in vs}
+    if proposal.voice not in allowed:
+        proposal.voice = ""  # model invented a voice → fall back to the app default
+    return proposal
+
+
 # ── Thin callers ─────────────────────────────────────────────────────────────
 _SYSTEM_BY_LANG: dict[str, str] = {
     "en": "You are a short-form video scriptwriter. Write narration in natural spoken English.",

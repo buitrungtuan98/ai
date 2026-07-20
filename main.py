@@ -369,6 +369,30 @@ def campaign_new_form(request: Request, user: CurrentUser, db: DbDep, from_id: i
     return templates.TemplateResponse(request, "campaign_new.html", ctx)
 
 
+@app.post("/campaigns/propose")
+def propose_campaign_route(user: CurrentUser, topic: str = Form(""), language: str = Form("")):
+    """AI-design a whole campaign config from a title (or from scratch). Returns JSON the New
+    Campaign form fills in for review — nothing is saved until the user clicks Create."""
+    import random
+
+    from core import ai_engine
+
+    key = user.gemini_api_key or settings.GEMINI_API_KEY
+    if not key:
+        return JSONResponse({"error": "Add a Gemini API key first (Credentials page or .env)."},
+                            status_code=400)
+    lang = language if language in ("en", "vi", "es") else None
+    try:
+        proposal = ai_engine.propose_campaign(
+            topic=topic.strip() or None, language=lang, api_key=key,
+            nonce=random.randint(1, 1_000_000),
+        )
+    except Exception as exc:  # noqa: BLE001 — return a clean retry message, not a stack trace
+        logger.warning("Campaign proposal failed: %s", type(exc).__name__)
+        return JSONResponse({"error": "AI proposal failed — please try again."}, status_code=502)
+    return proposal.model_dump()
+
+
 def _build_campaign_config(
     *, language: str, system_prompt: str, voice: str, rate_pct: int, subtitle_style: str,
     music_path: str, music_volume: float, posting_slots: str, ab_testing: bool, cta: str,

@@ -83,6 +83,42 @@ def test_ownership_guard_404(client):
     assert client.post("/campaigns/99999/delete", follow_redirects=False).status_code == 404
 
 
+def test_propose_campaign_route(client, monkeypatch):
+    """The AI designer returns a full config as JSON for the form to fill (nothing is saved)."""
+    from core import ai_engine
+    from core.ai_engine import CampaignProposal
+    from core.config import settings
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "k")
+    captured = {}
+
+    def fake_propose(**kwargs):
+        captured.update(kwargs)
+        return CampaignProposal(
+            topic_name="Midnight Mekong ghost tales", language="vi", total_episodes=30,
+            persona="Chú Ba miền Tây kể chuyện đêm khuya", continuity="no_repeat",
+            caption_theme="neon", color_grade="noir", music_mode="auto",
+            music_mood="dark ambient drone", posting_slots="22:00",
+            rationale="Nostalgic regional horror with a familiar storyteller.",
+        )
+
+    monkeypatch.setattr(ai_engine, "propose_campaign", lambda **k: fake_propose(**k))
+    r = client.post("/campaigns/propose", data={"topic": "ghost stories", "language": "vi"})
+    assert r.status_code == 200
+    j = r.json()
+    assert j["persona"].startswith("Chú Ba") and j["caption_theme"] == "neon"
+    assert j["music_mode"] == "auto" and j["posting_slots"] == "22:00"
+    assert captured["topic"] == "ghost stories" and captured["language"] == "vi"
+
+
+def test_propose_campaign_needs_key(client, monkeypatch):
+    from core.config import settings
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", None)
+    r = client.post("/campaigns/propose", data={"topic": "x"})
+    assert r.status_code == 400 and "Gemini" in r.json()["error"]
+
+
 def _seed_campaign(client):
     from database.db_session import SessionLocal
     from database.models import Campaign, Channel

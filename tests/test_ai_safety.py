@@ -28,6 +28,26 @@ def _no_sleep(monkeypatch):
     monkeypatch.setattr(ai, "_BACKOFF_BASE_SECONDS", 0)
 
 
+def test_propose_campaign_drops_invalid_voice(monkeypatch):
+    """The designer validates the voice against the curated list — an invented one falls back to
+    the default ('') so TTS never gets an unusable voice name."""
+    import core.ai_engine as ai
+
+    payload = {
+        "topic_name": "T", "language": "en", "total_episodes": 12, "persona": "P",
+        "continuity": "none", "caption_theme": "highlight", "color_grade": "cinematic",
+        "music_mode": "auto", "voice": "totally-made-up-voice",
+    }
+    monkeypatch.setattr(ai, "_call_gemini", lambda **k: json.dumps(payload))
+    p = ai.propose_campaign(topic="t", language="en", api_key="k")
+    assert p.voice == ""                       # invalid voice dropped
+    assert p.caption_theme == "highlight" and p.music_mode == "auto"
+
+    payload["voice"] = "en-US-AriaNeural"      # a valid one is kept
+    monkeypatch.setattr(ai, "_call_gemini", lambda **k: json.dumps(payload))
+    assert ai.propose_campaign(topic="t", language="en", api_key="k").voice == "en-US-AriaNeural"
+
+
 def test_parse_valid(monkeypatch):
     import core.ai_engine as ai
     from core.ai_engine import VideoScript, generate_structured
