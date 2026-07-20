@@ -17,6 +17,10 @@
     <p class="meta">{{ i.metadata_json.get('title','—') }}
       {% if i.metadata_json.get('variant') %} · Variant {{ i.metadata_json.get('variant') }}{% endif %}<br>
       {{ i.created_at.strftime('%Y-%m-%d %H:%M') if i.created_at else '' }} UTC</p>
+    {% set qc = i.metadata_json.get('qc') %}
+    {% if qc %}
+    <p class="hint">🔍 Auto-QC: {{ 'passed' if qc.get('passed') else 'FAILED' }}{% if qc.get('score') is not none %} · score {{ qc.get('score') }}/10{% endif %}{% if qc.get('attempts', 1) > 1 %} · {{ qc.get('attempts') }} attempts{% endif %}{% if qc.get('issues') %} · {{ qc.get('issues')|join('; ') }}{% endif %}</p>
+    {% endif %}
 
     {% if i.id in previewable %}
     <video class="preview" controls preload="metadata"

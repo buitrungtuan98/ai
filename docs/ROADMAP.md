@@ -126,6 +126,38 @@ Done). Legend: `DONE` · `WIP` · `TODO` · `BLOCKED`.
 - [DONE] Stuck-task reaper: tasks frozen in a working state for 2× job timeout (worker crash/OOM) → FAILED with Retry available
 - Verified: 75 tests passing (3 new).
 
+## Phase 16 — Auto background music (CC0) `DONE`
+- [DONE] `P16.1` services/music_service.py — Freesound search filtered to CC0/public-domain (safe for monetized videos, no attribution), random pick among top matches per episode, local cache, graceful no-music fallback
+- [DONE] `P16.2` Campaign music modes: None / Auto (mood, in English) / My file; per-episode music credit stored in metadata
+- [DONE] `P16.3` FREESOUND_API_KEY setting (free key); form + config wiring
+- Verified: 77 tests passing (2 new — CC0 filter enforced, cache hit skips download, failure→None; worker auto-mode passes the picked file to the renderer and stores the credit).
+
+## Phase 17 — Auto-QC Gate (human review becomes the backup, not the process) `DONE`
+- [DONE] `P17.1` Gemini vision helpers (`core/ai_engine.py`): `judge_footage` (does this clip fit the narration?) + `judge_video_frames` (is the finished video watchable — captions readable, visuals coherent?)
+- [DONE] `P17.2` `core/qc.py` — footage vetter factory + final-QC runner; every check **fails open** (a vision-API outage never blocks an episode)
+- [DONE] `P17.3` Footage vetting in the renderer: up to 3 leading candidates judged per scene, first accepted clip leads, rejected leaders dropped, downloads reused (never fetched twice)
+- [DONE] `P17.4` Per-campaign colour grades (cinematic/warm/cool/vivid/noir) baked into the single scene encode, applied before captions so text is never graded
+- [DONE] `P17.5` Loudness normalization to −14 LUFS (platform target) in the stitch — audio-only re-encode, video still stream-copied
+- [DONE] `P17.6` Worker QC gate: machine reviews each finished master; fail → one automatic re-render; fail again → parked in Asset Pool as AWAITING_REVIEW with the issues listed (never published); verdict stored in episode metadata and shown in the Asset Pool
+- [DONE] `P17.7` Form toggles (`auto_qc` default on, `color_grade`), ADR-013, RUNBOOK section
+- Verified: 85 tests passing (8 new — vetter threshold + fail-open, final-QC pass/fail/fail-open + frame sampling, candidate reorder/reuse/bounded, grade filter placement + unknown-grade no-op, loudnorm arg builders both paths, worker gate publish-with-verdict / double-fail-parks / off-skips).
+
+## Pre-deployment hardening pass (full-codebase review) `DONE`
+Reviewed every module (parallel readers + per-finding adversarial verification), fixed the
+confirmed defects (see ADR-014). Highlights: campaign completion off-by-one; reject→retry buffer
+unique-constraint fail loop; idempotent publish; SCHEDULED-task recovery on buffer expiry; stale
+render-lock crash recovery + PENDING_QUEUE reaping; scheduler per-campaign isolation; ffmpeg
+stderr deadlock + zombie-on-callback-error; monotonic progress; encoder `-threads`; fail-safe
+footage search/vetting/music; safety-filter no longer falls back to raw text; sweeper spares the
+live render; multi-tenant SECRET_KEY fail-fast; OAuth `state` CSRF hole; Secure cookie; credential
+verifier no longer leaks keys; `.dockerignore` keeps `.env` out of the image; backup PAT never
+persisted/printed; YouTube refresh preserves scopes + rehydrates expiry.
+- Verified: 91 tests passing (6 new — campaign-completion semantics, PENDING_QUEUE reaping,
+  buffer-replace on re-render, publish idempotency, SCHEDULED-expiry recovery, Range suffix/416,
+  monotonic progress, zero-duration clip skip), ruff clean, docs guard green.
+- Deferred (documented in ADR-014/RUNBOOK, non-blocking): zoom-motion visual verification on the
+  box; `WORK_ROOT` must avoid spaces/quotes; raise `JOB_TIMEOUT_SECONDS` for very long renders.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

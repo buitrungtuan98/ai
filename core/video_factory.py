@@ -28,8 +28,9 @@ TARGET_W = 1080
 TARGET_H = 1920
 FPS = 30
 
-# Stage weights for a monotonic global progress bar (sum = 100).
-_STAGE_BUDGET = {"prep": 40, "render": 45, "concat": 8, "thumb": 7}
+# Stage weights for a monotonic global progress bar (sum = 100). Per-scene work (TTS + footage +
+# encode) is one rising band so progress never jumps backward between scenes.
+_STAGE_BUDGET = {"scenes": 85, "concat": 8, "thumb": 7}
 
 
 @dataclass
@@ -77,6 +78,19 @@ def select_clips(clip_durations: list[float], target: float) -> list[int]:
 MOTION_EFFECTS = ["zoom_in", "pan", "zoom_out"]
 _MOTION_MAX_ZOOM = 1.08
 
+# Per-campaign colour grades, baked into the one scene encode (no extra pass). Applied to the
+# footage before mirror/tint/watermark/captions so text is never graded.
+COLOR_GRADES: dict[str, str] = {
+    "cinematic": "eq=contrast=1.06:saturation=0.92,colorbalance=bs=0.06:ms=0.03:hs=-0.03",
+    "warm": "eq=contrast=1.03:saturation=1.08,colorbalance=rs=0.05:rm=0.03:bs=-0.04",
+    "cool": "eq=contrast=1.05:saturation=0.95,colorbalance=bs=0.07:bm=0.04:rs=-0.03",
+    "vivid": "eq=contrast=1.08:saturation=1.25",
+    "noir": "hue=s=0,eq=contrast=1.15:brightness=-0.02",
+}
+
+# Loudness normalization to the -14 LUFS short-form platform target (EBU R128 single pass).
+LOUDNORM_FILTER = "loudnorm=I=-14:TP=-1.5:LRA=11"
+
 
 def motion_filter(effect: str, duration: float) -> str:
     frames = max(int(duration * FPS), 1)
@@ -102,6 +116,7 @@ def build_scene_args(
     duration: float,
     branding: Branding | None = None,
     motion_effect: str | None = None,
+    color_grade: str | None = None,
 ) -> list[str]:
     """Build the ffmpeg args (after the `ffmpeg` binary) for one re-encoded scene."""
     branding = branding or Branding()
@@ -133,6 +148,10 @@ def build_scene_args(
         filters.append(f"{cur}{motion_filter(motion_effect, duration)}[vmn]")
         cur = "[vmn]"
 
+    if color_grade and color_grade in COLOR_GRADES:
+        filters.append(f"{cur}{COLOR_GRADES[color_grade]}[vg]")
+        cur = "[vg]"
+
     if branding.mirror:
         filters.append(f"{cur}hflip[vm]")
         cur = "[vm]"
@@ -154,6 +173,9 @@ def build_scene_args(
         "-pix_fmt", "yuv420p", "-r", str(FPS), "-vsync", "cfr",
         "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "128k",
         "-t", f"{duration:.3f}", "-video_track_timescale", "30000",
+        # Encoder thread cap (CLAUDE.md constraint 4). As an OUTPUT option it binds to libx264;
+        # the runner's global -threads only sets input-decode threads.
+        "-threads", str(settings.FFMPEG_THREADS),
         out_path,
     ]
     return args
@@ -164,19 +186,35 @@ def build_concat_args(
     out_path: str,
     music_path: str | None = None,
     music_volume: float = 0.15,
+    loudnorm: bool = True,
 ) -> list[str]:
-    """Concat demuxer with video stream copy. With background music, the music is looped, ducked
-    to `music_volume`, and mixed under the narration — audio-only re-encode, video still copied."""
-    if not music_path:
+    """Concat demuxer with video stream copy — the video is NEVER re-encoded here. The audio is
+    re-encoded once when needed: to mix looped, ducked background music under the narration and/or
+    to normalize the final mix to -14 LUFS (`loudnorm`), so every episode publishes at the same
+    perceived volume."""
+    if not music_path and not loudnorm:
         return ["-f", "concat", "-safe", "0", "-i", list_file, "-c", "copy", out_path]
+    if not music_path:
+        return [
+            "-f", "concat", "-safe", "0", "-i", list_file,
+            "-af", LOUDNORM_FILTER,
+            "-map", "0:v", "-map", "0:a",
+            "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-b:a", "128k",
+            out_path,
+        ]
+    out_label = "[mix]" if loudnorm else "[aout]"
+    # normalize=0: amix must NOT auto-scale inputs by 1/n (that would halve the narration). The
+    # music is already ducked via the explicit volume filter; loudnorm (default on) tames peaks.
+    mix = (f"[1:a]volume={music_volume:.2f}[m];"
+           f"[0:a][m]amix=inputs=2:duration=first:dropout_transition=0:normalize=0{out_label}")
+    if loudnorm:
+        mix += f";[mix]{LOUDNORM_FILTER}[aout]"
     return [
         "-f", "concat", "-safe", "0", "-i", list_file,
         "-stream_loop", "-1", "-i", music_path,
-        "-filter_complex",
-        f"[1:a]volume={music_volume:.2f}[m];"
-        "[0:a][m]amix=inputs=2:duration=first:dropout_transition=0[aout]",
+        "-filter_complex", mix,
         "-map", "0:v", "-map", "[aout]",
-        "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-shortest",
+        "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-b:a", "128k", "-shortest",
         out_path,
     ]
 
@@ -186,15 +224,46 @@ FALLBACK_FOOTAGE_QUERY = "abstract dark background"
 
 def search_footage(keywords: list[str], api_key: str) -> list:
     """Resilient footage search: joined keywords → each keyword alone → generic fallback.
-    One weak keyword (or a non-English slip) must not fail the whole episode."""
+    One weak keyword (or a non-English slip) must not fail the whole episode — and neither must
+    a transient Pexels error on one query: each call is isolated so the chain can continue."""
     queries = [" ".join(keywords), *keywords, FALLBACK_FOOTAGE_QUERY]
     for query in queries:
-        found = pexels.search_videos(query, api_key, per_page=10)
+        try:
+            found = pexels.search_videos(query, api_key, per_page=10)
+        except Exception:  # noqa: BLE001 — a 429/5xx on one query must not kill the episode
+            logger.warning("Pexels search failed for %r — trying next fallback", query, exc_info=True)
+            continue
         if found:
             if query != queries[0]:
                 logger.info("Footage fallback used: %r", query)
             return found
     return []
+
+
+FOOTAGE_VET_CANDIDATES = 3  # bound the extra downloads/vision calls per scene
+
+
+def vet_candidates(found: list, narration: str, vet, download, path_for) -> tuple[list, dict[int, str]]:
+    """Run the vision judge over the leading footage candidates (Auto-QC).
+
+    Each candidate is downloaded (`download(url, path)` to `path_for(idx)`) and judged with
+    `vet(path, narration)`; the first accepted one becomes the pool leader and the rejected
+    leaders are dropped. Returns (candidates, predownloaded {index: path}) so the render step
+    never downloads the same clip twice. If every vetted candidate is rejected, the original
+    order is kept — a rendered episode beats a failed one (fail-open)."""
+    downloaded: dict[int, str] = {}
+    for idx in range(min(FOOTAGE_VET_CANDIDATES, len(found))):
+        path = path_for(idx)
+        try:
+            download(found[idx].download_url, path)
+        except Exception:  # noqa: BLE001 — a candidate download failure must not fail the episode
+            logger.warning("Vet candidate %d download failed — skipping", idx, exc_info=True)
+            continue
+        downloaded[idx] = path
+        if vet(path, narration):
+            return found[idx:], {i - idx: p for i, p in downloaded.items() if i >= idx}
+    logger.info("Footage vetting rejected all %d candidates — keeping original order", len(downloaded))
+    return found, downloaded
 
 
 def pick_metadata(script: VideoScript, episode_number: int, ab_testing: bool = True) -> dict:
@@ -221,10 +290,13 @@ def produce(
     subtitle_style: str = "word",
     caption_theme: str = "highlight",
     motion: bool = True,
+    color_grade: str | None = None,
     music_path: str | None = None,
     music_volume: float = 0.15,
+    loudnorm: bool = True,
     ab_testing: bool = True,
     extra_blacklist: set[str] | None = None,
+    vet_clip=None,
     on_progress=None,
 ) -> RenderResult:
     """Render one episode from a validated script. Output (master.mp4 + thumb.jpg) is written to
@@ -250,10 +322,16 @@ def produce(
         durations: list[float] = []
 
         for si, scene in enumerate(script.scenes):
-            # 1. Safety filter narration before TTS (policy lives in safety_filter).
-            clean = safety_filter.filter_text(
+            # 1. Safety filter narration before TTS (policy lives in safety_filter). If the filter
+            # emptied a non-empty narration (whole scene was blacklisted), do NOT fall back to the
+            # raw text — that would defeat the brand-safety gate. The empty result surfaces as a
+            # clear render failure instead of burning unsafe words into the video.
+            filtered = safety_filter.filter_text(
                 scene.narration, lang, extra_terms=extra_blacklist, mode="remove"
-            ).clean_text or scene.narration
+            )
+            clean = filtered.clean_text
+            if not clean and not filtered.changed:
+                clean = scene.narration  # nothing filtered → empty means the source was empty
 
             # 2. TTS → mp3 + word timings; audio duration = ground truth.
             audio_path = ws.path(f"scene_{si}.mp3")
@@ -267,10 +345,23 @@ def produce(
             if not found:
                 raise RuntimeError(
                     f"No Pexels footage for scene {si} (keywords={scene.pexels_keywords!r})")
+
+            # 3b. Optional AI footage vetting (Auto-QC): the first candidate the vision judge
+            # accepts leads the pool; rejected leaders are dropped. Downloads are reused below.
+            predownloaded: dict[int, str] = {}
+            if vet_clip is not None and len(found) > 1:
+                found, predownloaded = vet_candidates(
+                    found, scene.narration, vet_clip, pexels.download,
+                    lambda k, si=si: ws.path(f"scene_{si}_vet_{k}.mp4"),
+                )
+
             picks = select_clips([c.duration for c in found], d_i)
-            # Download each unique clip once, then expand `picks` (which may repeat) to file paths.
-            path_by_idx: dict[int, str] = {}
+            # Download each unique clip once (reusing vetted downloads), then expand `picks`
+            # (which may repeat) to file paths.
+            path_by_idx: dict[int, str] = dict(predownloaded)
             for k, idx in enumerate(dict.fromkeys(picks)):
+                if idx in path_by_idx:
+                    continue
                 p = ws.path(f"scene_{si}_clip_{k}.mp4")
                 pexels.download(found[idx].download_url, p)
                 path_by_idx[idx] = p
@@ -283,21 +374,22 @@ def produce(
             scene_out = ws.path(f"scene_{si}.mp4")
             effect = MOTION_EFFECTS[si % len(MOTION_EFFECTS)] if motion else None
             args = build_scene_args(clip_paths, audio_path, ass_path, scene_out, d_i, branding,
-                                    motion_effect=effect)
+                                    motion_effect=effect, color_grade=color_grade)
             run_ffmpeg(
                 args, total_duration=d_i,
-                on_progress=lambda p, s=si: report("render", (s + p / 100) / n_scenes * 100),
+                on_progress=lambda p, s=si: report("scenes", (s + p / 100) / n_scenes * 100),
             )
             scene_files.append(scene_out)
-            report("prep", (si + 1) / n_scenes * 100)
+            report("scenes", (si + 1) / n_scenes * 100)
 
         # 5. Stitch (video stream copy; audio-only re-encode when music is mixed in).
         list_file = ws.path("concat.txt")
         with open(list_file, "w", encoding="utf-8") as f:
             for sf in scene_files:
-                f.write(f"file '{sf}'\n")
+                # concat demuxer: a single quote inside a quoted path is written as '\'' .
+                f.write("file '%s'\n" % sf.replace("'", "'\\''"))
         master = os.path.join(output_dir, f"episode_{episode_number}.mp4")
-        run_ffmpeg(build_concat_args(list_file, master, music_path, music_volume))
+        run_ffmpeg(build_concat_args(list_file, master, music_path, music_volume, loudnorm=loudnorm))
         report("concat", 100)
 
         # 6. Thumbnail + metadata.

@@ -91,12 +91,31 @@
           <option value="off" {{ 'selected' if cfg.get('motion')=='off' }}>Off — static clips</option>
         </select>
       </div>
+      <div class="form-row"><label>Colour grade (channel look, baked into every clip)</label>
+        <select name="color_grade">
+          <option value="" {{ 'selected' if not cfg.get('color_grade') }}>None — footage as shot</option>
+          {% for g, label in [('cinematic','Cinematic — filmic contrast, teal shadows'), ('warm','Warm — golden, cosy'), ('cool','Cool — blue, moody'), ('vivid','Vivid — punchy colour'), ('noir','Noir — black & white')] %}
+          <option value="{{ g }}" {{ 'selected' if cfg.get('color_grade')==g }}>{{ label }}</option>
+          {% endfor %}
+        </select>
+        <p class="hint">Pick one per channel and keep it — a consistent look is what makes a feed feel curated.</p>
+      </div>
       <div class="form-row"><label>Voice profile (edge-tts, optional)</label>
         <input name="voice" placeholder="en-US-AriaNeural" value="{{ cfg.get('voice') or '' }}"></div>
       <div class="form-row"><label>Audio speed adjustment: <span id="rate-val">{{ cfg.get('rate_pct', 0) }}</span>%</label>
         <input name="rate_pct" type="range" min="-20" max="20" value="{{ cfg.get('rate_pct', 0) }}"
                oninput="document.getElementById('rate-val').textContent=this.value"></div>
-      <div class="form-row"><label>Background music file on the server (optional — must be YOUR licensed/royalty-free audio)</label>
+      <div class="form-row"><label>Background music</label>
+        <select name="music_mode">
+          <option value="none" {{ 'selected' if (cfg.get('music_mode') or ('file' if cfg.get('music_path') else 'none'))=='none' }}>None — narration only</option>
+          <option value="auto" {{ 'selected' if cfg.get('music_mode')=='auto' }}>Auto — random free CC0 track by mood, new one each episode</option>
+          <option value="file" {{ 'selected' if (cfg.get('music_mode') or ('file' if cfg.get('music_path') else ''))=='file' }}>My file on the server</option>
+        </select>
+        <p class="hint">Auto uses Freesound.org filtered to CC0 (public domain) — safe for monetized videos, no attribution needed. Requires FREESOUND_API_KEY in .env (free).</p>
+      </div>
+      <div class="form-row"><label>Music mood (for Auto — in English)</label>
+        <input name="music_mood" placeholder="dark ambient horror drone" value="{{ cfg.get('music_mood') or '' }}"></div>
+      <div class="form-row"><label>Music file path (for "My file" — must be YOUR licensed audio)</label>
         <input name="music_path" placeholder="/data/media/music/bg.mp3" value="{{ cfg.get('music_path') or '' }}"></div>
       <div class="form-row"><label>Music volume under narration: <span id="mvol-val">{{ cfg.get('music_volume', 0.15) }}</span></label>
         <input name="music_volume" type="range" min="0.05" max="0.5" step="0.05" value="{{ cfg.get('music_volume', 0.15) }}"
@@ -124,6 +143,15 @@
           <option value="review" {{ 'selected' if not cfg.get('auto_publish', true) }}>Review first — I preview &amp; approve each video</option>
         </select>
         <p class="hint">Review mode parks each rendered video in the Asset Pool with an in-browser player.</p>
+      </div>
+      <div class="form-row"><label>Auto-QC (the machine reviews every video before it goes out)</label>
+        <select name="auto_qc">
+          <option value="on" {{ 'selected' if cfg.get('auto_qc','on')!='off' }}>On — AI vets footage &amp; judges the final video (recommended)</option>
+          <option value="off" {{ 'selected' if cfg.get('auto_qc')=='off' }}>Off — render without machine review</option>
+        </select>
+        <p class="hint">Footage that doesn't match the narration is swapped before render; a finished video that fails the
+          quality check is re-rendered once, and if it fails again it waits in the Asset Pool for you instead of publishing.
+          Uses your Gemini key; if the vision API is unavailable the pipeline continues as if QC were off.</p>
       </div>
       <div class="form-row"><label>Privacy on the platform</label>
         <select name="privacy">

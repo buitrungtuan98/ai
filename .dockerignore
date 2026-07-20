@@ -1,0 +1,49 @@
+# Keep secrets and local state OUT of the image build context. Without this, `COPY . .` bakes
+# .env (FERNET_KEY, TUNNEL_TOKEN, GITHUB_PAT, OAuth secrets) and the Firebase key into image
+# layers that a `docker save`/`docker history` export would reveal (hard constraint: secrets live
+# only in .env, never in the image).
+.env
+.env.*
+!.env.example
+config/firebase_credentials.json
+*.pem
+*.key
+
+# Databases, dumps, media/render scratch — never part of the image.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+factory_dump.sql
+factory_snapshot.db
+/data/
+media/
+work/
+*.mp4
+*.mp3
+*.wav
+*.ass
+*.srt
+
+# VCS, tooling, caches, tests — not needed at runtime.
+.git
+.gitignore
+.github
+.venv
+venv
+env
+__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+tests
+docs
+.vscode
+.idea
+.DS_Store
+node_modules

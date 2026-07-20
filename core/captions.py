@@ -75,12 +75,12 @@ def _hard_split(word: str, font, usable_px: int, lines: list[str]) -> str:
 
 
 def _ass_time(seconds: float) -> str:
-    if seconds < 0:
-        seconds = 0.0
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = seconds % 60
-    return f"{h}:{m:02d}:{s:05.2f}"
+    # Work in centiseconds so rounding carries correctly (59.996s → 1:00.00, never a bogus :60.00).
+    cs = max(0, round(seconds * 100))
+    s, cs = divmod(cs, 100)
+    m, s = divmod(s, 60)
+    h, m = divmod(m, 60)
+    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
 def _ass_escape(text: str) -> str:
@@ -88,8 +88,11 @@ def _ass_escape(text: str) -> str:
 
 
 def hex_to_ass(hex_color: str) -> str:
-    """'#RRGGBB' → ASS '&H00BBGGRR' (ASS colours are BGR)."""
-    h = hex_color.lstrip("#")
+    """'#RRGGBB' (or '0xRRGGBB') → ASS '&H00BBGGRR' (ASS colours are BGR)."""
+    h = hex_color.strip()
+    if h[:2].lower() == "0x":
+        h = h[2:]
+    h = h.lstrip("#")
     if len(h) != 6:
         return "&H00FFFFFF"
     r, g, b = h[0:2], h[2:4], h[4:6]

@@ -175,3 +175,64 @@ the floor immediately; the data loop optimises for what this channel's real audi
 Bounded, guarded and transparent by design — learning refines tactics, never overrides the persona
 or safety rules, and never becomes a black box. All of it stays $0 (free-tier Gemini calls, free
 Analytics API, motion/captions ride the existing encode pass).
+
+### ADR-013 — Auto-QC gate: the machine reviews its own output; human review is the backup
+**Decision:** A per-campaign **Auto-QC** gate (default ON) makes review-free operation safe.
+(1) **Footage vetting** — before a scene renders, up to 3 leading Pexels candidates are judged by
+Gemini vision (one extracted frame vs the scene's narration); the first accepted clip leads,
+rejected leaders are dropped, downloads are reused. (2) **Colour grade** — an optional
+per-campaign look (cinematic/warm/cool/vivid/noir) baked into the existing single encode pass,
+applied before captions so text is never graded. (3) **Loudness** — the final stitch normalizes
+audio to −14 LUFS (`loudnorm=I=-14:TP=-1.5:LRA=11`), the short-form platform target, so every
+episode publishes at the same perceived volume; audio-only re-encode, video stays stream-copied.
+(4) **Final verdict** — 4 frames sampled across the finished master are judged for readable
+captions and coherent visuals; a failing verdict triggers exactly **one** automatic re-render, and
+a second failure parks the episode in the Asset Pool as AWAITING_REVIEW with the issues listed —
+it is never published. The verdict is stored in the episode metadata (visible in the Asset Pool).
+**Why:** the operator wants "perfect with no human touch — manual is just in case". That demands
+the pipeline judge itself with the same signal a human reviewer uses (looking at frames), while
+keeping two safety properties: **fail-open** (a vision-API outage degrades to the pre-QC pipeline,
+never blocks an episode — availability of the nightly upload beats a stricter gate) and
+**fail-closed on quality** (a video the machine judged bad twice waits for a human instead of
+publishing). Costs stay $0: a handful of extra free-tier Gemini vision calls per episode; grade
+and loudnorm ride existing encode passes on the CPU-only box.
+
+### ADR-014 — Pre-deployment hardening pass
+**Decision:** A full-codebase review (four parallel readers, then per-finding adversarial
+verification against the live code) surfaced and fixed a set of correctness, robustness, and
+secrets-hygiene defects before first production use. The fixes, grouped:
+- **Campaign lifecycle:** completion is `current_episode >= total_episodes` (was `>`, so a
+  campaign never completed and the next pending campaign never auto-activated); a re-render
+  (Retry-after-reject, or an expired slot item) now REPLACES the prior buffer row for that episode
+  instead of colliding on the `(campaign, episode)` unique constraint (which had dead-ended Retry
+  in a re-render→fail loop); `publish_task` is idempotent (a double-enqueued slot/Approve can't
+  upload twice); an expired pre-rendered buffer fails its stranded SCHEDULED task so Retry recovers
+  it; post-publish hydration is isolated so a hydration hiccup can't flip a just-published episode
+  to FAILED.
+- **Crash recovery:** a render lock present at worker startup is cleared (single-worker topology →
+  it's a crash artifact) so a hard crash mid-render can't dead-letter the whole queue; the stuck
+  reaper also reaps long-stranded `PENDING_QUEUE` tasks; the scheduler tick isolates each campaign
+  so one tenant's fault can't starve the others.
+- **Render engine:** ffmpeg stderr is drained to a temp file (a >64 KB stderr burst could deadlock
+  the reader and hang the single-render box until timeout); a callback error now kills+reaps the
+  child instead of leaving a zombie; global progress is monotonic (was a per-scene sawtooth); the
+  encoder honors `-threads` (it was only reaching the input decoder); footage search, footage
+  vetting, and background-music download all fail safe; the brand-safety filter no longer falls
+  back to the raw text when it strips a scene to empty; the orphan sweeper never deletes the
+  workspace of the render in flight, even under disk pressure.
+- **Auth / secrets:** multi-tenant boot now fails fast on a missing/insecure `SECRET_KEY`; OAuth
+  callbacks reject a missing/mismatched `state` (closing the `None != None` hole) and consume the
+  pending-user id; the session cookie is `Secure`; credential-test errors never echo the URL that
+  embeds the API key/bot token; `.dockerignore` keeps `.env` and the Firebase key out of image
+  layers; the backup script wipes the PAT-bearing clone on every exit and never prints the PAT.
+- **Publishing:** YouTube token refresh preserves the originally-granted scopes (a fixed subset had
+  downscoped the refreshed token and silently killed the analytics/self-improvement loop) and
+  rehydrates the stored expiry so proactive refresh actually runs.
+**Deferred (documented, not code-changed):** the two zoom motion effects may render subtly on some
+ffmpeg builds (verify on the box; the pan effect is unaffected); `WORK_ROOT` must stay free of
+spaces/quotes (the `ass=` filtergraph path isn't shell-escaped — default paths are safe); a very
+long render that fails Auto-QC could exceed the single job timeout on its re-render (raise
+`JOB_TIMEOUT_SECONDS` if renders routinely run long). None block deployment.
+**Why:** the operator asked for a hands-off factory; these were the seams where "hands-off" could
+strand a campaign, hang the box, publish twice, or leak a secret. Every fix keeps the existing
+architecture — the changes harden the edges, they don't reshape the system.

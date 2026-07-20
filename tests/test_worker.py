@@ -50,15 +50,17 @@ def test_advance_campaign_and_autoactivate(session, user, channel):
     from database.types import CampaignStatus
     from workers import video_worker
 
+    # current_episode counts episodes published, starting at 0 (as in production). A 2-episode
+    # campaign completes when the count REACHES 2 (>=), not 3 — otherwise it never completes.
     cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="A", total_episodes=2,
-                   current_episode=1, status=CampaignStatus.active)
+                   current_episode=0, status=CampaignStatus.active)
     nxt = Campaign(user_id=user.id, channel_id=channel.id, topic_name="B", total_episodes=2,
                    status=CampaignStatus.pending)
     session.add_all([cam, nxt])
     session.commit()
 
-    assert not video_worker.advance_campaign(session, cam).completed  # -> 2, still active
-    ev = video_worker.advance_campaign(session, cam)                  # -> 3 > 2 => completed
+    assert not video_worker.advance_campaign(session, cam).completed  # -> 1, still active
+    ev = video_worker.advance_campaign(session, cam)                  # -> 2 >= 2 => completed
     assert ev.completed and cam.status == CampaignStatus.completed
     assert ev.activated_campaign_id == nxt.id
     session.refresh(nxt)
@@ -236,6 +238,203 @@ def test_episode_memory_flows_into_prompt(session, user, channel, monkeypatch):
     # And this episode's synopsis was stored for the NEXT one.
     session.refresh(t3)
     assert t3.synopsis == "Căn nhà cuối xóm có tiếng ru"
+
+
+def test_auto_music_flows_into_render(session, user, channel, monkeypatch, tmp_path):
+    """music_mode=auto resolves a CC0 track and the credit lands in the episode metadata."""
+    from core.config import settings
+    from database.models import BufferPoolItem, Campaign, Task
+    from database.types import CampaignStatus
+    from services import music_service
+    from workers import video_worker
+
+    monkeypatch.setattr(settings, "FREESOUND_API_KEY", "fs-key")
+    track = tmp_path / "freesound_101.mp3"
+    track.write_bytes(b"mp3")
+    credit = {"source": "freesound", "id": 101, "title": "Dark Drone", "author": "artistA", "license": "CC0"}
+    monkeypatch.setattr(music_service, "pick_music", lambda mood, key, cache: (str(track), credit))
+
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="Horror", total_episodes=3,
+                   status=CampaignStatus.active,
+                   config_json={"language": "vi", "auto_publish": False,
+                                "music_mode": "auto", "music_mood": "dark ambient"})
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    t = Task(campaign_id=cam.id, user_id=user.id, episode_number=1)
+    session.add(t)
+    session.commit()
+    session.refresh(t)
+
+    captured = {}
+
+    def fake_produce(**kwargs):
+        captured.update(kwargs)
+        return _result()
+
+    monkeypatch.setattr(video_worker, "generate_script", lambda **k: _script())
+    monkeypatch.setattr(video_worker.video_factory, "produce", fake_produce)
+
+    video_worker.render_task(t.id)
+    assert captured["music_path"] == str(track)  # the picked CC0 file reached the renderer
+    buf = session.query(BufferPoolItem).filter_by(campaign_id=cam.id, episode_number=1).one()
+    assert buf.metadata_json["music_credit"]["title"] == "Dark Drone"  # per-episode transparency
+
+
+def _qc_campaign(session, user, channel, **cfg_extra):
+    from database.models import Campaign, Task
+    from database.types import CampaignStatus
+
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="QC", total_episodes=3,
+                   status=CampaignStatus.active, config_json={"language": "en", **cfg_extra})
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    t = Task(campaign_id=cam.id, user_id=user.id, episode_number=1)
+    session.add(t)
+    session.commit()
+    session.refresh(t)
+    return cam, t
+
+
+def test_auto_qc_pass_publishes_with_verdict(session, user, channel, monkeypatch):
+    from core import qc
+    from database.models import BufferPoolItem
+    from database.types import TaskStatus
+    from workers import video_worker
+
+    cam, t = _qc_campaign(session, user, channel)
+    produce_calls = []
+    monkeypatch.setattr(video_worker, "generate_script", lambda **k: _script())
+    monkeypatch.setattr(video_worker.video_factory, "produce",
+                        lambda **k: produce_calls.append(k) or _result())
+    monkeypatch.setattr(qc, "run_final_qc",
+                        lambda path, *, api_key, context="": qc.QCResult(passed=True, score=9))
+    monkeypatch.setattr(video_worker, "_publish", lambda *a, **k: "vid-qc")
+
+    video_worker.render_task(t.id)
+    session.refresh(t)
+    assert t.status == TaskStatus.COMPLETED
+    assert len(produce_calls) == 1 and produce_calls[0]["vet_clip"] is not None  # vetter wired in
+    buf = session.query(BufferPoolItem).filter_by(campaign_id=cam.id, episode_number=1).one()
+    assert buf.metadata_json["qc"] == {"passed": True, "score": 9, "issues": [], "attempts": 1}
+
+
+def test_auto_qc_double_failure_parks_for_review(session, user, channel, monkeypatch):
+    """QC fail → one re-render; fail again → park for human review, never publish (ADR-013)."""
+    from core import qc
+    from database.models import BufferPoolItem
+    from database.types import BufferStatus, TaskStatus
+    from workers import video_worker
+
+    cam, t = _qc_campaign(session, user, channel, auto_publish=True)
+    produce_calls = []
+    monkeypatch.setattr(video_worker, "generate_script", lambda **k: _script())
+    monkeypatch.setattr(video_worker.video_factory, "produce",
+                        lambda **k: produce_calls.append(k) or _result())
+    monkeypatch.setattr(qc, "run_final_qc",
+                        lambda path, *, api_key, context="": qc.QCResult(
+                            passed=False, score=3, issues=["captions clipped"]))
+    monkeypatch.setattr(video_worker, "_publish",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not publish")))
+
+    video_worker.render_task(t.id)
+    session.refresh(t)
+    assert len(produce_calls) == 2  # exactly one automatic re-render
+    assert t.status == TaskStatus.AWAITING_REVIEW  # human review is the backstop
+    buf = session.query(BufferPoolItem).filter_by(campaign_id=cam.id, episode_number=1).one()
+    assert buf.status == BufferStatus.awaiting_review
+    assert buf.metadata_json["qc"] == {"passed": False, "score": 3,
+                                       "issues": ["captions clipped"], "attempts": 2}
+
+
+def test_auto_qc_off_skips_gate(session, user, channel, monkeypatch):
+    from core import qc
+    from database.types import TaskStatus
+    from workers import video_worker
+
+    cam, t = _qc_campaign(session, user, channel, auto_qc="off")
+    produce_calls = []
+    monkeypatch.setattr(video_worker, "generate_script", lambda **k: _script())
+    monkeypatch.setattr(video_worker.video_factory, "produce",
+                        lambda **k: produce_calls.append(k) or _result())
+    monkeypatch.setattr(qc, "run_final_qc",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("QC must not run")))
+    monkeypatch.setattr(video_worker, "_publish", lambda *a, **k: "vid-x")
+
+    video_worker.render_task(t.id)
+    session.refresh(t)
+    assert t.status == TaskStatus.COMPLETED
+    assert produce_calls[0]["vet_clip"] is None  # no vision vetting when the gate is off
+
+
+def test_rerender_replaces_existing_buffer(session, user, channel, monkeypatch, tmp_path):
+    """Re-render (Retry after a reject) must REPLACE the prior buffer row for the episode, not
+    collide on the (campaign, episode) unique constraint — otherwise Retry loops FAILED forever."""
+    from core.video_factory import RenderResult
+    from database.models import BufferPoolItem, Campaign, Task
+    from database.types import BufferStatus, CampaignStatus, TaskStatus
+    from workers import video_worker
+
+    old_file = tmp_path / "old.mp4"
+    old_file.write_bytes(b"old")
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="R", total_episodes=3,
+                   status=CampaignStatus.active,
+                   config_json={"language": "en", "auto_publish": False, "auto_qc": "off"})
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    t = Task(campaign_id=cam.id, user_id=user.id, episode_number=1)
+    # A leftover rejected buffer row for this episode, as the reject route leaves behind.
+    stale = BufferPoolItem(campaign_id=cam.id, channel_id=channel.id, episode_number=1,
+                           video_path=str(old_file), status=BufferStatus.rejected, metadata_json={})
+    session.add_all([t, stale])
+    session.commit()
+    session.refresh(t)
+
+    new_file = tmp_path / "new.mp4"
+    new_file.write_bytes(b"new")
+    monkeypatch.setattr(video_worker, "generate_script", lambda **k: _script())
+    monkeypatch.setattr(
+        video_worker.video_factory, "produce",
+        lambda **k: RenderResult(master_path=str(new_file), thumbnail_path="/no/t.jpg",
+                                 metadata={"title": "T", "variant": "A"}, duration=5.0, scene_count=1),
+    )
+
+    video_worker.render_task(t.id)  # must NOT raise IntegrityError on the unique constraint
+
+    # Drop cached objects: SQLite reuses the deleted row's rowid, so the replacement buffer can take
+    # the stale row's PK — expire so the query re-reads the row's real (new) attributes from disk.
+    session.expire_all()
+    session.refresh(t)
+    assert t.status == TaskStatus.AWAITING_REVIEW
+    bufs = session.query(BufferPoolItem).filter_by(campaign_id=cam.id, episode_number=1).all()
+    assert len(bufs) == 1 and bufs[0].video_path == str(new_file)  # replaced, not duplicated
+    assert not old_file.exists()  # the superseded render's file was cleaned up
+
+
+def test_publish_task_idempotent_on_consumed(session, user, channel, monkeypatch):
+    """A double-enqueued publish (slot re-tick or double-clicked Approve) must not upload twice."""
+    from database.models import BufferPoolItem, Campaign, Task
+    from database.types import BufferStatus, CampaignStatus, TaskStatus
+    from workers import video_worker
+
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="P", total_episodes=3,
+                   current_episode=1, status=CampaignStatus.active, config_json={"language": "en"})
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    task = Task(campaign_id=cam.id, user_id=user.id, episode_number=1, status=TaskStatus.COMPLETED)
+    buf = BufferPoolItem(campaign_id=cam.id, channel_id=channel.id, episode_number=1,
+                         video_path="/gone.mp4", status=BufferStatus.consumed, metadata_json={})
+    session.add_all([task, buf])
+    session.commit()
+    session.refresh(buf)
+
+    published = []
+    monkeypatch.setattr(video_worker, "_publish", lambda *a, **k: published.append(1) or "vid")
+    video_worker.publish_task(buf.id)  # buffer already consumed → guard bails
+    assert published == []  # no second upload
 
 
 def test_hydrate_respects_campaign_buffer_size(session, user, channel):

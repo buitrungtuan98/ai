@@ -16,15 +16,24 @@ from database.models import Channel, User
 
 logger = logging.getLogger(__name__)
 
-SCOPES = [
-    "https://www.googleapis.com/auth/youtube.upload",
-    "https://www.googleapis.com/auth/youtube.force-ssl",
-]
 _TOKEN_URI = "https://oauth2.googleapis.com/token"
 
 
 def _load_creds_dict(channel: Channel) -> dict:
     return json.loads(channel.encrypted_credentials or "{}")
+
+
+def _parse_expiry(value: str | None):
+    """Stored token_expiry (naive UTC isoformat) → datetime, or None."""
+    if not value:
+        return None
+    from datetime import datetime
+
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return dt.replace(tzinfo=None)  # google-auth compares against a naive UTC datetime
 
 
 def build_credentials(channel: Channel):
@@ -39,8 +48,14 @@ def build_credentials(channel: Channel):
         token_uri=data.get("token_uri", _TOKEN_URI),
         client_id=settings.GOOGLE_CLIENT_ID,
         client_secret=settings.GOOGLE_CLIENT_SECRET,
-        scopes=SCOPES,
+        # scopes=None on refresh preserves whatever scopes the channel actually authorized. Passing
+        # a fixed subset would DOWNSCOPE the refreshed token (dropping yt-analytics.readonly and
+        # silently breaking the stats/self-improvement loop) — and would break channels connected
+        # before a scope was added. The stored expiry lets `creds.valid` reflect reality, so the
+        # proactive refresh-and-persist branch below actually runs.
+        scopes=None,
     )
+    creds.expiry = _parse_expiry(data.get("token_expiry"))
     if not creds.valid:
         if not creds.refresh_token:
             raise RuntimeError(f"Channel {channel.id} has no refresh_token; reconnect the account.")

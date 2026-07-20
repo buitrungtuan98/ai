@@ -40,16 +40,27 @@ class RenderWorkspace:
         logger.debug("Cleaned workspace %s", self.dir)
 
 
-def sweep_orphans(root: str | None = None, max_age_minutes: int | None = None) -> int:
-    """Remove workspace dirs older than the max age (crash/OOM survivors). Returns count removed."""
+def sweep_orphans(
+    root: str | None = None,
+    max_age_minutes: int | None = None,
+    skip: set[str] | None = None,
+) -> int:
+    """Remove workspace dirs older than the max age (crash/OOM survivors). Returns count removed.
+
+    `skip` is a set of directory names (job ids) to never remove — the caller passes the ids of
+    renders currently in flight so an aggressive (disk-pressure) sweep can't delete a live job's
+    workspace mid-encode (its dir mtime goes stale while a single long scene encodes)."""
     base = Path(root or settings.WORK_ROOT)
     max_age = (max_age_minutes or settings.ORPHAN_MAX_AGE_MINUTES) * 60
     if not base.exists():
         return 0
+    skip = skip or set()
     cutoff = time.time() - max_age
     removed = 0
     for child in base.iterdir():
         try:
+            if child.name in skip:
+                continue
             if child.is_dir() and child.stat().st_mtime < cutoff:
                 shutil.rmtree(child, ignore_errors=True)
                 removed += 1

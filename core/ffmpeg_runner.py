@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable, Sequence
 
 from core.config import settings
@@ -49,32 +50,47 @@ def run_ffmpeg(
         *args,
     ]
     logger.debug("ffmpeg: %s", " ".join(cmd))
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1
-    )
 
-    last_reported = 0.0
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        line = line.strip()
-        if not (total_duration and on_progress):
-            continue
-        if line.startswith("out_time_us=") or line.startswith("out_time_ms="):
-            raw = line.split("=", 1)[1]
-            try:
-                # out_time_us is microseconds; out_time_ms is (confusingly) also microseconds in ffmpeg.
-                micros = int(raw)
-            except ValueError:
-                continue
-            pct = min(99.0, (micros / 1e6) / total_duration * 100.0)
-            if pct - last_reported >= 1.0:
-                last_reported = pct
-                on_progress(pct)
+    # stderr goes to a real temp file, not a pipe: ffmpeg can emit far more than the ~64 KB pipe
+    # buffer (per-frame warnings, decode errors from a flaky clip). A pipe we only read AFTER the
+    # process exits would fill, block ffmpeg's write(2), stall its stdout, and deadlock the loop
+    # below until the job timeout. A file never blocks the writer.
+    with tempfile.TemporaryFile() as errf:  # binary: ffmpeg writes to this fd directly
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=errf, text=True, bufsize=1
+        )
+        last_reported = 0.0
+        assert proc.stdout is not None
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if not (total_duration and on_progress):
+                    continue
+                if line.startswith("out_time_us=") or line.startswith("out_time_ms="):
+                    raw = line.split("=", 1)[1]
+                    try:
+                        # out_time_us is microseconds; out_time_ms is (confusingly) microseconds too.
+                        micros = int(raw)
+                    except ValueError:
+                        continue
+                    pct = min(99.0, (micros / 1e6) / total_duration * 100.0)
+                    if pct - last_reported >= 1.0:
+                        last_reported = pct
+                        on_progress(pct)
+            proc.wait()
+        except BaseException:
+            # A callback error (or interrupt) must not leave a live ffmpeg + its full stdout pipe
+            # behind — kill and reap the child before propagating.
+            proc.kill()
+            proc.wait()
+            raise
+        finally:
+            proc.stdout.close()
 
-    proc.wait()
-    if proc.returncode != 0:
-        stderr = proc.stderr.read() if proc.stderr else ""
-        raise FFmpegError(f"ffmpeg failed (exit {proc.returncode}): {stderr[-2000:]}")
+        if proc.returncode != 0:
+            errf.seek(0)
+            stderr = errf.read().decode("utf-8", "replace")
+            raise FFmpegError(f"ffmpeg failed (exit {proc.returncode}): {stderr[-2000:]}")
 
 
 def extract_frame(video_path: str, out_path: str, at_seconds: float) -> None:

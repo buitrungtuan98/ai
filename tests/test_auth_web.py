@@ -9,12 +9,14 @@ from starlette.testclient import TestClient
 
 @pytest.fixture
 def mt_client(monkeypatch):
-    """A TestClient with MULTI_TENANT_MODE flipped on (runtime flag; same settings object app-wide)."""
+    """A TestClient with MULTI_TENANT_MODE flipped on (runtime flag; same settings object app-wide).
+    Uses an https base_url so the Secure session cookie (SessionMiddleware https_only=True) is
+    stored and returned — production always serves over HTTPS via the Cloudflare Tunnel."""
     import main
     from core.config import settings
 
     monkeypatch.setattr(settings, "MULTI_TENANT_MODE", True)
-    with TestClient(main.app) as c:
+    with TestClient(main.app, base_url="https://testserver") as c:
         yield c
 
 
@@ -22,7 +24,7 @@ def mt_client(monkeypatch):
 def solo_client():
     import main
 
-    with TestClient(main.app) as c:
+    with TestClient(main.app, base_url="https://testserver") as c:
         yield c
 
 

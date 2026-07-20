@@ -103,10 +103,17 @@ def _call_gemini(
     resp = gen_model.generate_content(prompt)
 
     # Distinguish a safety block from a normal empty response.
-    for cand in getattr(resp, "candidates", []) or []:
+    candidates = getattr(resp, "candidates", None) or []
+    for cand in candidates:
         reason = getattr(cand, "finish_reason", None)
         if reason and str(reason).upper().endswith(("SAFETY", "RECITATION")):
             raise GeminiBlockedError(f"Gemini blocked the response (finish_reason={reason}).")
+    # A prompt-level block yields NO candidates (reason lives in prompt_feedback). Reading resp.text
+    # then raises a bare ValueError that the retry loop would misread as a repairable parse error —
+    # surface it as a non-retryable block instead.
+    if not candidates:
+        feedback = getattr(resp, "prompt_feedback", None)
+        raise GeminiBlockedError(f"Gemini returned no candidates (prompt_feedback={feedback}).")
     return resp.text
 
 
@@ -166,11 +173,17 @@ def generate_structured(
 
 
 def _strip_code_fence(text: str) -> str:
-    """Tolerate a ```json ... ``` fence if the model adds one despite JSON mode."""
+    """Tolerate a ```json ... ``` fence if the model adds one despite JSON mode — including a
+    single-line fence with no newline after the language tag."""
     s = text.strip()
-    if s.startswith("```"):
-        s = s.split("\n", 1)[-1] if "\n" in s else s
-        s = s.rsplit("```", 1)[0]
+    if not s.startswith("```"):
+        return s
+    s = s[3:]                       # drop the opening ```
+    if s[:4].lower() == "json":     # optional language tag
+        s = s[4:]
+    if s.startswith("\n"):
+        s = s[1:]
+    s = s.rsplit("```", 1)[0]       # drop the closing fence
     return s.strip()
 
 
@@ -352,6 +365,72 @@ def generate_script(
     except Exception:  # noqa: BLE001
         logger.warning("Rewrite failed — keeping the first draft.")
         return script
+
+
+# ── Vision judging (Auto-QC: the machine watches the footage and the output) ─
+def _call_gemini_vision(
+    *,
+    api_key: str,
+    model: str,
+    prompt: str,
+    image_paths: list[str],
+    temperature: float = 0.2,
+    max_output_tokens: int = 1024,
+) -> str:
+    """Single point that calls Gemini with images. Returns raw response text."""
+    import google.generativeai as genai
+    from PIL import Image
+
+    genai.configure(api_key=api_key)
+    gen_model = genai.GenerativeModel(
+        model_name=model,
+        generation_config={
+            "temperature": temperature,
+            "max_output_tokens": max_output_tokens,
+            "response_mime_type": "application/json",
+        },
+    )
+    resp = gen_model.generate_content([prompt, *[Image.open(p) for p in image_paths]])
+    return resp.text
+
+
+class FootageVerdict(BaseModel):
+    match_score: int = Field(ge=1, le=10, description="How well the footage fits the narration.")
+    reason: str = ""
+
+
+def judge_footage(frame_path: str, narration: str, *, api_key: str,
+                  model: str = DEFAULT_MODEL) -> FootageVerdict:
+    """Does this stock clip actually fit what's being said? Single attempt — callers fail open."""
+    schema_hint = json.dumps(FootageVerdict.model_json_schema(), ensure_ascii=False)
+    raw = _call_gemini_vision(
+        api_key=api_key, model=model, image_paths=[frame_path],
+        prompt=("This frame is from a stock clip chosen as background for a short-form video "
+                f"scene whose narration is:\n\"{narration}\"\n"
+                "Judge whether the visual genuinely fits the narration's subject and mood. "
+                f"Return ONLY JSON matching this schema:\n{schema_hint}"),
+    )
+    return FootageVerdict.model_validate_json(_strip_code_fence(raw))
+
+
+class VideoQCVerdict(BaseModel):
+    quality_score: int = Field(ge=1, le=10)
+    issues: list[str] = Field(default_factory=list, max_length=6)
+
+
+def judge_video_frames(frame_paths: list[str], *, api_key: str, context: str = "",
+                       model: str = DEFAULT_MODEL) -> VideoQCVerdict:
+    """Final-output spot check: are captions readable, visuals coherent, nothing broken?"""
+    schema_hint = json.dumps(VideoQCVerdict.model_json_schema(), ensure_ascii=False)
+    raw = _call_gemini_vision(
+        api_key=api_key, model=model, image_paths=frame_paths,
+        prompt=("These are frames sampled from an automatically produced vertical (9:16) short "
+                f"video. {context}\n"
+                "Check: captions present and readable (not clipped), visuals look coherent and "
+                "intentional (no broken/black/garbled frames), overall watchable quality. "
+                f"Return ONLY JSON matching this schema:\n{schema_hint}"),
+    )
+    return VideoQCVerdict.model_validate_json(_strip_code_fence(raw))
 
 
 # ── Critic pass (Loop 1: every video improves before it is even rendered) ────

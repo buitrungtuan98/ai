@@ -16,7 +16,13 @@ from datetime import datetime
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.exception_handlers import http_exception_handler
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -54,6 +60,7 @@ app.add_middleware(
     secret_key=settings.SECRET_KEY,
     max_age=settings.SESSION_MAX_AGE_DAYS * 86400,
     same_site="lax",
+    https_only=True,  # ingress is always HTTPS via the Cloudflare Tunnel — mark the cookie Secure
 )
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
@@ -147,7 +154,11 @@ def google_login_start(request: Request):
 
 @app.get("/auth/google/callback")
 def google_login_callback(request: Request, db: DbDep):
-    if request.query_params.get("state") != request.session.pop("login_state", None):
+    incoming = request.query_params.get("state")
+    stored = request.session.pop("login_state", None)
+    # Require BOTH present and equal — `None != None` is False, so a missing state on both sides
+    # would otherwise slip through and defeat the CSRF protection.
+    if not incoming or not stored or incoming != stored:
         raise HTTPException(400, "OAuth state mismatch")
     flow = _google_flow(LOGIN_SCOPES, "/auth/google/callback")
     flow.fetch_token(code=request.query_params.get("code"))
@@ -277,13 +288,20 @@ def google_oauth_start(request: Request, user: CurrentUser):
 def google_oauth_callback(request: Request, db: DbDep):
     from googleapiclient.discovery import build
 
-    if request.query_params.get("state") != request.session.pop("oauth_state", None):
+    incoming = request.query_params.get("state")
+    stored = request.session.pop("oauth_state", None)
+    if not incoming or not stored or incoming != stored:
         raise HTTPException(400, "OAuth state mismatch")
+    # Pop (don't just read) the pending user, and require it — a stale/absent value must not let a
+    # crafted callback attach an attacker's channel to whoever last connected one.
+    user_id = request.session.pop("oauth_user", None)
+    if not user_id:
+        raise HTTPException(400, "No pending channel connection for this session")
+
     flow = _google_flow(YOUTUBE_SCOPES, "/oauth/google/callback")
     # Exchange by code (not the full callback URL) — robust behind the HTTP-origin tunnel.
     flow.fetch_token(code=request.query_params.get("code"))
     creds = flow.credentials
-    user_id = request.session.get("oauth_user")
 
     youtube = build("youtube", "v3", credentials=creds, cache_discovery=False)
     info = youtube.channels().list(part="snippet", mine=True).execute()
@@ -296,6 +314,8 @@ def google_oauth_callback(request: Request, db: DbDep):
         "access_token": creds.token,
         "refresh_token": creds.refresh_token,
         "token_uri": creds.token_uri,
+        # Persist expiry so build_credentials can proactively refresh + persist (not rely on a 401).
+        "token_expiry": creds.expiry.isoformat() if creds.expiry else None,
     })
     channel = Channel(
         user_id=user_id, platform=Platform.youtube, channel_name=name, avatar_url=avatar,
@@ -357,10 +377,15 @@ def _build_campaign_config(
     persona: str, style_examples: str, catchphrase_open: str, catchphrase_close: str,
     continuity: str, timezone: str,
     motion: str = "on", caption_theme: str = "highlight", self_critique: str = "on",
+    music_mode: str = "none", music_mood: str = "",
+    color_grade: str = "", auto_qc: str = "on",
 ) -> dict:
     """One place turns the campaign form into config_json (DRY: shared by create and edit)."""
     config: dict = {
-        "language": language, "system_prompt": system_prompt, "voice": voice or None,
+        # Whitelist to the supported set (VideoScript.language is a Literal) — an unsupported value
+        # would make every episode fail generation. Default to English.
+        "language": language if language in ("en", "vi", "es") else "en",
+        "system_prompt": system_prompt, "voice": voice or None,
         "rate_pct": rate_pct, "subtitle_style": subtitle_style,
         "music_path": music_path or None, "music_volume": music_volume,
         "posting_slots": [s.strip() for s in posting_slots.split(",") if s.strip()],
@@ -378,6 +403,12 @@ def _build_campaign_config(
         "motion": "off" if motion == "off" else "on",
         "caption_theme": caption_theme if caption_theme in ("classic", "highlight", "boxed", "neon") else "highlight",
         "self_critique": "off" if self_critique == "off" else "on",
+        # Music: none | auto (random CC0 by mood, per episode) | file (operator-supplied path).
+        "music_mode": music_mode if music_mode in ("none", "auto", "file") else "none",
+        "music_mood": music_mood.strip() or None,
+        # Auto-QC gate (ADR-013): colour grade baked into the encode; machine review of output.
+        "color_grade": color_grade if color_grade in ("cinematic", "warm", "cool", "vivid", "noir") else None,
+        "auto_qc": "off" if auto_qc == "off" else "on",
     }
     if watermark_path or (tint_color and tint_opacity > 0) or mirror:
         config["branding"] = {
@@ -421,6 +452,10 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
     motion: str = Form("on"),
     caption_theme: str = Form("highlight"),
     self_critique: str = Form("on"),
+    music_mode: str = Form("none"),
+    music_mood: str = Form(""),
+    color_grade: str = Form(""),
+    auto_qc: str = Form("on"),
 ) -> dict:
     return {
         "topic_name": topic_name, "channel_id": channel_id, "total_episodes": total_episodes,
@@ -433,6 +468,8 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
             persona=persona, style_examples=style_examples, catchphrase_open=catchphrase_open,
             catchphrase_close=catchphrase_close, continuity=continuity, timezone=timezone,
             motion=motion, caption_theme=caption_theme, self_critique=self_critique,
+            music_mode=music_mode, music_mood=music_mood,
+            color_grade=color_grade, auto_qc=auto_qc,
         ),
     }
 
@@ -581,10 +618,22 @@ def _ranged_file_response(path: str, request: Request, media_type: str) -> Strea
     start, end = 0, file_size - 1
     status_code = 200
     if range_header.startswith("bytes="):
+        raw_start, _, raw_end = range_header[6:].partition("-")
         try:
-            raw_start, _, raw_end = range_header[6:].partition("-")
-            start = int(raw_start) if raw_start else 0
-            end = int(raw_end) if raw_end else file_size - 1
+            if not raw_start:
+                # Suffix range "bytes=-N" → the last N bytes.
+                start = max(0, file_size - int(raw_end)) if raw_end else 0
+                end = file_size - 1
+            else:
+                start = int(raw_start)
+                end = int(raw_end) if raw_end else file_size - 1
+            end = min(end, file_size - 1)
+            # Unsatisfiable (past EOF or reversed) → 416, not a broken 206 with negative length.
+            if start > end or start >= file_size:
+                return Response(
+                    status_code=416,
+                    headers={"Content-Range": f"bytes */{file_size}", "Accept-Ranges": "bytes"},
+                )
             status_code = 206
         except ValueError:
             start, end = 0, file_size - 1

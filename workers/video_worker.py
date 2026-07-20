@@ -51,6 +51,32 @@ def _resolve_keys(user: User) -> tuple[str, str]:
     return gemini, pexels
 
 
+def _resolve_music(cfg: dict) -> tuple[str | None, dict | None]:
+    """Resolve the campaign's music mode to a local file path (+ credit for transparency).
+
+    Modes: "auto" = random CC0 track by mood via Freesound (cached; degrades to no music on
+    failure); "file" = operator-supplied path (fails loudly if missing — config truth);
+    "none"/absent = narration only. Legacy configs with only music_path behave as "file".
+    """
+    mode = cfg.get("music_mode") or ("file" if cfg.get("music_path") else "none")
+    if mode == "file":
+        return cfg.get("music_path") or None, None
+    if mode == "auto" and settings.FREESOUND_API_KEY:
+        from services import music_service
+
+        picked = music_service.pick_music(
+            cfg.get("music_mood") or "ambient background",
+            settings.FREESOUND_API_KEY,
+            os.path.join(settings.MEDIA_ROOT, "music_cache"),
+        )
+        if picked:
+            return picked
+        logger.warning("Auto-music unavailable — rendering without music")
+    elif mode == "auto":
+        logger.warning("music_mode=auto but FREESOUND_API_KEY is not set — rendering without music")
+    return None, None
+
+
 def _branding_from_config(cfg: dict) -> Branding:
     b = cfg.get("branding") or {}
     return Branding(
@@ -76,7 +102,10 @@ def advance_campaign(db, campaign: Campaign) -> AdvanceEvents:
     """
     events = AdvanceEvents()
     campaign.current_episode += 1
-    if campaign.current_episode > campaign.total_episodes:
+    # current_episode counts episodes published (starts at 0). The campaign is done once that count
+    # REACHES total_episodes — `>` never fires (only N episodes ever publish, so it stops at N == N)
+    # and the campaign would sit "active" at N/N forever, never completing or activating the next.
+    if campaign.current_episode >= campaign.total_episodes:
         campaign.status = CampaignStatus.completed
         db.commit()
         events.completed = True
@@ -229,16 +258,22 @@ def render_task(task_id: int) -> None:
         db.close()
         return
 
-    campaign = db.get(Campaign, task.campaign_id)
-    channel = db.get(Channel, campaign.channel_id)
-    user = db.get(User, task.user_id)
-    cfg = campaign.config_json or {}
-    auto_publish = bool(cfg.get("auto_publish", True))
-    # With posting slots configured, auto mode renders ahead into the buffer and the scheduler
-    # publishes exactly one episode per slot (ADR-011). Without slots: publish right after render.
-    slot_scheduled = auto_publish and bool(cfg.get("posting_slots"))
-
+    # Loaded inside the try so a transient DB error here can't escape the finally (which closes the
+    # session and clears progress) — otherwise the task would strand and the session would leak.
+    campaign = channel = user = None
     try:
+        campaign = db.get(Campaign, task.campaign_id)
+        channel = db.get(Channel, campaign.channel_id)
+        user = db.get(User, task.user_id)
+        cfg = campaign.config_json or {}
+        auto_publish = bool(cfg.get("auto_publish", True))
+        # With posting slots configured, auto mode renders ahead into the buffer and the scheduler
+        # publishes exactly one episode per slot (ADR-011). Without slots: publish right after render.
+        slot_scheduled = auto_publish and bool(cfg.get("posting_slots"))
+        # Auto-QC gate (ADR-013): vision-vet footage during render + judge the finished master.
+        # Default ON; every check fails open, so a vision-API outage never blocks an episode.
+        auto_qc = cfg.get("auto_qc", "on") != "off"
+
         gemini_key, pexels_key = _resolve_keys(user)
         task.started_at = datetime.utcnow()
 
@@ -277,30 +312,75 @@ def render_task(task_id: int) -> None:
 
         _set_status(db, task, TaskStatus.RENDERING, 10)
         output_dir = os.path.join(settings.MEDIA_ROOT, "buffer", str(campaign.id))
-        result = video_factory.produce(
-            script=script,
-            episode_number=task.episode_number,
-            pexels_api_key=pexels_key,
-            job_id=str(task.id),
-            output_dir=output_dir,
-            voice=cfg.get("voice"),
-            rate_pct=int(cfg.get("rate_pct", 0)),
-            branding=_branding_from_config(cfg),
-            subtitle_style=cfg.get("subtitle_style", "word"),
-            caption_theme=cfg.get("caption_theme", "highlight"),
-            motion=cfg.get("motion", "on") != "off",
-            music_path=cfg.get("music_path") or None,
-            music_volume=float(cfg.get("music_volume", 0.15)),
-            ab_testing=bool(cfg.get("ab_testing", True)),
-            on_progress=lambda p: set_progress(task_id, 10 + p * 0.8),
-        )
+        music_path, music_credit = _resolve_music(cfg)
+
+        vet_clip = None
+        if auto_qc:
+            from core import qc  # lazy, like the publishing services
+
+            vet_clip = qc.make_footage_vetter(gemini_key)
+
+        # Render, then let the machine review its own output. A failing verdict triggers exactly
+        # one re-render; if it still fails, the episode is parked for human review (the backup).
+        qc_report: dict | None = None
+        for attempt in (1, 2):
+            result = video_factory.produce(
+                script=script,
+                episode_number=task.episode_number,
+                pexels_api_key=pexels_key,
+                job_id=str(task.id),
+                output_dir=output_dir,
+                voice=cfg.get("voice"),
+                rate_pct=int(cfg.get("rate_pct", 0)),
+                branding=_branding_from_config(cfg),
+                subtitle_style=cfg.get("subtitle_style", "word"),
+                caption_theme=cfg.get("caption_theme", "highlight"),
+                motion=cfg.get("motion", "on") != "off",
+                color_grade=cfg.get("color_grade"),
+                music_path=music_path,
+                music_volume=float(cfg.get("music_volume", 0.15)),
+                ab_testing=bool(cfg.get("ab_testing", True)),
+                vet_clip=vet_clip,
+                on_progress=lambda p: set_progress(task_id, 10 + p * 0.8),
+            )
+            if not auto_qc:
+                break
+            verdict = qc.run_final_qc(
+                result.master_path, api_key=gemini_key,
+                context=f"The narration language is '{cfg.get('language', 'en')}'.",
+            )
+            qc_report = {**verdict.as_dict(), "attempts": attempt}
+            if verdict.passed:
+                break
+            if attempt == 1:
+                logger.info("Auto-QC rejected episode %s (score %s, issues %s) — re-rendering once",
+                            task.episode_number, verdict.score, verdict.issues)
+                _safe_remove(result.master_path, result.thumbnail_path)
+        qc_failed = qc_report is not None and not qc_report["passed"]
         _set_status(db, task, TaskStatus.AUDIO_SYNCED, 88)
 
         # Carry distribution settings into the stored metadata so the publish step (now or after
         # review) has everything it needs.
         result.metadata.setdefault("cta", cfg.get("cta"))
         result.metadata.setdefault("privacy", cfg.get("privacy", "public"))
+        if music_credit:
+            result.metadata["music_credit"] = music_credit  # per-episode transparency (CC0)
+        if qc_report:
+            result.metadata["qc"] = qc_report  # machine verdict, visible in the Asset Pool
 
+        # A re-render (e.g. Retry after a reject, or an expired slot item) supersedes any prior
+        # buffer row for this episode. Remove it first — (campaign, episode) is unique, so a blind
+        # insert would raise IntegrityError and dead-end the Retry in a re-render→fail loop.
+        for old in db.scalars(select(BufferPoolItem).where(
+            BufferPoolItem.campaign_id == campaign.id,
+            BufferPoolItem.episode_number == task.episode_number,
+        )).all():
+            _safe_remove(old.video_path, old.thumbnail_path)
+            db.delete(old)
+        db.flush()
+
+        # A double Auto-QC failure never publishes: it degrades to review mode for this episode.
+        parked_for_review = not auto_publish or qc_failed
         buf = BufferPoolItem(
             campaign_id=campaign.id,
             channel_id=channel.id,
@@ -308,13 +388,19 @@ def render_task(task_id: int) -> None:
             video_path=result.master_path,
             thumbnail_path=result.thumbnail_path,
             metadata_json=result.metadata,
-            status=BufferStatus.ready if auto_publish else BufferStatus.awaiting_review,
+            status=BufferStatus.awaiting_review if parked_for_review else BufferStatus.ready,
         )
         db.add(buf)
         db.commit()
         db.refresh(buf)
 
-        if not auto_publish:
+        if qc_failed:
+            task.finished_at = datetime.utcnow()
+            _set_status(db, task, TaskStatus.AWAITING_REVIEW, 90)
+            issues = "; ".join((qc_report or {}).get("issues") or []) or "low quality score"
+            _notify(user, f"🔍 Episode {task.episode_number} of '{campaign.topic_name}' failed "
+                          f"Auto-QC twice ({issues}). It is parked in the Asset Pool for your review.")
+        elif not auto_publish:
             task.finished_at = datetime.utcnow()
             _set_status(db, task, TaskStatus.AWAITING_REVIEW, 90)
             _notify(user, f"🎬 Episode {task.episode_number} of '{campaign.topic_name}' is rendered "
@@ -326,11 +412,23 @@ def render_task(task_id: int) -> None:
         else:
             _publish_buffer(db, task, buf, campaign, channel, user)
 
-        # Keep the render pipeline fed.
-        hydrate_buffers(db)
+        # Keep the render pipeline fed — but isolated: a hydration hiccup (a race inserting the next
+        # episode, a transient enqueue error) must NOT flip this just-completed episode to FAILED.
+        try:
+            hydrate_buffers(db)
+        except Exception:  # noqa: BLE001
+            logger.warning("post-publish hydration failed for campaign %s", campaign.id, exc_info=True)
 
     except Exception as exc:  # noqa: BLE001 — record, alert, and continue the queue
-        _fail_task(db, task, user, campaign, exc, "render_task")
+        if campaign is not None and user is not None:
+            _fail_task(db, task, user, campaign, exc, "render_task")
+        else:  # failed before the campaign/user loaded — mark FAILED without the Telegram path
+            db.rollback()
+            task.status = TaskStatus.FAILED
+            task.finished_at = datetime.utcnow()
+            task.error_message = f"render_task setup failed: {exc}"
+            db.commit()
+            logger.exception("render_task setup failed for task %s", task_id)
     finally:
         clear_progress(task_id)
         db.close()
@@ -342,6 +440,14 @@ def publish_task(buffer_item_id: int) -> None:
     buf = db.get(BufferPoolItem, buffer_item_id)
     if buf is None:
         logger.error("publish_task: no BufferPoolItem %s", buffer_item_id)
+        db.close()
+        return
+    # Idempotency: a slot tick re-enqueue or a double-clicked Approve can queue this buffer twice.
+    # Only ready/awaiting_review items are publishable — anything else was already handled; bail so
+    # we never upload the same episode twice or resurrect a consumed row against a deleted file.
+    if buf.status not in (BufferStatus.ready, BufferStatus.awaiting_review):
+        logger.info("publish_task: buffer %s already handled (status=%s) — skipping",
+                    buffer_item_id, buf.status)
         db.close()
         return
     campaign = db.get(Campaign, buf.campaign_id)

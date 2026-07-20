@@ -26,10 +26,18 @@ def test_build_scene_args_single_and_branding():
     assert a2.count("-i") == 4  # 2 clips + audio + watermark
 
 
-def test_build_concat_args_copy():
-    from core.video_factory import build_concat_args
+def test_build_concat_args_copy_and_loudnorm():
+    from core.video_factory import LOUDNORM_FILTER, build_concat_args
 
-    assert build_concat_args("l.txt", "m.mp4") == ["-f", "concat", "-safe", "0", "-i", "l.txt", "-c", "copy", "m.mp4"]
+    # loudnorm off → pure stream copy, nothing re-encoded.
+    assert build_concat_args("l.txt", "m.mp4", loudnorm=False) == [
+        "-f", "concat", "-safe", "0", "-i", "l.txt", "-c", "copy", "m.mp4"]
+
+    # Default: -14 LUFS normalization — audio-only re-encode, video still copied.
+    args = build_concat_args("l.txt", "m.mp4")
+    assert args[args.index("-af") + 1] == LOUDNORM_FILTER
+    assert args[args.index("-c:v") + 1] == "copy"
+    assert "loudnorm=I=-14" in LOUDNORM_FILTER
 
 
 def test_build_concat_args_with_music_keeps_video_copy():
@@ -38,10 +46,16 @@ def test_build_concat_args_with_music_keeps_video_copy():
     args = build_concat_args("l.txt", "m.mp4", music_path="bg.mp3", music_volume=0.2)
     fc = args[args.index("-filter_complex") + 1]
     assert "volume=0.20" in fc and "amix=inputs=2:duration=first" in fc
+    assert fc.index("amix") < fc.index("loudnorm")  # normalize the final mix, not the parts
     assert "-stream_loop" in args            # music loops to cover the video
     i = args.index("-c:v")
     assert args[i + 1] == "copy"             # video is never re-encoded for music
     assert "-shortest" in args and args[-1] == "m.mp4"
+
+    # loudnorm off → the mix output feeds [aout] directly.
+    fc2 = build_concat_args("l.txt", "m.mp4", music_path="bg.mp3", loudnorm=False)
+    fc2 = fc2[fc2.index("-filter_complex") + 1]
+    assert "loudnorm" not in fc2 and fc2.endswith("[aout]")
 
 
 def test_ab_rotation_and_toggle():
@@ -137,6 +151,90 @@ def test_caption_themes(tmp_path):
     assert "&H00FF901E" in content and POP_TAG in content  # campaign accent colour drives the style
 
 
+def test_progress_is_monotonic(monkeypatch):
+    """The global progress callback must never jump backward across scenes (was a per-scene
+    sawtooth when prep/render were reported as interleaved stages)."""
+    from core import video_factory as vf
+
+    values: list[float] = []
+
+    def emit(frac):  # produce()'s report() maps stage fractions into 0..100 via _STAGE_BUDGET
+        values.append(frac)
+
+    # Drive report() directly the way produce() does: per scene, encode progress then scene-done.
+    n = 3
+    for si in range(n):
+        for p in (0, 40, 80, 100):
+            base = sum(v for k, v in vf._STAGE_BUDGET.items()
+                       if vf._stage_order(k) < vf._stage_order("scenes"))
+            emit(min(99.0, base + ((si + p / 100) / n * 100) / 100 * vf._STAGE_BUDGET["scenes"]))
+    assert values == sorted(values)  # never decreases
+
+
+def test_pexels_skips_zero_duration(monkeypatch):
+    """A clip with missing/zero duration is dropped (it would defeat select_clips' coverage math)."""
+    from core import pexels
+
+    payload = {"videos": [
+        {"id": 1, "duration": 0, "video_files": [{"link": "u0", "width": 1080, "height": 1920}]},
+        {"id": 2, "duration": 8, "video_files": [{"link": "u2", "width": 1080, "height": 1920}]},
+        {"id": 3, "video_files": [{"link": "u3", "width": 1080, "height": 1920}]},  # no duration
+    ]}
+
+    class R:
+        def raise_for_status(self): pass
+        def json(self): return payload
+
+    import sys
+
+    fake_requests = type("m", (), {"get": staticmethod(lambda *a, **k: R())})
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)  # search_videos does `import requests`
+    clips = pexels.search_videos("q", "key")
+    assert [c.id for c in clips] == [2]  # only the positive-duration clip survives
+
+
+def test_color_grade_in_scene_graph():
+    from core.video_factory import COLOR_GRADES, build_scene_args
+
+    args = build_scene_args(["c.mp4"], "a.mp3", "s.ass", "o.mp4", 5.0, None,
+                            motion_effect="zoom_in", color_grade="noir")
+    fc = args[args.index("-filter_complex") + 1]
+    # Grade sits between motion and captions so text is never graded.
+    assert COLOR_GRADES["noir"] in fc and fc.index("zoompan") < fc.index("hue=s=0") < fc.index("ass=")
+
+    # None/unknown grade → no grade filter injected.
+    for grade in (None, "does-not-exist"):
+        fc2 = build_scene_args(["c.mp4"], "a.mp3", "s.ass", "o.mp4", 5.0, None, color_grade=grade)
+        assert all(g not in fc2[fc2.index("-filter_complex") + 1] for g in COLOR_GRADES.values())
+
+
+def test_vet_candidates_reorders_and_reuses_downloads():
+    from types import SimpleNamespace
+
+    from core.video_factory import vet_candidates
+
+    found = [SimpleNamespace(download_url=f"u{i}", duration=5.0) for i in range(4)]
+    downloads: list[str] = []
+
+    def download(url, path):
+        downloads.append(url)
+
+    # First candidate rejected, second accepted → leader swaps, reject dropped, downloads reused.
+    verdicts = iter([False, True])
+    kept, pre = vet_candidates(found, "narration", lambda p, n: next(verdicts), download,
+                               lambda k: f"/ws/vet_{k}.mp4")
+    assert [c.download_url for c in kept] == ["u1", "u2", "u3"]
+    assert pre == {0: "/ws/vet_1.mp4"}      # the accepted clip's file, re-keyed to lead
+    assert downloads == ["u0", "u1"]        # vetting stopped at the first accept
+
+    # All vetted candidates rejected → fail-open: original order kept, downloads still reusable.
+    downloads.clear()
+    kept2, pre2 = vet_candidates(found, "narration", lambda p, n: False, download,
+                                 lambda k: f"/ws/vet_{k}.mp4")
+    assert kept2 is found and set(pre2) == {0, 1, 2}  # bounded at FOOTAGE_VET_CANDIDATES
+    assert downloads == ["u0", "u1", "u2"]
+
+
 def test_search_footage_fallback_chain(monkeypatch):
     from core import video_factory as vf
 
@@ -171,13 +269,22 @@ def test_ffmpeg_runner_uses_nice_threads(monkeypatch):
 
     captured = {}
 
+    class FakeStdout:
+        def __iter__(self):
+            return iter([])
+
+        def close(self):
+            pass
+
     class FakeProc:
-        stdout = iter([])
-        stderr = None
+        stdout = FakeStdout()
         returncode = 0
 
         def wait(self):
             return 0
+
+        def kill(self):
+            pass
 
     def fake_popen(cmd, **kw):
         captured["cmd"] = cmd
