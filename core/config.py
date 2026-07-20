@@ -45,7 +45,9 @@ class Settings(BaseSettings):
     FIREBASE_WEB_API_KEY: str | None = None
 
     # --- Optional global fallback provider keys (per-user keys take priority) ---
-    GEMINI_MODEL: str = "gemini-1.5-flash"  # swap when Google ships a better free-tier model
+    # `-latest` alias auto-tracks Google's current flash model, so it never breaks when an older
+    # dated model is retired. Pin a specific version here only if you need reproducibility.
+    GEMINI_MODEL: str = "gemini-flash-latest"
     GEMINI_API_KEY: str | None = None
     # Free key from freesound.org — enables per-campaign automatic CC0 background music.
     FREESOUND_API_KEY: str | None = None

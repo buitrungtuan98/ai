@@ -87,7 +87,11 @@ def _call_gemini(
     temperature: float,
     max_output_tokens: int,
 ) -> str:
-    """Single point that imports and calls the Gemini SDK. Returns raw response text."""
+    """Single point that imports and calls the Gemini SDK. Returns raw response text.
+
+    Note: current flash models spend "thinking" tokens that count against max_output_tokens, so
+    limits must be generous or the JSON gets truncated (EOF-while-parsing) — see the callers.
+    """
     import google.generativeai as genai
 
     genai.configure(api_key=api_key)
@@ -126,7 +130,7 @@ def generate_structured(
     system_prompt: str | None = None,
     model: str = DEFAULT_MODEL,
     temperature: float = 0.7,
-    max_output_tokens: int = 4096,
+    max_output_tokens: int = 8192,  # generous: thinking tokens + full JSON must both fit
     max_retries: int = 3,
 ) -> T:
     """Call Gemini and return a validated instance of `schema`.
@@ -254,7 +258,7 @@ def propose_campaign(
     )
     proposal = generate_structured(
         prompt=prompt, schema=CampaignProposal, api_key=api_key, model=model,
-        temperature=1.1, max_output_tokens=1500,
+        temperature=1.1,  # inherits the generous default token budget (thinking + JSON)
     )
     allowed = {v for vs in PROPOSABLE_VOICES.values() for v in vs}
     if proposal.voice not in allowed:
@@ -450,7 +454,7 @@ def _call_gemini_vision(
     prompt: str,
     image_paths: list[str],
     temperature: float = 0.2,
-    max_output_tokens: int = 1024,
+    max_output_tokens: int = 2048,  # room for thinking tokens + the small verdict JSON
 ) -> str:
     """Single point that calls Gemini with images. Returns raw response text."""
     import google.generativeai as genai
