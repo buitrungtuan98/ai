@@ -167,6 +167,17 @@ builds); `deploy.sh` pulls instead of building. Box bootstrap is now just `.env`
 checkout, no deploy key, no stored registry secret. Instant rollback via `AVF_IMAGE_TAG=<sha>`.
 - Note: private repo → ARM build runs under QEMU (slow first build, then Actions-cached).
 
+## AI campaign designer (propose from a title, or from scratch) `DONE`
+"Fill just the title (or nothing) and let AI design the rest." A **✨ Propose full campaign with
+AI** button on the New Campaign form calls `POST /campaigns/propose`, which runs
+`ai_engine.propose_campaign` (Gemini, temperature 1.1 + a random nonce → a distinct, standout
+proposal each click) and returns a complete config — topic, persona, style examples, catchphrases,
+continuity, voice (validated against a curated edge-tts list), caption theme, colour grade, motion,
+music mood/mode, A/B, privacy, posting slot, CTA, episode count + a one-line rationale. The form
+fills in client-side for review; nothing is saved until the operator clicks Create.
+- Verified: 94 tests passing (3 new — route success, route needs-key, invalid-voice drop),
+  ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download
