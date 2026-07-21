@@ -4,6 +4,18 @@
 <div class="page-head"><div><h1>Asset Pool Cache</h1>
   <p class="subtitle">Pre-rendered episodes. Review-mode videos wait here for your approval — watch them before anything is published.</p></div></div>
 
+{% if flash == 'publish' %}
+<div class="banner">⏳ <b>Publish queued.</b> The episode uploads as soon as the worker is free (one job at a
+  time — a render in progress runs first). Track it in <a href="/tasks">Task Logs</a>; this card flips to
+  <i>Consumed</i> with the video link once it's live.</div>
+{% elif flash == 'rerender' %}
+<div class="banner">⏳ <b>Re-render queued.</b> The old files were discarded; a fresh render starts as soon as
+  the worker is free. Watch progress in <a href="/tasks">Task Logs</a>.</div>
+{% elif flash == 'rejected' %}
+<div class="banner">🗑 <b>Rejected.</b> The render was deleted{% if flash_reason %} and the AI was told to avoid:
+  “{{ flash_reason }}”{% endif %}. Re-render it anytime from Task Logs → Retry.</div>
+{% endif %}
+
 {% if items %}
 <div class="grid cols-3">
   {% for i in items %}

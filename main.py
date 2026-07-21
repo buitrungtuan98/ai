@@ -408,6 +408,7 @@ def _build_campaign_config(
     music_mode: str = "none", music_mood: str = "",
     color_grade: str = "", auto_qc: str = "on",
     max_per_day: str = "", min_per_day: str = "",
+    title_prefix: str = "",
 ) -> dict:
     """One place turns the campaign form into config_json (DRY: shared by create and edit)."""
     config: dict = {
@@ -442,6 +443,9 @@ def _build_campaign_config(
         # published-minimum watchdog that alerts (it cannot force publishes).
         "max_per_day": int(max_per_day) if max_per_day.strip().isdigit() and int(max_per_day) > 0 else None,
         "min_per_day": int(min_per_day) if min_per_day.strip().isdigit() and int(min_per_day) > 0 else None,
+        # Optional channel brand mark prepended to every AI title (titles themselves never carry
+        # the series name / episode number — they must stand alone as hooks).
+        "title_prefix": title_prefix.strip()[:40] or None,
     }
     if watermark_path or (tint_color and tint_opacity > 0) or mirror:
         config["branding"] = {
@@ -491,6 +495,7 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
     auto_qc: str = Form("on"),
     max_per_day: str = Form(""),
     min_per_day: str = Form(""),
+    title_prefix: str = Form(""),
 ) -> dict:
     return {
         "topic_name": topic_name, "channel_id": channel_id, "total_episodes": total_episodes,
@@ -506,6 +511,7 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
             music_mode=music_mode, music_mood=music_mood,
             color_grade=color_grade, auto_qc=auto_qc,
             max_per_day=max_per_day, min_per_day=min_per_day,
+            title_prefix=title_prefix,
         ),
     }
 
@@ -619,7 +625,8 @@ def save_credentials(
 
 # ── Asset Pool Cache (+ preview & review) ────────────────────────────────────
 @app.get("/assets", response_class=HTMLResponse)
-def assets_page(request: Request, user: CurrentUser, db: DbDep):
+def assets_page(request: Request, user: CurrentUser, db: DbDep,
+                flash: str = "", flash_reason: str = ""):
     items = db.scalars(
         select(BufferPoolItem)
         .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
@@ -631,7 +638,10 @@ def assets_page(request: Request, user: CurrentUser, db: DbDep):
     return templates.TemplateResponse(
         request, "assets.html",
         {"request": request, "user": user, "items": items, "nav": "assets",
-         "camp_by_id": {c.id: c for c in campaigns}, "previewable": previewable},
+         "camp_by_id": {c.id: c for c in campaigns}, "previewable": previewable,
+         # Post-action feedback (whitelisted — never echo arbitrary input back into the page).
+         "flash": flash if flash in ("publish", "rerender", "rejected") else "",
+         "flash_reason": flash_reason[:200]},
     )
 
 
@@ -719,7 +729,7 @@ def publish_asset_now(db: DbDep, item=Depends(get_owned_buffer_item)):
     if item.status != BufferStatus.ready:
         raise HTTPException(400, "Only pre-rendered (ready) items can be published now")
     task_queue.enqueue_publish(item.id)
-    return RedirectResponse("/assets", status_code=303)
+    return RedirectResponse("/assets?flash=publish", status_code=303)
 
 
 @app.post("/assets/{item_id}/rerender")
@@ -747,7 +757,7 @@ def rerender_asset(db: DbDep, item=Depends(get_owned_buffer_item)):
     db.commit()
     task.rq_job_id = task_queue.enqueue_render(task.id)
     db.commit()
-    return RedirectResponse("/assets", status_code=303)
+    return RedirectResponse("/assets?flash=rerender", status_code=303)
 
 
 @app.post("/assets/{item_id}/reject")
@@ -777,7 +787,12 @@ def reject_asset(db: DbDep, item=Depends(get_owned_buffer_item), reason: str = F
             learning["reject_reasons"] = reasons + [reason]
             campaign.learning_json = learning
     db.commit()
-    return RedirectResponse("/assets", status_code=303)
+    from urllib.parse import quote
+
+    return RedirectResponse(
+        "/assets?flash=rejected" + (f"&flash_reason={quote(reason)}" if reason else ""),
+        status_code=303,
+    )
 
 
 # ── Performance & learning (self-improvement transparency) ──────────────────

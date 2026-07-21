@@ -263,6 +263,42 @@ def test_pexels_keywords_prompt_demands_english():
     assert "ENGLISH" in build_script_prompt("chuyện ma", "vi", 30, 1)
 
 
+def test_series_hashtag_stable_and_ascii():
+    """Same tag every episode (computed in code, not by the model); diacritics folded."""
+    from core.ai_engine import series_hashtag
+
+    assert series_hashtag("Lịch sử VN: Nhà Trần") == "#LichSuVNNhaTran"
+    assert series_hashtag("Lịch sử VN: Nhà Trần") == series_hashtag("Lịch sử VN: Nhà Trần")
+    assert series_hashtag("đêm khuya") == "#DemKhuya"
+    assert series_hashtag("!!!") == "#Shorts"  # degenerate topic → safe fallback
+
+
+def test_metadata_prompt_bans_series_prefix_and_ep_numbers():
+    """Titles must stand alone: no campaign-name prefix, no 'Ep N/Tập N'; description carries the
+    stable series hashtag instead."""
+    from core.ai_engine import build_script_prompt, series_hashtag
+
+    p = build_script_prompt("Lịch sử VN: Nhà Trần", "vi", 30, 3)
+    assert "NEVER put" in p and "episode numbering" in p
+    assert series_hashtag("Lịch sử VN: Nhà Trần") in p  # exact tag injected, model can't drift
+
+
+def test_title_prefix_prepended_and_capped():
+    from core.ai_engine import VideoScript
+    from core.video_factory import pick_metadata
+
+    vs = VideoScript(
+        language="vi", topic="t",
+        scenes=[{"index": i, "narration": "n", "pexels_keywords": ["k"]} for i in range(3)],
+        metadata_variations=[{"variant": v, "title": "Một bí mật ít ai biết", "description": "d",
+                              "tags": ["a", "b", "c"]} for v in "ABC"],
+    )
+    meta = pick_metadata(vs, 1, title_prefix="🔥 SỬ VIỆT |")
+    assert meta["title"].startswith("🔥 SỬ VIỆT | Một bí mật")
+    assert len(pick_metadata(vs, 1, title_prefix="X" * 90)["title"]) <= 100  # YouTube cap held
+    assert pick_metadata(vs, 1)["title"] == "Một bí mật ít ai biết"  # no prefix → untouched
+
+
 def test_tts_retries_transient_failures(monkeypatch):
     """The TTS endpoint occasionally drops a handshake — synthesize retries before surfacing."""
     from core import tts

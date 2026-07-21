@@ -266,14 +266,17 @@ def vet_candidates(found: list, narration: str, vet, download, path_for) -> tupl
     return found, downloaded
 
 
-def pick_metadata(script: VideoScript, episode_number: int, ab_testing: bool = True) -> dict:
+def pick_metadata(script: VideoScript, episode_number: int, ab_testing: bool = True,
+                  title_prefix: str | None = None) -> dict:
     """A/B rotation: cycle the 3 metadata variations across episodes. With A/B testing disabled,
-    variant A is always used."""
+    variant A is always used. An optional operator-set `title_prefix` (channel brand mark, e.g.
+    '🔥 SỬ VIỆT |') is prepended to the AI's standalone hook title."""
     variations = script.metadata_variations
-    if not ab_testing:
-        return variations[0].model_dump()
-    chosen = variations[(max(episode_number, 1) - 1) % len(variations)]
-    return chosen.model_dump()
+    chosen = variations[0] if not ab_testing else variations[(max(episode_number, 1) - 1) % len(variations)]
+    meta = chosen.model_dump()
+    if title_prefix and title_prefix.strip():
+        meta["title"] = f"{title_prefix.strip()} {meta['title']}"[:100]  # YouTube's hard cap
+    return meta
 
 
 # ── Orchestration ────────────────────────────────────────────────────────────
@@ -295,6 +298,7 @@ def produce(
     music_volume: float = 0.15,
     loudnorm: bool = True,
     ab_testing: bool = True,
+    title_prefix: str | None = None,
     extra_blacklist: set[str] | None = None,
     vet_clip=None,
     on_progress=None,
@@ -393,7 +397,8 @@ def produce(
         report("concat", 100)
 
         # 6. Thumbnail + metadata.
-        metadata = pick_metadata(script, episode_number, ab_testing=ab_testing)
+        metadata = pick_metadata(script, episode_number, ab_testing=ab_testing,
+                                 title_prefix=title_prefix)
         thumb = os.path.join(output_dir, f"episode_{episode_number}.jpg")
         generate_thumbnail(master, thumb, metadata["title"],
                            logo_path=branding.watermark_path)

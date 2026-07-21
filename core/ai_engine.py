@@ -286,6 +286,8 @@ class CampaignProposal(BaseModel):
     ab_testing: bool = True
     privacy: Literal["public", "unlisted", "private"] = "public"
     cta: str = ""
+    title_prefix: str = Field(default="", max_length=40,
+                              description="Optional short catchy channel mark prepended to titles, e.g. '🔥 SỬ VIỆT |'. Often empty.")
     posting_slots: str = Field(default="", description="One daily slot as HH:MM, or empty.")
     rationale: str = Field(default="", max_length=400, description="One sentence on the angle.")
 
@@ -324,8 +326,10 @@ def propose_campaign(
         "language); 2-3 short style-example lines in that voice; signature opening and closing "
         "catchphrases; a caption theme and colour grade that fit the mood; a music mood in a few "
         "English words (music_mode 'auto' unless silence truly fits, then 'none'); an edge-tts "
-        f"voice chosen ONLY from this list: {voices}; a sensible total_episodes; one daily posting "
-        "slot as HH:MM; a continuity mode; and a short call-to-action. "
+        f"voice chosen ONLY from this list: {voices}; a rate_pct — TTS sounds most natural "
+        "slightly slowed, so prefer -8..-3 for storytelling personas and 0 only for fast-paced "
+        "formats; a sensible total_episodes; one daily posting slot as HH:MM; a continuity mode; "
+        "and a short call-to-action. "
         f"Variation seed {nonce}: make this proposal clearly different from any previous one. "
         "Include a one-sentence 'rationale' for the creative angle."
     )
@@ -337,6 +341,21 @@ def propose_campaign(
     if proposal.voice not in allowed:
         proposal.voice = ""  # model invented a voice → fall back to the app default
     return proposal
+
+
+def series_hashtag(topic: str) -> str:
+    """A stable, ASCII CamelCase hashtag derived from the series topic — computed in code (not by
+    the model) so every episode of a campaign carries the SAME tag and the series stays findable
+    even though titles never mention the series name. E.g. 'Lịch sử VN: Nhà Trần' → '#LichSuVNNhaTran'."""
+    import re
+    import unicodedata
+
+    ascii_topic = topic.replace("đ", "d").replace("Đ", "D")
+    ascii_topic = unicodedata.normalize("NFKD", ascii_topic)
+    ascii_topic = "".join(c for c in ascii_topic if not unicodedata.combining(c))
+    words = re.findall(r"[A-Za-z0-9]+", ascii_topic)
+    tag = "".join(w[:1].upper() + w[1:] for w in words)[:30]
+    return f"#{tag}" if tag else "#Shorts"
 
 
 # ── Thin callers ─────────────────────────────────────────────────────────────
@@ -361,7 +380,13 @@ NATURAL_STYLE_RULES = (
     "- Stay in character 100% of the time, including in titles and descriptions.\n"
     "- THE HOOK RULE: the very first sentence must grab attention within 2 seconds — a question, "
     "a shock, or mid-action. Never open with greetings or introductions (a signature catchphrase "
-    "is the only exception, and it must lead straight into the hook)."
+    "is the only exception, and it must lead straight into the hook).\n"
+    "- WRITE FOR THE VOICE: the narration is read aloud by a TTS voice that breathes at "
+    "punctuation. Keep sentences SHORT (one idea each). Use commas where a speaker would pause, "
+    "periods to land a point, and an ellipsis … for a dramatic beat. Never write long unbroken "
+    "clauses. Write numbers, dates and abbreviations the way they should be SPOKEN in the target "
+    "language (e.g. 'TP.HCM' → 'Thành phố Hồ Chí Minh', '1428' → 'năm một bốn hai tám' if read as "
+    "a year). Avoid parentheses and quote-heavy constructions — they read badly aloud."
 )
 
 
@@ -430,7 +455,16 @@ def build_script_prompt(
         "and 5-15 tags, all in the same persona/voice. Include a one-sentence 'synopsis' of this "
         "episode's specific premise. Keep it original and engaging. "
         "IMPORTANT: pexels_keywords must be ENGLISH visual search terms (e.g. 'river night fog'), "
-        "even when the narration language is not English."
+        "even when the narration language is not English.\n"
+        "TITLE RULES (Shorts are discovered one by one — every title must stand alone): NEVER put "
+        "the series/campaign name in the title, and NEVER include episode numbering of any form "
+        "('Ep 5', 'Tập 3', 'Part 2', '#12'). Open with the most curious/emotional element in the "
+        "first 40 characters; ideally stay under 70 characters. Each of the 3 variants takes a "
+        "genuinely different angle (question / bold claim / mid-action).\n"
+        "DESCRIPTION RULES: the FIRST line re-hooks (it is the only line viewers see uncollapsed) "
+        "— never start with the series name. Then 1-3 short lines of context in the persona's "
+        f"voice. End with 3-5 hashtags: relevant topical ones plus #Shorts and EXACTLY this series "
+        f"hashtag: {series_hashtag(topic)} (fans find the whole series through it)."
     )
     prev = [s for s in (previous_synopses or []) if s]
     if continuity == "no_repeat" and prev:
