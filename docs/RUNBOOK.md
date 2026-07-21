@@ -100,6 +100,17 @@ trust what Auto-QC lets through, switch to auto-publish and review only what QC 
 Related quality knobs: **Colour grade** (Aesthetics tab) gives a channel one consistent look;
 audio loudness is always normalized to −14 LUFS (the YouTube/Reels target) — no knob needed.
 
+## TTS failures (edge-tts 403 handshake)
+The voice rides Microsoft's undocumented Edge read-aloud endpoint via the `edge-tts` library.
+Microsoft rotates the endpoint's auth scheme every so often; when they do, **old library versions
+start failing every render** with `WSServerHandshakeError: 403` in `tts.synthesize` (a URL without
+a `Sec-MS-GEC=` parameter in the error is the tell for a stale version). Fix: bump `edge-tts` to
+the latest release in `requirements.txt`, redeploy (the image rebuild picks it up), Retry the
+failed episodes. Transient one-off 403s are retried automatically (3 attempts). If a CURRENT
+edge-tts still 403s persistently from the box, Microsoft may be blocking that IP range — the
+escape hatch is swapping `core/tts.py`'s backend for a paid/keyed TTS API (e.g. Azure Speech free
+tier) behind the same interface.
+
 ## Retrying failed episodes
 Task Logs shows every failure with its full error. **Retry** re-runs the episode; if the rendered
 file still exists (upload failed / was awaiting review) only the upload is retried — no re-render.

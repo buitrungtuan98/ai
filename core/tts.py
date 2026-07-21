@@ -7,7 +7,14 @@ non-render code don't require it.
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
+
+_RETRY_ATTEMPTS = 3       # Microsoft's endpoint throws occasional transient 403s/disconnects
+_RETRY_SLEEP_SECONDS = 3  # patched to 0 in tests
 
 # edge-tts default voices per language (overridable per campaign).
 DEFAULT_VOICES: dict[str, str] = {
@@ -59,6 +66,18 @@ def synthesize(
     voice: str | None = None,
     rate_pct: int = 0,
 ) -> list[WordTiming]:
-    """Synthesize `text` to `out_path` (mp3). Returns word timings (relative to clip start)."""
+    """Synthesize `text` to `out_path` (mp3). Returns word timings (relative to clip start).
+
+    Retries transient endpoint failures (the service occasionally drops a handshake); a
+    persistent failure still raises so the episode fails visibly rather than silently."""
     resolved = resolve_voice(language, voice)
-    return asyncio.run(_synthesize_async(text, resolved, rate_pct, out_path))
+    last: Exception | None = None
+    for attempt in range(_RETRY_ATTEMPTS):
+        try:
+            return asyncio.run(_synthesize_async(text, resolved, rate_pct, out_path))
+        except Exception as exc:  # noqa: BLE001 — retry the flaky network path, then surface
+            last = exc
+            logger.warning("TTS attempt %d/%d failed: %s", attempt + 1, _RETRY_ATTEMPTS, exc)
+            if attempt < _RETRY_ATTEMPTS - 1 and _RETRY_SLEEP_SECONDS:
+                time.sleep(_RETRY_SLEEP_SECONDS * (attempt + 1))
+    raise last if last is not None else RuntimeError("TTS failed with no error")

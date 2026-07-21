@@ -20,7 +20,7 @@ Status tokens: `DONE` · `WIP` · `TODO` · `BLOCKED`.
 | `core/ai_engine.py` | ai | Gemini wrapper; persona+playbook system-prompt composer; hook rule; episode memory; generator→critic loop; playbook distiller; vision judges (footage match, final video QC); AI campaign designer (`propose_campaign`, curated voice validation); schemas | topic, cfg, learning, frames | script + metadata + critiques + playbooks + verdicts + campaign proposals | google-generativeai, pydantic, Pillow, config | DONE | 2026-07-20 |
 | `core/safety_filter.py` | ai | Profanity/brand-safety term filter; Pexels license check; variation/ToS policy gate | script text, flags | filtered text, gate result | stdlib | DONE | 2026-07-17 |
 | `core/ffmpeg_runner.py` | render | DRY subprocess runner: `nice -n 19`, `-threads 4`, `-progress` → progress % | ffmpeg args | files, progress callbacks | ffmpeg (system) | DONE | 2026-07-19 |
-| `core/tts.py` | render | edge-tts per scene; returns mp3 path + word-boundary timings | narration, voice, rate | mp3 + timings | edge-tts | DONE | 2026-07-17 |
+| `core/tts.py` | render | edge-tts per scene; returns mp3 path + word-boundary timings; retries transient endpoint failures | narration, voice, rate | mp3 + timings | edge-tts | DONE | 2026-07-21 |
 | `core/media.py` | render | ffprobe helpers (duration/codec); audio duration = ground truth | media path | duration/codec info | ffprobe (system) | DONE | 2026-07-17 |
 | `core/pexels.py` | render | Pexels stock-footage search + download (portrait renditions) | query, api key | clip metadata, files | requests | DONE | 2026-07-19 |
 | `core/captions.py` | render | Word/line ASS subtitles with caption themes (classic/highlight/boxed/neon, accent colour, pop animation); PIL wrapping | timings, theme | `.ass` file | Pillow | DONE | 2026-07-19 |
@@ -49,7 +49,7 @@ Status tokens: `DONE` · `WIP` · `TODO` · `BLOCKED`.
 |------|-------|----------------|--------|---------|------------|--------|--------------|
 | `docker-compose.yml` | infra | 4 services: redis, web (expose-only), worker (1 cpu-capped), cloudflared; web/worker run the GHCR image `ghcr.io/<owner>/<repo>:${AVF_IMAGE_TAG:-latest}` | `.env` | running stack | docker | DONE | 2026-07-20 |
 | `Dockerfile` | infra | Shared image for web+worker; installs ffmpeg (apt), Python deps | requirements.txt | image | docker | DONE | 2026-07-17 |
-| `requirements.txt` | infra | Pinned runtime Python dependencies (ARM-wheel aware) | — | deps | pip | DONE | 2026-07-17 |
+| `requirements.txt` | infra | Pinned runtime Python dependencies (ARM-wheel aware); edge-tts kept CURRENT (stale versions 403 when Microsoft rotates the endpoint auth) | — | deps | pip | DONE | 2026-07-21 |
 | `requirements-dev.txt` | infra | Test/lint deps (pytest, fakeredis, ruff); not in runtime image | — | deps | pip | DONE | 2026-07-17 |
 | `Dockerfile`/`.env.example`/`.gitignore` | infra | Shared image build; env template; ignore rules | — | — | docker | DONE | 2026-07-17 |
 | `config/tunnel_config.yml` | infra | cloudflared ingress mapping to `web:8000` (documentation of the tunnel) | `TUNNEL_TOKEN` | tunnel routes | cloudflared | DONE | 2026-07-17 |
