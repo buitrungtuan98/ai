@@ -39,8 +39,8 @@ Status tokens: `DONE` · `WIP` · `TODO` · `BLOCKED`.
 | `services/verification.py` | publish | Live credential checks (Gemini/Pexels/Telegram) for the "Test" buttons | keys | (ok, detail) | requests | DONE | 2026-07-19 |
 | `services/analytics_service.py` | learn | Collects per-video stats (YT Analytics retention/views, FB insights) into Task.stats_json | channels, video ids | stats_json | googleapiclient, requests | DONE | 2026-07-18 |
 | `services/music_service.py` | render | Auto background music: random CC0 track by mood via Freesound API, local cache, per-episode credit | mood, api key | mp3 path + credit | requests | DONE | 2026-07-19 |
-| `main.py` | web | FastAPI app: login/session, dashboard (health/counts), campaigns CRUD+edit+duplicate+performance page (form incl. colour grade + Auto-QC), AI campaign designer endpoint (`/campaigns/propose`), asset review (reason→learning), streaming, task API+retry, credential tests, OAuth | HTTP | HTML/JSON | fastapi, auth, models, task_queue, ai_engine | DONE | 2026-07-20 |
-| `templates/` | web | Jinja2 dashboard (6 pages) + standalone login.html; sidebar session chip; Asset Pool shows Auto-QC verdicts; New Campaign has an "AI Propose" button that fills the form | context | HTML | jinja2 | DONE | 2026-07-20 |
+| `main.py` | web | FastAPI app: login/session, dashboard (health/counts + AI-quota chip), campaigns CRUD+edit+duplicate+performance page, AI campaign designer endpoint, asset actions (approve / reject→learning / publish-now / discard&re-render), streaming, task API+retry, credential tests, OAuth | HTTP | HTML/JSON | fastapi, auth, models, task_queue, ai_engine, usage | DONE | 2026-07-21 |
+| `templates/` | web | Jinja2 dashboard (6 pages) + standalone login.html; sidebar session chip; Asset Pool: QC verdicts + per-status actions (ready: publish-now / re-render; review: approve / re-render / reject) | context | HTML | jinja2 | DONE | 2026-07-21 |
 | `static/` | web | Dark-theme CSS (incl. auth styles) + polling app.js (401→/login) — no runtime CDN | — | CSS/JS | — | DONE | 2026-07-18 |
 
 ## Ops / infra
