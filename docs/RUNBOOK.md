@@ -62,6 +62,13 @@ Set a campaign's **Publishing mode** to *Review first*. Each rendered episode th
 Telegram ping when an episode is ready for review. Review items do not auto-expire; published items
 have their local files cleaned up immediately.
 
+**Asset Pool actions by status:**
+- `Awaiting review` → **Approve & publish** · **Re-render** (discard + fresh render) · **Reject
+  with reason** (deletes render; reason feeds the AI's avoid-list).
+- `Ready` (auto mode, parked for its posting slot) → **Publish now** (skip the slot) ·
+  **Discard & re-render** (for a bad render you don't want the slot to auto-publish).
+- `Consumed` (published) / `Expired` / `Rejected` → no actions; use Task Logs → Retry if needed.
+
 ## The self-improvement loops
 Every campaign improves automatically on two levels (see ADR-012):
 1. **Critic pass (immediate):** an AI editor reviews every script before render — weak hook,
@@ -110,6 +117,10 @@ failed episodes. Transient one-off 403s are retried automatically (3 attempts). 
 edge-tts still 403s persistently from the box, Microsoft may be blocking that IP range — the
 escape hatch is swapping `core/tts.py`'s backend for a paid/keyed TTS API (e.g. Azure Speech free
 tier) behind the same interface.
+**After any edge-tts upgrade, verify subtitles on one video**: library defaults can change
+silently — e.g. 7.x switched the default from word to SENTENCE boundaries, which produced perfect
+videos with zero captions until `boundary="WordBoundary"` was passed explicitly (a regression test
+now pins this).
 
 ## Retrying failed episodes
 Task Logs shows every failure with its full error. **Retry** re-runs the episode; if the rendered

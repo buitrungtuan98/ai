@@ -30,9 +30,24 @@
     <p class="hint">Published — local file cleaned up.</p>
     {% endif %}
 
+    {% if i.status.value == 'ready' %}
+    <div class="row-actions mt">
+      <form method="post" action="/assets/{{ i.id }}/publish-now"
+            onsubmit="return confirm('Publish this episode right now (skip the posting slot)?')">
+        <button class="btn sm" type="submit">▶ Publish now</button></form>
+      <form method="post" action="/assets/{{ i.id }}/rerender"
+            onsubmit="return confirm('Discard this render and re-render the episode?')">
+        <button class="btn danger sm" type="submit">🗑 Discard &amp; re-render</button></form>
+    </div>
+    <p class="hint">Ready = pre-rendered, waiting for the campaign's next posting slot.</p>
+    {% endif %}
+
     {% if i.status.value == 'awaiting_review' %}
     <div class="row-actions mt">
       <form method="post" action="/assets/{{ i.id }}/approve"><button class="btn sm" type="submit">✓ Approve &amp; publish</button></form>
+      <form method="post" action="/assets/{{ i.id }}/rerender"
+            onsubmit="return confirm('Discard this render and re-render the episode?')">
+        <button class="btn ghost sm" type="submit">🗑 Re-render</button></form>
     </div>
     <form method="post" action="/assets/{{ i.id }}/reject" class="mt"
           onsubmit="return confirm('Reject and delete this render?')">

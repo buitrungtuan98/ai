@@ -83,6 +83,77 @@ def test_ownership_guard_404(client):
     assert client.post("/campaigns/99999/delete", follow_redirects=False).status_code == 404
 
 
+def _seed_ready_asset(client, tmp_path, status="ready"):
+    from database.db_session import SessionLocal
+    from database.models import BufferPoolItem, Campaign, Channel, Task
+    from database.types import BufferStatus, CampaignStatus, TaskStatus
+
+    client.post("/channels/facebook", data={"channel_name": "P", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    db = SessionLocal()
+    ch = db.query(Channel).first()
+    cam = Campaign(user_id=ch.user_id, channel_id=ch.id, topic_name="Slotted", total_episodes=3,
+                   status=CampaignStatus.active, config_json={"posting_slots": ["21:00"]})
+    db.add(cam)
+    db.commit()
+    db.refresh(cam)
+    video = tmp_path / "ep1.mp4"
+    video.write_bytes(b"vid")
+    buf = BufferPoolItem(campaign_id=cam.id, channel_id=ch.id, episode_number=1,
+                         video_path=str(video), metadata_json={"title": "T"},
+                         status=BufferStatus[status])
+    task = Task(campaign_id=cam.id, user_id=ch.user_id, episode_number=1,
+                status=TaskStatus.SCHEDULED)
+    db.add_all([buf, task])
+    db.commit()
+    db.refresh(buf)
+    db.refresh(task)
+    db.close()
+    return buf, task, video
+
+
+def test_publish_now_skips_the_slot(client, monkeypatch, tmp_path):
+    """A `ready` (slot-parked) item can be published immediately from the Asset Pool."""
+    import main
+
+    buf, _task, _video = _seed_ready_asset(client, tmp_path)
+    queued = []
+    monkeypatch.setattr(main.task_queue, "enqueue_publish", lambda bid: queued.append(bid) or "j1")
+    r = client.post(f"/assets/{buf.id}/publish-now", follow_redirects=False)
+    assert r.status_code == 303 and queued == [buf.id]
+
+    # Guard: a consumed item can't be re-published.
+    from database.db_session import SessionLocal
+    from database.models import BufferPoolItem
+    from database.types import BufferStatus
+
+    db = SessionLocal()
+    db.get(BufferPoolItem, buf.id).status = BufferStatus.consumed
+    db.commit()
+    db.close()
+    assert client.post(f"/assets/{buf.id}/publish-now", follow_redirects=False).status_code == 400
+
+
+def test_rerender_discards_and_requeues(client, monkeypatch, tmp_path):
+    """Discard & re-render deletes the bad render and queues a fresh render of the episode."""
+    import main
+    from database.db_session import SessionLocal
+    from database.models import BufferPoolItem, Task
+    from database.types import BufferStatus, TaskStatus
+
+    buf, task, video = _seed_ready_asset(client, tmp_path)
+    renders = []
+    monkeypatch.setattr(main.task_queue, "enqueue_render", lambda tid: renders.append(tid) or "j2")
+    r = client.post(f"/assets/{buf.id}/rerender", follow_redirects=False)
+    assert r.status_code == 303 and renders == [task.id]
+    assert not video.exists()  # bad render's file removed
+    db = SessionLocal()
+    assert db.get(BufferPoolItem, buf.id).status == BufferStatus.rejected
+    t = db.get(Task, task.id)
+    assert t.status == TaskStatus.PENDING_QUEUE and t.retry_count == 1
+    db.close()
+
+
 def test_propose_campaign_route(client, monkeypatch):
     """The AI designer returns a full config as JSON for the form to fill (nothing is saved)."""
     from core import ai_engine

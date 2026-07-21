@@ -45,7 +45,9 @@ def _rate_str(rate_pct: int) -> str:
 async def _synthesize_async(text: str, voice: str, rate_pct: int, out_path: str) -> list[WordTiming]:
     import edge_tts
 
-    communicate = edge_tts.Communicate(text, voice, rate=_rate_str(rate_pct))
+    # edge-tts >= 7 defaults to SENTENCE boundaries; captions need per-WORD timings, so request
+    # them explicitly (without this, timings come back empty and videos render with no subtitles).
+    communicate = edge_tts.Communicate(text, voice, rate=_rate_str(rate_pct), boundary="WordBoundary")
     timings: list[WordTiming] = []
     with open(out_path, "wb") as f:
         async for chunk in communicate.stream():

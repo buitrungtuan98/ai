@@ -713,6 +713,43 @@ def approve_asset(db: DbDep, item=Depends(get_owned_buffer_item)):
     return RedirectResponse("/assets", status_code=303)
 
 
+@app.post("/assets/{item_id}/publish-now")
+def publish_asset_now(db: DbDep, item=Depends(get_owned_buffer_item)):
+    """Skip the posting slot: publish a pre-rendered (`ready`) episode immediately."""
+    if item.status != BufferStatus.ready:
+        raise HTTPException(400, "Only pre-rendered (ready) items can be published now")
+    task_queue.enqueue_publish(item.id)
+    return RedirectResponse("/assets", status_code=303)
+
+
+@app.post("/assets/{item_id}/rerender")
+def rerender_asset(db: DbDep, item=Depends(get_owned_buffer_item)):
+    """Discard a rendered episode (delete its files) and immediately queue a fresh render of the
+    same episode — for when a render is wrong (bad footage, missing subtitles, …) but the episode
+    itself should still exist."""
+    if item.status not in (BufferStatus.ready, BufferStatus.awaiting_review):
+        raise HTTPException(400, "Only ready / awaiting-review items can be re-rendered")
+    for path in (item.video_path, item.thumbnail_path):
+        try:
+            if path and os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            logger.warning("Could not remove %s", path)
+    item.status = BufferStatus.rejected  # the re-render replaces this row on completion
+    task = db.scalar(select(Task).where(
+        Task.campaign_id == item.campaign_id, Task.episode_number == item.episode_number))
+    if task is None:
+        raise HTTPException(409, "No task row for this episode — use Task Logs")
+    task.status = TaskStatus.PENDING_QUEUE
+    task.error_message = None
+    task.progress_pct = 0
+    task.retry_count += 1
+    db.commit()
+    task.rq_job_id = task_queue.enqueue_render(task.id)
+    db.commit()
+    return RedirectResponse("/assets", status_code=303)
+
+
 @app.post("/assets/{item_id}/reject")
 def reject_asset(db: DbDep, item=Depends(get_owned_buffer_item), reason: str = Form("")):
     if item.status != BufferStatus.awaiting_review:
