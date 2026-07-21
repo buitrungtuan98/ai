@@ -207,6 +207,47 @@ fails loudly if the build fails to push or the web container doesn't become heal
 repo's GHCR package (Packages tab) or the commit history. (A manual run needs a one-time
 `docker login ghcr.io` with a PAT that has `read:packages`; the CD path logs in automatically.)
 
+## Gemini API quota & cost (free tier vs billing)
+Generation runs on the Gemini API, and the **free tier is the real throughput ceiling** — not the
+box. How to pick a model and stay within quota:
+- **Look up YOUR account's real limits** — AI Studio → the **Rate limits** page (ai.dev/rate-limit)
+  lists RPM / TPM / **RPD per model** for your account. Limits differ per model and per account and
+  change over time — never assume a number.
+- **Pick the model with the largest RPD.** Observed on a live account (2026-07): the flagship
+  flash models each had **20 req/day** (and some older ones **0**), while **`gemini-3.1-flash-lite`
+  had 500 req/day** — 25× more. Flash-lite quality is fine for short spoken scripts + structured
+  JSON, it barely "thinks" (fewer tokens, no truncation risk), and 500/day supports **~60 fully
+  Auto-QC'd episodes/day free**. Set it in `.env`: `GEMINI_MODEL=gemini-3.1-flash-lite`.
+- **Calls per episode add up.** Roughly: 1 (script) + 1 (self-critique, if on) + ~1 per footage
+  candidate vetted + 1 (final Auto-QC) — an Auto-QC episode can be **~8 calls**; with QC and
+  critique off it's **~1 call**. Turn those off per campaign if you're squeezed.
+- **Quota-efficient failures:** a per-DAY quota 429 now **fails fast** (no retry burn — retrying an
+  exhausted daily cap just wastes more of it), while per-minute 429s retry after a longer backoff.
+  A `429 … PerDay … FreeTier` in the worker log = daily cap hit; wait for the reset
+  (~midnight US-Pacific) or switch to a bigger-RPD model.
+- **For serious volume, enable billing** on the Google Cloud project. Flash models cost fractions
+  of a cent per call — dozens of QC'd videos/day is cents/month — and limits jump into the
+  thousands. The $0 goal holds for the infrastructure (Oracle box, Cloudflare, GHCR).
+- **Watch the meter, not the failures:** the dashboard health strip shows **AI calls today**
+  (counted per Google's Pacific quota day). Set `GEMINI_DAILY_BUDGET` in `.env` to your model's
+  RPD and the chip turns amber at 80% — and the daily Telegram heartbeat includes the same number.
+- **Model fallback chain:** `GEMINI_MODEL` accepts a comma-separated list, first = primary
+  (e.g. `GEMINI_MODEL=gemini-3.1-flash-lite,gemini-flash-latest`). If the primary is retired
+  (404) or its daily quota is spent, generation automatically continues on the next model.
+
+## Running multiple campaigns / accounts on one quota (daily pacing)
+Campaigns already run in parallel (each channel/account gets its own campaigns, slots, timezone).
+Two Distribution-tab fields pace them against the shared Gemini quota:
+- **Max new renders per day** — how many episodes the campaign may *start rendering* per local
+  day. Hydration stops at the cap and resumes after midnight. Sizing rule of thumb:
+  `sum over campaigns of (max_per_day × calls-per-episode) ≤ your model's RPD`
+  (calls/episode ≈ 8 with Auto-QC + critique on, ≈ 1 with both off). Example: 500 RPD free on
+  flash-lite → e.g. 5 campaigns × 10 renders/day with QC ≈ 400 calls — fits.
+- **Min published per day** — a watchdog: if the campaign publishes fewer than this in 24h, you
+  get a Telegram alert (it cannot force publishes — it makes shortfalls loud instead of silent).
+Publishing cadence itself is still the posting slots; these fields govern generation pace and
+monitoring.
+
 ## Operational notes from the hardening review (ADR-014)
 - **`WORK_ROOT` / `MEDIA_ROOT` paths:** keep them free of spaces and quotes (the defaults
   `/data/media/...` are fine). Scene render passes embed the subtitle path into an ffmpeg filter

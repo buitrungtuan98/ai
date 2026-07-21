@@ -181,13 +181,17 @@ _WORKING_STATUSES = [
 def _system_health(db) -> dict:
     """Live infrastructure signals for the dashboard health strip. Never raises — a dead Redis
     should show as red, not take the page down."""
-    health = {"redis": False, "worker": False, "queue_depth": None, "buffer_ready": 0, "disk_pct": None}
+    health = {"redis": False, "worker": False, "queue_depth": None, "buffer_ready": 0,
+              "disk_pct": None, "ai_calls": 0, "ai_budget": settings.GEMINI_DAILY_BUDGET}
     try:
         health["redis"] = bool(task_queue.conn.ping())
         health["worker"] = task_queue.worker_alive()
         health["queue_depth"] = len(task_queue.render_queue)
     except Exception:  # noqa: BLE001
         pass
+    from core.usage import ai_calls_today
+
+    health["ai_calls"] = ai_calls_today()  # quota meter (Pacific day, matches Google's reset)
     try:
         health["buffer_ready"] = db.scalar(
             select(func.count()).select_from(BufferPoolItem).where(
@@ -403,6 +407,7 @@ def _build_campaign_config(
     motion: str = "on", caption_theme: str = "highlight", self_critique: str = "on",
     music_mode: str = "none", music_mood: str = "",
     color_grade: str = "", auto_qc: str = "on",
+    max_per_day: str = "", min_per_day: str = "",
 ) -> dict:
     """One place turns the campaign form into config_json (DRY: shared by create and edit)."""
     config: dict = {
@@ -433,6 +438,10 @@ def _build_campaign_config(
         # Auto-QC gate (ADR-013): colour grade baked into the encode; machine review of output.
         "color_grade": color_grade if color_grade in ("cinematic", "warm", "cool", "vivid", "noir") else None,
         "auto_qc": "off" if auto_qc == "off" else "on",
+        # Daily pacing: cap NEW renders per local day (quota rationing across campaigns), and a
+        # published-minimum watchdog that alerts (it cannot force publishes).
+        "max_per_day": int(max_per_day) if max_per_day.strip().isdigit() and int(max_per_day) > 0 else None,
+        "min_per_day": int(min_per_day) if min_per_day.strip().isdigit() and int(min_per_day) > 0 else None,
     }
     if watermark_path or (tint_color and tint_opacity > 0) or mirror:
         config["branding"] = {
@@ -480,6 +489,8 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
     music_mood: str = Form(""),
     color_grade: str = Form(""),
     auto_qc: str = Form("on"),
+    max_per_day: str = Form(""),
+    min_per_day: str = Form(""),
 ) -> dict:
     return {
         "topic_name": topic_name, "channel_id": channel_id, "total_episodes": total_episodes,
@@ -494,6 +505,7 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
             motion=motion, caption_theme=caption_theme, self_critique=self_critique,
             music_mode=music_mode, music_mood=music_mood,
             color_grade=color_grade, auto_qc=auto_qc,
+            max_per_day=max_per_day, min_per_day=min_per_day,
         ),
     }
 

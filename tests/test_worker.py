@@ -437,6 +437,92 @@ def test_publish_task_idempotent_on_consumed(session, user, channel, monkeypatch
     assert published == []  # no second upload
 
 
+def test_hydrate_respects_max_per_day(session, user, channel):
+    """max_per_day caps how many renders a campaign may START per (local) day — the Gemini-quota
+    rationing knob for running several campaigns/accounts side by side."""
+    from database.models import Campaign, Task
+    from database.types import CampaignStatus
+    from workers import video_worker
+
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="Capped", total_episodes=10,
+                   status=CampaignStatus.active,
+                   config_json={"buffer_size": 5, "max_per_day": 2})
+    session.add(cam)
+    session.commit()
+
+    created = video_worker.hydrate_buffers(session, enqueue=lambda t: f"j{t}")
+    assert len(created) == 2  # cap wins over the buffer size (5)
+    # Re-hydrating the same day creates nothing more — today's budget is spent.
+    assert video_worker.hydrate_buffers(session, enqueue=lambda t: "x") == []
+    assert session.query(Task).count() == 2
+
+
+def test_min_per_day_watchdog_alerts(session, user, channel, monkeypatch):
+    """A campaign below its min_per_day in the last 24h triggers one Telegram alert; a campaign
+    meeting its minimum stays silent."""
+    from datetime import datetime, timedelta
+
+    from database.models import Campaign, Task
+    from database.types import CampaignStatus, TaskStatus
+    from workers import scheduler as sch
+    from workers import video_worker
+
+    now = datetime.utcnow()
+    behind = Campaign(user_id=user.id, channel_id=channel.id, topic_name="Behind", total_episodes=9,
+                      status=CampaignStatus.active, config_json={"min_per_day": 2})
+    ok = Campaign(user_id=user.id, channel_id=channel.id, topic_name="OnTrack", total_episodes=9,
+                  status=CampaignStatus.active, config_json={"min_per_day": 1})
+    session.add_all([behind, ok])
+    session.commit()
+    session.refresh(behind)
+    session.refresh(ok)
+    session.add_all([
+        Task(campaign_id=behind.id, user_id=user.id, episode_number=1,
+             status=TaskStatus.COMPLETED, finished_at=now - timedelta(hours=3)),   # 1 of 2 → behind
+        Task(campaign_id=ok.id, user_id=user.id, episode_number=1,
+             status=TaskStatus.COMPLETED, finished_at=now - timedelta(hours=3)),   # 1 of 1 → fine
+    ])
+    session.commit()
+
+    alerts = []
+    monkeypatch.setattr(video_worker, "_notify", lambda u, msg: alerts.append(msg))
+    assert sch.check_daily_minimums(session, now=now) == 1
+    assert len(alerts) == 1 and "1/2" in alerts[0] and "Behind" in alerts[0]
+
+
+def test_daily_heartbeat_digest(session, user, channel, monkeypatch):
+    """Operators with an active campaign get one daily Telegram digest of the last 24h."""
+    from datetime import datetime, timedelta
+
+    from database.models import Campaign, Task
+    from database.types import CampaignStatus, TaskStatus
+    from workers import scheduler as sch
+    from workers import video_worker
+
+    now = datetime.utcnow()
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="HB", total_episodes=9,
+                   status=CampaignStatus.active)
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    session.add_all([
+        Task(campaign_id=cam.id, user_id=user.id, episode_number=1,
+             status=TaskStatus.COMPLETED, finished_at=now - timedelta(hours=2)),
+        Task(campaign_id=cam.id, user_id=user.id, episode_number=2,
+             status=TaskStatus.FAILED, finished_at=now - timedelta(hours=1)),
+        Task(campaign_id=cam.id, user_id=user.id, episode_number=3,
+             status=TaskStatus.AWAITING_REVIEW),
+    ])
+    session.commit()
+
+    digests = []
+    monkeypatch.setattr(video_worker, "_notify", lambda u, msg: digests.append(msg))
+    assert sch.send_daily_heartbeat(session, now=now) == 1
+    assert len(digests) == 1
+    assert "published 1" in digests[0] and "failed 1" in digests[0] and "awaiting review 1" in digests[0]
+    assert "AI calls today" in digests[0]
+
+
 def test_hydrate_respects_campaign_buffer_size(session, user, channel):
     from database.models import Campaign, Task
     from database.types import CampaignStatus
