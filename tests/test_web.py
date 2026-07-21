@@ -138,6 +138,21 @@ def test_publish_now_skips_the_slot(client, monkeypatch, tmp_path):
     assert client.post(f"/assets/{buf.id}/publish-now", follow_redirects=False).status_code == 400
 
 
+def test_publish_now_missing_file_flashes_not_queues(client, monkeypatch, tmp_path):
+    """If the rendered file vanished from disk, Publish now must explain (flash=missing) instead
+    of queueing an upload doomed to FileNotFoundError."""
+    import main
+
+    buf, _task, video = _seed_ready_asset(client, tmp_path)
+    video.unlink()  # simulate the file having been destroyed
+    queued = []
+    monkeypatch.setattr(main.task_queue, "enqueue_publish", lambda bid: queued.append(bid) or "j")
+    r = client.post(f"/assets/{buf.id}/publish-now", follow_redirects=False)
+    assert r.status_code == 303 and "flash=missing" in r.headers["location"]
+    assert queued == []  # nothing enqueued
+    assert "no longer on disk" in client.get(r.headers["location"]).text
+
+
 def test_rerender_discards_and_requeues(client, monkeypatch, tmp_path):
     """Discard & re-render deletes the bad render and queues a fresh render of the episode."""
     import main

@@ -413,6 +413,47 @@ def test_rerender_replaces_existing_buffer(session, user, channel, monkeypatch, 
     assert not old_file.exists()  # the superseded render's file was cleaned up
 
 
+def test_rerender_same_path_keeps_fresh_file(session, user, channel, monkeypatch, tmp_path):
+    """Renders write to a deterministic per-episode path, so on a re-render the OLD buffer row
+    points at the SAME path as the NEW file. The replacement cleanup must not delete it —
+    this shipped once and produced Ready cards whose video had been silently destroyed."""
+    from core.video_factory import RenderResult
+    from database.models import BufferPoolItem, Campaign, Task
+    from database.types import BufferStatus, CampaignStatus, TaskStatus
+    from workers import video_worker
+
+    shared = tmp_path / "episode_1.mp4"  # the deterministic path both rows share
+    shared.write_bytes(b"fresh-render")
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="SamePath", total_episodes=3,
+                   status=CampaignStatus.active,
+                   config_json={"language": "en", "auto_publish": False, "auto_qc": "off"})
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    t = Task(campaign_id=cam.id, user_id=user.id, episode_number=1)
+    stale = BufferPoolItem(campaign_id=cam.id, channel_id=channel.id, episode_number=1,
+                           video_path=str(shared), status=BufferStatus.rejected, metadata_json={})
+    session.add_all([t, stale])
+    session.commit()
+    session.refresh(t)
+
+    monkeypatch.setattr(video_worker, "generate_script", lambda **k: _script())
+    monkeypatch.setattr(
+        video_worker.video_factory, "produce",
+        lambda **k: RenderResult(master_path=str(shared), thumbnail_path="/no/t.jpg",
+                                 metadata={"title": "T", "variant": "A"}, duration=5.0, scene_count=1),
+    )
+
+    video_worker.render_task(t.id)
+
+    session.expire_all()
+    session.refresh(t)
+    assert t.status == TaskStatus.AWAITING_REVIEW
+    assert shared.exists() and shared.read_bytes() == b"fresh-render"  # NOT deleted by the cleanup
+    bufs = session.query(BufferPoolItem).filter_by(campaign_id=cam.id, episode_number=1).all()
+    assert len(bufs) == 1 and bufs[0].video_path == str(shared)
+
+
 def test_publish_task_idempotent_on_consumed(session, user, channel, monkeypatch):
     """A double-enqueued publish (slot re-tick or double-clicked Approve) must not upload twice."""
     from database.models import BufferPoolItem, Campaign, Task

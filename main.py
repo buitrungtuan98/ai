@@ -640,7 +640,7 @@ def assets_page(request: Request, user: CurrentUser, db: DbDep,
         {"request": request, "user": user, "items": items, "nav": "assets",
          "camp_by_id": {c.id: c for c in campaigns}, "previewable": previewable,
          # Post-action feedback (whitelisted — never echo arbitrary input back into the page).
-         "flash": flash if flash in ("publish", "rerender", "rejected") else "",
+         "flash": flash if flash in ("publish", "rerender", "rejected", "missing") else "",
          "flash_reason": flash_reason[:200]},
     )
 
@@ -713,6 +713,8 @@ def asset_thumb(request: Request, item=Depends(get_owned_buffer_item)):
 def approve_asset(db: DbDep, item=Depends(get_owned_buffer_item)):
     if item.status != BufferStatus.awaiting_review:
         raise HTTPException(400, "Only items awaiting review can be approved")
+    if not (item.video_path and os.path.exists(item.video_path)):
+        return RedirectResponse("/assets?flash=missing", status_code=303)
     task = db.scalar(select(Task).where(
         Task.campaign_id == item.campaign_id, Task.episode_number == item.episode_number))
     if task is not None:
@@ -728,6 +730,8 @@ def publish_asset_now(db: DbDep, item=Depends(get_owned_buffer_item)):
     """Skip the posting slot: publish a pre-rendered (`ready`) episode immediately."""
     if item.status != BufferStatus.ready:
         raise HTTPException(400, "Only pre-rendered (ready) items can be published now")
+    if not (item.video_path and os.path.exists(item.video_path)):
+        return RedirectResponse("/assets?flash=missing", status_code=303)
     task_queue.enqueue_publish(item.id)
     return RedirectResponse("/assets?flash=publish", status_code=303)
 

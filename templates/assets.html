@@ -14,6 +14,9 @@
 {% elif flash == 'rejected' %}
 <div class="banner">🗑 <b>Rejected.</b> The render was deleted{% if flash_reason %} and the AI was told to avoid:
   “{{ flash_reason }}”{% endif %}. Re-render it anytime from Task Logs → Retry.</div>
+{% elif flash == 'missing' %}
+<div class="banner danger">⚠️ <b>That episode's video file is no longer on disk</b>, so it can't be published.
+  Use <b>Discard &amp; re-render</b> on the card to produce it again.</div>
 {% endif %}
 
 {% if items %}
