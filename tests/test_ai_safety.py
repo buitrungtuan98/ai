@@ -121,6 +121,42 @@ def test_ai_call_counter(monkeypatch):
     assert usage.ai_calls_today() == 0     # degrades to 0, never raises
 
 
+def test_duration_range_prompt_and_length_fix(monkeypatch):
+    """With a duration range set, the prompt carries a word budget, and a draft far outside the
+    range triggers exactly one corrective rewrite (deterministic word-count check, no extra calls
+    when within range)."""
+    import core.ai_engine as ai
+    from core.ai_engine import build_script_prompt, estimate_speech_seconds, generate_script
+
+    # ~24 words of English at ~2.4 wps ≈ 10s.
+    assert 8 <= estimate_speech_seconds("word " * 24, "en") <= 12
+    # Slower rate → longer estimate.
+    assert estimate_speech_seconds("word " * 24, "en", rate_pct=-10) > estimate_speech_seconds("word " * 24, "en")
+
+    p = build_script_prompt("t", "en", 10, 1, duration_min_s=30, duration_max_s=60)
+    assert "30-60 seconds" in p and "words in en" in p
+    assert "TOTAL LENGTH" not in build_script_prompt("t", "en", 10, 1)  # unset → no constraint
+
+    # Draft speaks ~125s against a 20-30s target → one length-fix call; the fixed draft is kept.
+    long_scenes = [{"index": i, "narration": "word " * 100, "pexels_keywords": ["k"]} for i in range(3)]
+    short_scenes = [{"index": i, "narration": "word " * 20, "pexels_keywords": ["k"]} for i in range(3)]
+    meta = [{"variant": v, "title": "T", "description": "d", "tags": ["a", "b", "c"]} for v in "ABC"]
+    responses = [json.dumps({"language": "en", "topic": "t", "scenes": long_scenes, "metadata_variations": meta}),
+                 json.dumps({"language": "en", "topic": "t", "scenes": short_scenes, "metadata_variations": meta})]
+    calls = []
+
+    def fake(**k):
+        calls.append(k["prompt"])
+        return responses[len(calls) - 1]
+
+    monkeypatch.setattr(ai, "_call_gemini", fake)
+    script = generate_script(topic="t", language="en", total_episodes=10, episode=1, api_key="k",
+                             self_critique=False, duration_min_s=20, duration_max_s=30)
+    assert len(calls) == 2 and "speaks for about" in calls[1]  # exactly one corrective rewrite
+    assert script.scenes[0].narration.startswith("word")
+    assert len(script.scenes[0].narration.split()) == 20       # the fixed (short) draft won
+
+
 def test_propose_campaign_drops_invalid_voice(monkeypatch):
     """The designer validates the voice against the curated list — an invented one falls back to
     the default ('') so TTS never gets an unusable voice name."""

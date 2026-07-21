@@ -344,6 +344,9 @@ def render_task(task_id: int) -> None:
             best_examples=learning.get("best_examples"),
             avoid=learning.get("reject_reasons"),
             self_critique=cfg.get("self_critique", "on") != "off",
+            duration_min_s=cfg.get("duration_min_s"),
+            duration_max_s=cfg.get("duration_max_s"),
+            rate_pct=int(cfg.get("rate_pct", 0)),
         )
         if script.synopsis:
             task.synopsis = script.synopsis[:300]

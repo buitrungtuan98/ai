@@ -410,6 +410,7 @@ def _build_campaign_config(
     max_per_day: str = "", min_per_day: str = "",
     title_prefix: str = "",
     posting_days: list[str] | None = None,
+    duration_min_s: str = "", duration_max_s: str = "",
 ) -> dict:
     """One place turns the campaign form into config_json (DRY: shared by create and edit)."""
     config: dict = {
@@ -451,6 +452,14 @@ def _build_campaign_config(
         # the series name / episode number — they must stand alone as hooks).
         "title_prefix": title_prefix.strip()[:40] or None,
     }
+    # Target spoken length range (seconds). Stored only when BOTH bounds are valid; auto-ordered.
+    lo = int(duration_min_s) if duration_min_s.strip().isdigit() else None
+    hi = int(duration_max_s) if duration_max_s.strip().isdigit() else None
+    if lo and hi:
+        lo, hi = sorted((max(10, min(lo, 180)), max(10, min(hi, 180))))
+        config["duration_min_s"], config["duration_max_s"] = lo, hi
+    else:
+        config["duration_min_s"] = config["duration_max_s"] = None
     if watermark_path or (tint_color and tint_opacity > 0) or mirror:
         config["branding"] = {
             "watermark_path": watermark_path or None,
@@ -501,6 +510,8 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
     min_per_day: str = Form(""),
     title_prefix: str = Form(""),
     posting_days: list[str] = Form([]),
+    duration_min_s: str = Form(""),
+    duration_max_s: str = Form(""),
 ) -> dict:
     return {
         "topic_name": topic_name, "channel_id": channel_id, "total_episodes": total_episodes,
@@ -517,6 +528,7 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
             color_grade=color_grade, auto_qc=auto_qc,
             max_per_day=max_per_day, min_per_day=min_per_day,
             title_prefix=title_prefix, posting_days=posting_days,
+            duration_min_s=duration_min_s, duration_max_s=duration_max_s,
         ),
     }
 

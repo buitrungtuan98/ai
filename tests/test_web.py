@@ -224,7 +224,8 @@ def _seed_campaign(client):
                                     "buffer_size": "2", "watermark_path": "/data/logo.png",
                                     "tint_opacity": "0.1", "tint_color": "#1e90ff",
                                     "color_grade": "cinematic", "auto_qc": "off",
-                                    "posting_days": ["mon", "fri", "bogus-day"]},
+                                    "posting_days": ["mon", "fri", "bogus-day"],
+                                    "duration_min_s": "60", "duration_max_s": "30"},
                 follow_redirects=False)
     db = SessionLocal()
     cam = db.query(Campaign).first()
@@ -242,6 +243,7 @@ def test_campaign_config_persists_all_settings(client):
     assert cfg["branding"]["tint_opacity"] == 0.1
     assert cfg["color_grade"] == "cinematic" and cfg["auto_qc"] == "off"  # Phase 17 fields honored
     assert cfg["posting_days"] == ["mon", "fri"]  # weekday gate persisted; bogus value dropped
+    assert (cfg["duration_min_s"], cfg["duration_max_s"]) == (30, 60)  # reversed bounds auto-ordered
 
 
 def test_persona_and_continuity_persist_and_duplicate(client):

@@ -291,6 +291,10 @@ class CampaignProposal(BaseModel):
     posting_slots: str = Field(default="", description="One daily slot as HH:MM, or empty.")
     posting_days: list[Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]] = Field(
         default_factory=list, description="Days to publish on; EMPTY means every day (the usual choice).")
+    duration_min_s: int = Field(default=0, ge=0, le=180,
+                                description="Target min spoken seconds per episode (0 = unset).")
+    duration_max_s: int = Field(default=0, ge=0, le=180,
+                                description="Target max spoken seconds per episode (0 = unset).")
     rationale: str = Field(default="", max_length=400, description="One sentence on the angle.")
 
 
@@ -331,7 +335,8 @@ def propose_campaign(
         f"voice chosen ONLY from this list: {voices}; a rate_pct — TTS sounds most natural "
         "slightly slowed, so prefer -8..-3 for storytelling personas and 0 only for fast-paced "
         "formats; a sensible total_episodes; one daily posting slot as HH:MM; a continuity mode; "
-        "and a short call-to-action. "
+        "a spoken length range in seconds fitting the format (e.g. 25-45 for punchy facts, "
+        "60-120 for stories); and a short call-to-action. "
         f"Variation seed {nonce}: make this proposal clearly different from any previous one. "
         "Include a one-sentence 'rationale' for the creative angle."
     )
@@ -343,6 +348,17 @@ def propose_campaign(
     if proposal.voice not in allowed:
         proposal.voice = ""  # model invented a voice → fall back to the app default
     return proposal
+
+
+# Rough spoken words-per-second of the default edge-tts voices (heuristic; the ±20% tolerance in
+# the length check absorbs the error). Vietnamese tokens are syllables → higher rate.
+WORDS_PER_SECOND: dict[str, float] = {"en": 2.4, "vi": 3.1, "es": 2.6}
+
+
+def estimate_speech_seconds(text: str, language: str, rate_pct: int = 0) -> float:
+    """Estimate how long `text` takes to speak with the campaign's voice settings."""
+    wps = WORDS_PER_SECOND.get(language, 2.4) * (1 + rate_pct / 100)
+    return len(text.split()) / max(wps, 0.1)
 
 
 def series_hashtag(topic: str) -> str:
@@ -447,10 +463,23 @@ def build_script_prompt(
     *,
     continuity: str = "none",
     previous_synopses: list[str] | None = None,
+    duration_min_s: int | None = None,
+    duration_max_s: int | None = None,
+    rate_pct: int = 0,
 ) -> str:
+    length_line = ""
+    if duration_min_s and duration_max_s:
+        wps = WORDS_PER_SECOND.get(language, 2.4) * (1 + rate_pct / 100)
+        lo, hi = int(duration_min_s * wps), int(duration_max_s * wps)
+        length_line = (
+            f"TOTAL LENGTH: all scene narrations together must run {duration_min_s}-"
+            f"{duration_max_s} seconds when spoken — approximately {lo}-{hi} words in {language}. "
+            "Fit the scene count and sentence lengths to this budget. "
+        )
     base = (
         f"Create a vertical short-form video script for episode {episode} of {total_episodes} "
         f"in a series about: '{topic}'. Language: {language}. "
+        + length_line +
         "Produce 3-6 scenes; each scene has narration the voice will speak, an optional short "
         "on-screen caption hook, and 1-4 stock-footage keywords. Also produce exactly 3 distinct "
         "A/B metadata variations (variant A/B/C) each with a title (<=100 chars), a description, "
@@ -505,6 +534,9 @@ def generate_script(
     best_examples: list[str] | None = None,
     avoid: list[str] | None = None,
     self_critique: bool = True,
+    duration_min_s: int | None = None,
+    duration_max_s: int | None = None,
+    rate_pct: int = 0,
     model: str = DEFAULT_MODEL,
 ) -> VideoScript:
     system = compose_system_prompt(
@@ -521,38 +553,57 @@ def generate_script(
     prompt = build_script_prompt(
         topic, language, total_episodes, episode,
         continuity=continuity, previous_synopses=previous_synopses,
+        duration_min_s=duration_min_s, duration_max_s=duration_max_s, rate_pct=rate_pct,
     )
     temperature = 0.85 if continuity != "none" else 0.7
     script = generate_structured(
         prompt=prompt, schema=VideoScript, api_key=api_key, system_prompt=system,
         model=model, temperature=temperature,
     )
-    if not self_critique:
-        return script
 
-    # Generator→critic loop: one harsh editorial review; on 'rewrite', one revision with the
-    # concrete issues injected. A critic failure never blocks the video (best-effort quality gate).
-    try:
-        review = critique_script(script, api_key=api_key, persona=persona,
-                                 previous_synopses=previous_synopses, model=model)
-    except Exception:  # noqa: BLE001
-        logger.warning("Critic pass failed — keeping the first draft.")
-        return script
-    if review.verdict == "pass":
-        return script
-    logger.info("Critic requested a rewrite (hook=%d natural=%d persona=%d fresh=%d)",
-                review.hook_score, review.natural_score, review.persona_score, review.fresh_score)
-    fixes = "\n".join(f"- {i}" for i in review.issues) or "- strengthen the hook and spoken rhythm"
-    try:
-        return generate_structured(
-            prompt=prompt + "\n\nAn editor reviewed your previous draft and demands these fixes "
-                            "(rewrite fully, do not patch):\n" + fixes,
-            schema=VideoScript, api_key=api_key, system_prompt=system,
-            model=model, temperature=temperature,
-        )
-    except Exception:  # noqa: BLE001
-        logger.warning("Rewrite failed — keeping the first draft.")
-        return script
+    if self_critique:
+        # Generator→critic loop: one harsh editorial review; on 'rewrite', one revision with the
+        # concrete issues injected. A critic failure never blocks the video (best-effort gate).
+        try:
+            review = critique_script(script, api_key=api_key, persona=persona,
+                                     previous_synopses=previous_synopses, model=model)
+            if review.verdict != "pass":
+                logger.info("Critic requested a rewrite (hook=%d natural=%d persona=%d fresh=%d)",
+                            review.hook_score, review.natural_score, review.persona_score,
+                            review.fresh_score)
+                fixes = "\n".join(f"- {i}" for i in review.issues) \
+                    or "- strengthen the hook and spoken rhythm"
+                script = generate_structured(
+                    prompt=prompt + "\n\nAn editor reviewed your previous draft and demands these "
+                                    "fixes (rewrite fully, do not patch):\n" + fixes,
+                    schema=VideoScript, api_key=api_key, system_prompt=system,
+                    model=model, temperature=temperature,
+                )
+        except Exception:  # noqa: BLE001
+            logger.warning("Critic/rewrite failed — keeping the current draft.")
+
+    # Length fit (deterministic word-count check; costs one extra call ONLY when the draft misses
+    # the campaign's target range by more than 20%). The estimate is heuristic — the tolerance
+    # absorbs voice-speed variance; the true duration is measured at TTS time.
+    if duration_min_s and duration_max_s:
+        est = estimate_speech_seconds(
+            " ".join(s.narration for s in script.scenes), language, rate_pct)
+        if est < duration_min_s * 0.8 or est > duration_max_s * 1.2:
+            need = "EXPAND it with more substance" if est < duration_min_s else "CUT it down"
+            logger.info("Script speaks ~%.0fs, target %d-%ds — requesting a length fix",
+                        est, duration_min_s, duration_max_s)
+            try:
+                script = generate_structured(
+                    prompt=prompt + f"\n\nYour previous draft speaks for about {est:.0f} seconds, "
+                                    f"but the target is {duration_min_s}-{duration_max_s} seconds. "
+                                    f"{need} to fit the target — rewrite fully, keeping the same "
+                                    "premise, persona and quality.",
+                    schema=VideoScript, api_key=api_key, system_prompt=system,
+                    model=model, temperature=temperature,
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning("Length-fix rewrite failed — keeping the current draft.")
+    return script
 
 
 # ── Vision judging (Auto-QC: the machine watches the footage and the output) ─
