@@ -411,11 +411,16 @@ def render_task(task_id: int) -> None:
         # A re-render (e.g. Retry after a reject, or an expired slot item) supersedes any prior
         # buffer row for this episode. Remove it first — (campaign, episode) is unique, so a blind
         # insert would raise IntegrityError and dead-end the Retry in a re-render→fail loop.
+        # CRITICAL: renders write to a deterministic per-episode path, so the old row usually
+        # points at the SAME path the new render just produced — deleting it blindly would destroy
+        # the fresh master/thumbnail (Ready card with no playable file). Skip the new artifacts.
+        fresh = {result.master_path, result.thumbnail_path}
         for old in db.scalars(select(BufferPoolItem).where(
             BufferPoolItem.campaign_id == campaign.id,
             BufferPoolItem.episode_number == task.episode_number,
         )).all():
-            _safe_remove(old.video_path, old.thumbnail_path)
+            _safe_remove(*[p for p in (old.video_path, old.thumbnail_path)
+                           if p and p not in fresh])
             db.delete(old)
         db.flush()
 
