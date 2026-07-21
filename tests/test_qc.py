@@ -73,6 +73,7 @@ def test_final_qc_pass_fail_and_fail_open(monkeypatch):
     monkeypatch.setattr(qc.media, "probe_duration", lambda path: 30.0)
     sampled: list[float] = []
     monkeypatch.setattr(qc, "extract_frame", lambda video, out, at: sampled.append(at))
+    monkeypatch.setattr(qc, "extract_audio", lambda video, out: None)
 
     monkeypatch.setattr(qc, "judge_video_frames",
                         lambda frames, *, api_key, context="", **kw: VideoQCVerdict(quality_score=9))
@@ -94,3 +95,52 @@ def test_final_qc_pass_fail_and_fail_open(monkeypatch):
     monkeypatch.setattr(qc, "judge_video_frames", boom)
     res = qc.run_final_qc("m.mp4", api_key="key")
     assert res.passed and res.score is None  # fail-open: outage never blocks an episode
+
+
+def test_final_qc_attaches_audio_for_voice_check(monkeypatch):
+    """The master's audio track rides along in the SAME vision call (voice QC at zero extra API
+    cost); a failed audio extraction degrades to frames-only judging, never a blocked render."""
+    from core import qc
+
+    monkeypatch.setattr(qc.media, "probe_duration", lambda path: 30.0)
+    monkeypatch.setattr(qc, "extract_frame", lambda video, out, at: None)
+    monkeypatch.setattr(qc, "extract_audio", lambda video, out: None)
+    seen: dict = {}
+
+    def fake_judge(frames, *, api_key, context="", audio_path=None, **kw):
+        seen["audio_path"] = audio_path
+        return VideoQCVerdict(quality_score=9)
+
+    monkeypatch.setattr(qc, "judge_video_frames", fake_judge)
+    assert qc.run_final_qc("m.mp4", api_key="key").passed
+    assert seen["audio_path"] and seen["audio_path"].endswith(".aac")  # audio reached the judge
+
+    def audio_boom(video, out):
+        raise RuntimeError("no audio stream")
+
+    monkeypatch.setattr(qc, "extract_audio", audio_boom)
+    assert qc.run_final_qc("m.mp4", api_key="key").passed
+    assert seen["audio_path"] is None  # frames-only fallback
+
+
+def test_judge_video_frames_audio_prompt(monkeypatch):
+    """With audio attached, the judging prompt must actually ask about the voice."""
+    import json as _json
+
+    import core.ai_engine as ai
+
+    captured = {}
+
+    def fake_vision(**kw):
+        captured.update(kw)
+        return _json.dumps({"quality_score": 8, "issues": []})
+
+    monkeypatch.setattr(ai, "_call_gemini_vision", fake_vision)
+    ai.judge_video_frames(["f.jpg"], api_key="k", audio_path="a.aac")
+    assert captured["audio_path"] == "a.aac"
+    assert "VOICE" in captured["prompt"]
+
+    captured.clear()
+    ai.judge_video_frames(["f.jpg"], api_key="k")
+    assert captured["audio_path"] is None
+    assert "VOICE" not in captured["prompt"]

@@ -91,6 +91,30 @@ COLOR_GRADES: dict[str, str] = {
 # Loudness normalization to the -14 LUFS short-form platform target (EBU R128 single pass).
 LOUDNORM_FILTER = "loudnorm=I=-14:TP=-1.5:LRA=11"
 
+# Deterministic voice sanity gate (zero API cost): a silent or truncated TTS output must fail
+# BEFORE minutes of CPU rendering, not ship as a broken published video. edge-tts speech sits
+# around -20..-30 dB mean; anything below this across the whole clip is effectively silence.
+VOICE_SILENCE_MEAN_DB = -50.0
+
+
+def voice_check(audio_path: str, text: str) -> str | None:
+    """Return a problem description if the narration audio is unusable, else None.
+
+    An unreadable file IS a problem (the render would die at probe time anyway) — this check
+    fails CLOSED, unlike the vision QC, because it is deterministic and free."""
+    try:
+        duration = media.probe_duration(audio_path)
+        stats = media.probe_audio_stats(audio_path)
+    except Exception as exc:  # noqa: BLE001 — a corrupt/empty file is exactly what we're catching
+        return f"narration audio unreadable ({exc})"
+    words = len(text.split())
+    if words >= 3 and duration < 0.5:
+        return f"audio lasts {duration:.2f}s for {words} words (truncated TTS output)"
+    mean = stats.get("mean_volume_db")
+    if mean is not None and mean < VOICE_SILENCE_MEAN_DB:
+        return f"audio is effectively silent (mean volume {mean:.1f} dB)"
+    return None
+
 
 def motion_filter(effect: str, duration: float) -> str:
     frames = max(int(duration * FPS), 1)
@@ -357,6 +381,16 @@ def produce(
             # TTS → mp3 + word timings; audio duration = ground truth.
             audio_path = ws.path(f"scene_{si}.mp3")
             timings = tts.synthesize(clean, audio_path, language=lang, voice=voice, rate_pct=rate_pct)
+            # Voice sanity (deterministic, free): silent/truncated TTS output → one re-synthesis,
+            # then a loud failure — never hours later as a broken published video.
+            problem = voice_check(audio_path, clean)
+            if problem:
+                logger.warning("Scene %d voice check failed (%s) — re-synthesizing once", si, problem)
+                timings = tts.synthesize(clean, audio_path, language=lang, voice=voice,
+                                         rate_pct=rate_pct)
+                problem = voice_check(audio_path, clean)
+                if problem:
+                    raise RuntimeError(f"Scene {si} narration failed the voice check: {problem}")
             d_i = media.probe_duration(audio_path)
 
             # Footage to cover d_i (with keyword fallback chain).

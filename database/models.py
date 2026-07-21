@@ -154,6 +154,9 @@ class Task(Base):
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
     published_video_id: Mapped[str | None] = mapped_column(String(128))
     published_url: Mapped[str | None] = mapped_column(String(512))
+    # Which A/B metadata variant (A/B/C) actually went live — closes the A/B loop: joined with
+    # stats_json, the Performance page compares real retention per variant.
+    ab_variant: Mapped[str | None] = mapped_column(String(8))
     # Episode memory: one-line premise, fed into later episodes' prompts (no-repeat/serial modes).
     synopsis: Mapped[str | None] = mapped_column(String(300))
     # Platform performance (views, avg_pct_viewed, likes, fetched_at) — feeds the playbook distiller.

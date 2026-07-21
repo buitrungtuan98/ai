@@ -26,6 +26,39 @@ def test_build_scene_args_single_and_branding():
     assert a2.count("-i") == 4  # 2 clips + audio + watermark
 
 
+def test_voice_check_flags_broken_tts(monkeypatch):
+    """Deterministic voice sanity (zero API cost): silent, truncated or unreadable narration
+    audio is caught BEFORE minutes of CPU rendering. Unlike vision QC this fails CLOSED."""
+    from core import video_factory as vf
+
+    healthy = {"mean_volume_db": -21.5, "max_volume_db": -3.0}
+    monkeypatch.setattr(vf.media, "probe_duration", lambda p: 4.2)
+    monkeypatch.setattr(vf.media, "probe_audio_stats", lambda p: healthy)
+    assert vf.voice_check("a.mp3", "one two three four") is None
+
+    # Effectively silent output.
+    monkeypatch.setattr(vf.media, "probe_audio_stats",
+                        lambda p: {"mean_volume_db": -78.0, "max_volume_db": -60.0})
+    assert "silent" in vf.voice_check("a.mp3", "one two three four")
+
+    # Undetectable volume (no report) is tolerated — silence detection needs evidence.
+    monkeypatch.setattr(vf.media, "probe_audio_stats",
+                        lambda p: {"mean_volume_db": None, "max_volume_db": None})
+    assert vf.voice_check("a.mp3", "one two three four") is None
+
+    # Truncated output: sub-second audio for a real sentence.
+    monkeypatch.setattr(vf.media, "probe_duration", lambda p: 0.12)
+    monkeypatch.setattr(vf.media, "probe_audio_stats", lambda p: healthy)
+    assert "truncated" in vf.voice_check("a.mp3", "a longer narration line here")
+
+    # Unreadable/corrupt file IS a problem.
+    def boom(p):
+        raise RuntimeError("corrupt")
+
+    monkeypatch.setattr(vf.media, "probe_duration", boom)
+    assert "unreadable" in vf.voice_check("a.mp3", "text here now")
+
+
 def test_build_concat_args_copy_and_loudnorm():
     from core.video_factory import LOUDNORM_FILTER, build_concat_args
 

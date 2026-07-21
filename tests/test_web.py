@@ -498,6 +498,49 @@ def test_performance_page_and_reset(client):
     db.close()
 
 
+def test_ab_variant_summary_closes_the_loop():
+    """Per-variant aggregation: only episodes with BOTH a recorded variant and stats count;
+    metrics average within each variant so the operator sees which style actually retains."""
+    from types import SimpleNamespace
+
+    from main import ab_variant_summary
+
+    episodes = [
+        SimpleNamespace(ab_variant="A", stats_json={"avg_pct_viewed": 60, "views": 100}),
+        SimpleNamespace(ab_variant="A", stats_json={"avg_pct_viewed": 50, "views": 300}),
+        SimpleNamespace(ab_variant="B", stats_json={"avg_pct_viewed": 70}),      # no view count yet
+        SimpleNamespace(ab_variant="C", stats_json=None),                        # no stats yet
+        SimpleNamespace(ab_variant=None, stats_json={"views": 5}),               # pre-feature episode
+    ]
+    summary = ab_variant_summary(episodes)
+    assert [s["variant"] for s in summary] == ["A", "B"]
+    assert summary[0] == {"variant": "A", "episodes": 2, "avg_retention": 55.0, "avg_views": 200}
+    assert summary[1]["avg_retention"] == 70.0 and summary[1]["avg_views"] is None
+    assert ab_variant_summary([]) == []
+
+
+def test_performance_page_shows_variant_results(client):
+    from database.db_session import SessionLocal
+    from database.models import Task
+    from database.types import TaskStatus
+
+    cam = _seed_campaign(client)
+    db = SessionLocal()
+    db.add_all([
+        Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=1, ab_variant="A",
+             status=TaskStatus.COMPLETED, stats_json={"avg_pct_viewed": 62.0, "views": 500}),
+        Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=2, ab_variant="B",
+             status=TaskStatus.COMPLETED, stats_json={"avg_pct_viewed": 48.0, "views": 200}),
+    ])
+    db.commit()
+    db.close()
+
+    page = client.get(f"/campaigns/{cam.id}/performance")
+    assert page.status_code == 200
+    assert "A/B Variant Results" in page.text
+    assert "62.0%" in page.text and "48.0%" in page.text
+
+
 def test_asset_stream_404s(client, tmp_path):
     # Missing item and missing file both 404 (never leak paths).
     assert client.get("/assets/424242/video").status_code == 404

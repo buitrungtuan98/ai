@@ -293,7 +293,18 @@ def _critique_json(verdict="rewrite"):
     import json
 
     return json.dumps({"hook_score": 4, "natural_score": 6, "persona_score": 7, "fresh_score": 8,
-                       "verdict": verdict, "issues": ["hook too slow", "sentence 2 reads like an essay"]})
+                       "grammar_score": 9, "verdict": verdict,
+                       "issues": ["hook too slow", "sentence 2 reads like an essay"]})
+
+
+def test_critic_covers_grammar():
+    """The critic pass is also the grammar/spelling gate (zero extra API calls): the schema
+    scores it and the system prompt demands a rewrite on any language error — subtitles are the
+    narration verbatim, so a typo would be burned into every frame."""
+    from core.ai_engine import _CRITIC_SYSTEM, ScriptCritique
+
+    assert "grammar_score" in ScriptCritique.model_json_schema()["properties"]
+    assert "grammar" in _CRITIC_SYSTEM and "subtitles" in _CRITIC_SYSTEM
 
 
 def test_generate_script_critic_loop(monkeypatch):

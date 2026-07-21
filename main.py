@@ -879,6 +879,29 @@ def reject_asset(db: DbDep, item=Depends(get_owned_buffer_item), reason: str = F
 
 
 # ── Performance & learning (self-improvement transparency) ──────────────────
+def ab_variant_summary(episodes) -> list[dict]:
+    """Aggregate measured episodes per A/B metadata variant — the closed A/B loop: which title/
+    description style actually retains viewers. Only episodes with both a recorded variant and
+    fetched stats count. Returns [] until there is anything to compare."""
+    groups: dict[str, list] = {}
+    for t in episodes:
+        if t.ab_variant and t.stats_json:
+            groups.setdefault(t.ab_variant, []).append(t)
+    summary = []
+    for variant in sorted(groups):
+        rows = groups[variant]
+        retention = [r.stats_json["avg_pct_viewed"] for r in rows
+                     if r.stats_json.get("avg_pct_viewed") is not None]
+        views = [r.stats_json["views"] for r in rows if r.stats_json.get("views") is not None]
+        summary.append({
+            "variant": variant,
+            "episodes": len(rows),
+            "avg_retention": round(sum(retention) / len(retention), 1) if retention else None,
+            "avg_views": round(sum(views) / len(views)) if views else None,
+        })
+    return summary
+
+
 @app.get("/campaigns/{campaign_id}/performance", response_class=HTMLResponse)
 def campaign_performance(request: Request, user: CurrentUser, db: DbDep,
                          campaign=Depends(get_owned_campaign)):
@@ -890,7 +913,8 @@ def campaign_performance(request: Request, user: CurrentUser, db: DbDep,
     return templates.TemplateResponse(
         request, "performance.html",
         {"request": request, "user": user, "nav": "campaigns", "campaign": campaign,
-         "episodes": episodes, "learning": campaign.learning_json or {}, "best_id": best.id if best else None},
+         "episodes": episodes, "learning": campaign.learning_json or {},
+         "best_id": best.id if best else None, "variants": ab_variant_summary(episodes)},
     )
 
 

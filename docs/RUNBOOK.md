@@ -127,6 +127,22 @@ trust what Auto-QC lets through, switch to auto-publish and review only what QC 
 Related quality knobs: **Colour grade** (Aesthetics tab) gives a channel one consistent look;
 audio loudness is always normalized to −14 LUFS (the YouTube/Reels target) — no knob needed.
 
+**Grammar & voice are covered too, at no extra API cost:** the script critic scores grammar/
+spelling/diacritics and forces a rewrite on any error (subtitles show the narration verbatim);
+after each scene's TTS a deterministic ffmpeg check catches silent/truncated audio (one automatic
+re-synthesis, then the episode fails loudly — this one never fails open, it's free and exact);
+and the final-QC call listens to the finished master's audio track in the same Gemini request,
+judging voice clarity, language match and music balance alongside the visuals.
+
+## Circuit breaker (campaign paused after repeated failures)
+If **3 episodes in a row fail**, the campaign automatically stops (status shows **Failed**) and
+you get ONE Telegram alert — instead of every queued episode burning API quota and pinging you
+about the same root cause (dead API key, revoked channel token, spent daily quota…). To resume:
+check the newest errors in **Task Logs**, fix the cause, then press **▶ Start** on the campaign
+(then **Retry** the failed episodes you still want). If an episode that was already in the queue
+happens to succeed after the pause, the campaign reactivates itself. One successful publish,
+review-parked render, or scheduled render resets the failure count.
+
 ## TTS failures (edge-tts 403 handshake)
 The voice rides Microsoft's undocumented Edge read-aloud endpoint via the `edge-tts` library.
 Microsoft rotates the endpoint's auth scheme every so often; when they do, **old library versions

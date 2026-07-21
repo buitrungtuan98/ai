@@ -99,6 +99,44 @@ def test_motion_filters_are_valid_ffmpeg_filters():
             raise AssertionError(f"motion {effect!r} rejected by ffmpeg: {exc.stderr.decode()[-300:]}")
 
 
+def test_probe_audio_stats_and_voice_check(tmp_path):
+    """volumedetect parsing + the voice sanity thresholds against REAL audio: digital silence is
+    flagged, an ordinary tone passes."""
+    from core import media
+    from core.video_factory import voice_check
+
+    d = str(tmp_path)
+    silent = os.path.join(d, "silent.mp3")
+    tone = os.path.join(d, "tone.mp3")
+    subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+                    "-t", "2", silent], check=True, capture_output=True)
+    subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+                    "-t", "2", tone], check=True, capture_output=True)
+
+    assert media.probe_audio_stats(silent)["mean_volume_db"] < -60.0
+    assert media.probe_audio_stats(tone)["mean_volume_db"] > -45.0
+    assert "silent" in voice_check(silent, "some words to speak here")
+    assert voice_check(tone, "some words to speak here") is None
+
+
+def test_extract_audio_stream_copy(tmp_path):
+    """Audio-aware final QC pulls the master's AAC track out without re-encoding."""
+    from core import media
+    from core.ffmpeg_runner import extract_audio
+
+    d = str(tmp_path)
+    master = os.path.join(d, "master.mp4")
+    subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=size=64x64:rate=10",
+                    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+                    "-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                    "-shortest", master], check=True, capture_output=True)
+    audio = os.path.join(d, "audio.aac")
+    extract_audio(master, audio)
+    assert os.path.getsize(audio) > 0
+    # The extracted ADTS stream must decode — and still carry the tone (not silence).
+    assert media.probe_audio_stats(audio)["mean_volume_db"] > -45.0
+
+
 def test_workspace_cleanup_removes_dir(tmp_path):
     from core.cleanup import RenderWorkspace
 
