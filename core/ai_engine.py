@@ -324,8 +324,10 @@ def propose_campaign(
         "language); 2-3 short style-example lines in that voice; signature opening and closing "
         "catchphrases; a caption theme and colour grade that fit the mood; a music mood in a few "
         "English words (music_mode 'auto' unless silence truly fits, then 'none'); an edge-tts "
-        f"voice chosen ONLY from this list: {voices}; a sensible total_episodes; one daily posting "
-        "slot as HH:MM; a continuity mode; and a short call-to-action. "
+        f"voice chosen ONLY from this list: {voices}; a rate_pct — TTS sounds most natural "
+        "slightly slowed, so prefer -8..-3 for storytelling personas and 0 only for fast-paced "
+        "formats; a sensible total_episodes; one daily posting slot as HH:MM; a continuity mode; "
+        "and a short call-to-action. "
         f"Variation seed {nonce}: make this proposal clearly different from any previous one. "
         "Include a one-sentence 'rationale' for the creative angle."
     )
@@ -361,7 +363,13 @@ NATURAL_STYLE_RULES = (
     "- Stay in character 100% of the time, including in titles and descriptions.\n"
     "- THE HOOK RULE: the very first sentence must grab attention within 2 seconds — a question, "
     "a shock, or mid-action. Never open with greetings or introductions (a signature catchphrase "
-    "is the only exception, and it must lead straight into the hook)."
+    "is the only exception, and it must lead straight into the hook).\n"
+    "- WRITE FOR THE VOICE: the narration is read aloud by a TTS voice that breathes at "
+    "punctuation. Keep sentences SHORT (one idea each). Use commas where a speaker would pause, "
+    "periods to land a point, and an ellipsis … for a dramatic beat. Never write long unbroken "
+    "clauses. Write numbers, dates and abbreviations the way they should be SPOKEN in the target "
+    "language (e.g. 'TP.HCM' → 'Thành phố Hồ Chí Minh', '1428' → 'năm một bốn hai tám' if read as "
+    "a year). Avoid parentheses and quote-heavy constructions — they read badly aloud."
 )
 
 

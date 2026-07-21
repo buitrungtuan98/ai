@@ -149,6 +149,20 @@ Voice honesty: edge-tts is good neural TTS, but the biggest realism win is that 
 *colloquial spoken text* sounds far more natural than TTS reading essay text — which is exactly
 what the persona produces. For a truly human voice later, a paid voice API (e.g. ElevenLabs) can
 replace `core/tts.py` behind the same interface.
+
+**Tuning the voice when it sounds stilted (in order of impact):**
+1. **Slow it down** — campaign form → *Audio speed adjustment* → **−5** (storytelling/horror often
+   likes −8). Default full speed is the #1 cause of the "rushed robot" feel.
+2. **Punctuation IS the pacing.** The TTS breathes at commas, lands at periods, and holds on an
+   ellipsis (…). The script rules now force short, punctuation-paced sentences and spoken-form
+   numbers/abbreviations — but your *style examples* teach it best: paste samples written the way
+   you'd actually SPEAK them, pauses and all ("Khuya rồi đó… tắt đèn chưa?").
+3. **Try the other voice for your language** (voice field): vi has `vi-VN-HoaiMyNeural` (female) /
+   `vi-VN-NamMinhNeural` (male) — the same script can feel very different across voices.
+4. **Keep music under it** (Auto music) — a bed masks residual synthetic timbre remarkably well.
+5. **The ceiling:** edge-tts has no SSML/emotion tags. If, after 1–4, the voice still isn't good
+   enough for your brand, the upgrade path is a paid TTS (ElevenLabs / Azure styles) swapped into
+   `core/tts.py` behind the same interface — everything else in the pipeline stays untouched.
 **Compliance:** a persona is a creative character — do not imitate a real, identifiable person, and
 follow each platform's synthetic/altered-content disclosure rules (YouTube requires disclosure for
 realistic synthetic content).
