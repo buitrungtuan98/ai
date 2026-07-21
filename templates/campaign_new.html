@@ -170,6 +170,16 @@
       <div class="form-row"><label>Posting time slots (comma-separated HH:MM) — exactly one pre-rendered video publishes per slot</label>
         <input name="posting_slots" placeholder="21:00" value="{{ cfg.get('posting_slots', [])|join(', ') }}">
         <p class="hint">Empty = publish immediately after each render (continuous mode).</p></div>
+      <div class="form-row"><label>Publish days (all unchecked = every day)</label>
+        <div class="flex" style="gap:12px; flex-wrap:wrap;">
+          {% for d, label in [('mon','Mon'), ('tue','Tue'), ('wed','Wed'), ('thu','Thu'), ('fri','Fri'), ('sat','Sat'), ('sun','Sun')] %}
+          <label style="display:flex; align-items:center; gap:5px; font-weight:normal;">
+            <input type="checkbox" name="posting_days" value="{{ d }}" style="width:auto"
+                   {{ 'checked' if d in (cfg.get('posting_days') or []) }}> {{ label }}</label>
+          {% endfor %}
+        </div>
+        <p class="hint">The slots above fire only on checked days (campaign timezone). Rendering still runs ahead
+          every day, and day-gated pre-renders are kept longer before expiring (up to ~1 week).</p></div>
       <div class="form-row"><label>Campaign timezone (IANA name; blank = server default {{ settings.TIMEZONE }})</label>
         <input name="timezone" placeholder="Asia/Ho_Chi_Minh" value="{{ cfg.get('timezone') or '' }}"></div>
       <div class="form-row"><label>Pre-rendered buffer size (blank = global default {{ settings.DEFAULT_BUFFER_SIZE }})</label>
@@ -250,6 +260,9 @@
         setVal("cta", p.cta);
         setVal("title_prefix", p.title_prefix);
         setVal("posting_slots", p.posting_slots);
+        form.querySelectorAll('[name="posting_days"]').forEach(function (cb) {
+          cb.checked = (p.posting_days || []).includes(cb.value);
+        });
         const ab = form.elements["ab_testing"];
         if (ab) ab.checked = !!p.ab_testing;
         const rv = document.getElementById("rate-val");

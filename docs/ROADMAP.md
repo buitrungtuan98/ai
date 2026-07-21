@@ -218,6 +218,15 @@ Shorts are discovered individually, so titles must be hooks, not filing labels:
 - Verified: 108 tests passing (3 new — hashtag stability/diacritics/fallback, prompt bans, prefix
   prepend + cap + absence).
 
+## Weekday publish gate (`posting_days`) `DONE`
+Slots can now be limited to chosen weekdays (campaign timezone): checkboxes in the Distribution
+tab; empty = every day (backwards compatible). Rendering stays eager; `expire_stale_buffers`
+stretches the window to ≥7.5 days for day-gated campaigns so a healthy pre-render isn't destroyed
+while waiting for its publish day. Proposed/filled by the AI campaign designer too.
+- Verified: 112 tests passing (2 new — day gate + publish_due gating both days; stretched expiry
+  keeps a 4-day-old item and still expires a 9-day-old one; form persists days and drops bogus
+  values).
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

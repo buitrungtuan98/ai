@@ -133,6 +133,12 @@ exactly one pre-rendered episode publishes per slot. "One video every night at 2
 `Asia/Ho_Chi_Minh`), falling back to `TIMEZONE` in `.env`. Keep slots ≥ 1 hour apart. No slots =
 publish immediately after each render; review mode = publish on your approval.
 
+**Publish days (weekday gate):** check specific days in the campaign form and the slots fire only
+on those days (campaign timezone) — e.g. slots `21:00` + days Mon/Wed/Fri = three evenings a week.
+All days unchecked = every day. Rendering still runs ahead daily, and day-gated pre-renders are
+kept up to ~a week before expiring (instead of the default 72h) so an episode can wait for its
+publish day.
+
 ## Making the content feel human (persona guide)
 The per-campaign **Persona** section is the single biggest quality lever. What works:
 1. **Persona**: a specific character — region, age, mood, speech habits ("người miền Tây, thân mật,

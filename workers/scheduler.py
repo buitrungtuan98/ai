@@ -47,6 +47,18 @@ def local_now(timezone: str | None = None) -> datetime:
         return datetime.utcnow()
 
 
+# Locale-independent weekday keys (datetime.weekday(): Monday == 0).
+WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+def is_posting_day(days: list[str], now: datetime) -> bool:
+    """True if `now` (already in the campaign's timezone) falls on an allowed publish day.
+    An empty list means every day (backwards compatible)."""
+    if not days:
+        return True
+    return WEEKDAY_KEYS[now.weekday()] in days
+
+
 def is_within_slot(slots: list[str], now: datetime, tolerance_min: int | None = None) -> bool:
     """True if `now` is within `tolerance_min` of any "HH:MM" slot. Empty slots = always allowed."""
     if not slots:
@@ -68,13 +80,23 @@ def is_within_slot(slots: list[str], now: datetime, tolerance_min: int | None = 
 
 
 def expire_stale_buffers(db, *, max_age_hours: int | None = None, now: datetime | None = None) -> int:
-    """Mark `ready` buffer items older than the cutoff as expired and delete their files."""
+    """Mark `ready` buffer items older than the cutoff as expired and delete their files.
+
+    Campaigns with weekday-gated publishing (`posting_days`) get a stretched window (≥ 7.5 days):
+    a healthy pre-render can legitimately wait most of a week for its publish day — expiring it at
+    the default 72h would destroy it before its slot ever arrived."""
     now = now or datetime.utcnow()
     max_age_hours = settings.BUFFER_MAX_AGE_HOURS if max_age_hours is None else max_age_hours
-    cutoff = now.timestamp() - max_age_hours * 3600
+    campaigns = {c.id: c for c in db.scalars(select(Campaign)).all()}
     items = db.scalars(select(BufferPoolItem).where(BufferPoolItem.status == BufferStatus.ready)).all()
     expired = 0
     for item in items:
+        cfg = {}
+        campaign = campaigns.get(item.campaign_id)
+        if campaign is not None:
+            cfg = campaign.config_json or {}
+        item_max_age = max(max_age_hours, 7 * 24 + 12) if cfg.get("posting_days") else max_age_hours
+        cutoff = now.timestamp() - item_max_age * 3600
         created = item.created_at.timestamp() if item.created_at else now.timestamp()
         if created < cutoff:
             for p in (item.video_path, item.thumbnail_path):
@@ -97,7 +119,7 @@ def expire_stale_buffers(db, *, max_age_hours: int | None = None, now: datetime 
                 task.finished_at = now
                 task.error_message = (
                     f"Pre-rendered episode expired before its posting slot (buffer older than "
-                    f"{max_age_hours}h). Use Retry to re-render.")
+                    f"{item_max_age}h). Use Retry to re-render.")
     if expired:
         db.commit()
         logger.info("Expired %d stale buffer item(s)", expired)
@@ -134,6 +156,8 @@ def publish_due_campaign(db, campaign: Campaign, now: datetime | None = None,
     if not slots or not cfg.get("auto_publish", True):
         return None  # continuous mode publishes at render time; review mode publishes on approval
     now = now or local_now(cfg.get("timezone"))
+    if not is_posting_day(cfg.get("posting_days") or [], now):
+        return None  # weekday-gated campaign: today is not a publish day
     if not is_within_slot(slots, now):
         return None
     if _recently_published(db, campaign.id, settings.SLOT_TOLERANCE_MINUTES):

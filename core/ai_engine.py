@@ -289,6 +289,8 @@ class CampaignProposal(BaseModel):
     title_prefix: str = Field(default="", max_length=40,
                               description="Optional short catchy channel mark prepended to titles, e.g. '🔥 SỬ VIỆT |'. Often empty.")
     posting_slots: str = Field(default="", description="One daily slot as HH:MM, or empty.")
+    posting_days: list[Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]] = Field(
+        default_factory=list, description="Days to publish on; EMPTY means every day (the usual choice).")
     rationale: str = Field(default="", max_length=400, description="One sentence on the angle.")
 
 
