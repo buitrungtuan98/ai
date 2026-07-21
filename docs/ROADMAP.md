@@ -227,6 +227,16 @@ while waiting for its publish day. Proposed/filled by the AI campaign designer t
   keeps a 4-day-old item and still expires a 9-day-old one; form persists days and drops bogus
   values).
 
+## Per-campaign video length range (`duration_min_s`/`duration_max_s`) `DONE`
+Target spoken length per episode (10–180s), set in the Core tab (both bounds or none; reversed
+bounds auto-ordered). Enforced in two layers: the scriptwriter gets an explicit seconds + word
+budget (words-per-second heuristic per language, scaled by the campaign's rate_pct), and a
+deterministic post-generation word-count check triggers exactly ONE corrective rewrite when the
+draft misses the range by >20% (no extra Gemini calls when on-target). True duration is still
+measured at TTS time (audio remains ground truth). Proposed by the AI designer.
+- Verified: 113 tests passing (1 new — estimator sanity + rate scaling, prompt budget line,
+  length-fix rewrite fires once and the fixed draft wins; form auto-orders reversed bounds).
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

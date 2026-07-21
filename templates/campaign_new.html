@@ -38,6 +38,17 @@
       </div>
       <div class="form-row"><label>Total episodes</label>
         <input name="total_episodes" type="number" min="1" value="{{ campaign.total_episodes if editing else (source.total_episodes if dup else 10) }}" required></div>
+      <div class="form-row"><label>Video length range in seconds (blank = let the AI decide)</label>
+        <div class="flex" style="gap:8px; align-items:center;">
+          <input name="duration_min_s" type="number" min="10" max="180" placeholder="min, e.g. 30"
+                 value="{{ cfg.get('duration_min_s') or '' }}" style="flex:1">
+          <span>–</span>
+          <input name="duration_max_s" type="number" min="10" max="180" placeholder="max, e.g. 60"
+                 value="{{ cfg.get('duration_max_s') or '' }}" style="flex:1">
+        </div>
+        <p class="hint">Target spoken length per episode (10–180s; ≤60s is the classic Shorts sweet spot,
+          up to 3 min still counts as a Short). The scriptwriter gets a word budget and drafts far outside
+          the range are rewritten once. Set BOTH fields or none.</p></div>
       <div class="form-row"><label>Target language</label>
         <select name="language">
           {% for code, name in [('vi','Vietnamese'), ('en','English'), ('es','Spanish')] %}
@@ -243,6 +254,8 @@
         setVal("topic_name", p.topic_name);
         setVal("total_episodes", p.total_episodes);
         setVal("language", p.language);
+        setVal("duration_min_s", p.duration_min_s || "");
+        setVal("duration_max_s", p.duration_max_s || "");
         setVal("persona", p.persona);
         setVal("style_examples", p.style_examples);
         setVal("catchphrase_open", p.catchphrase_open);
