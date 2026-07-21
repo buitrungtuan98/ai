@@ -270,16 +270,62 @@ def check_daily_minimums(db, now: datetime | None = None) -> int:
     return alerts
 
 
+def send_daily_heartbeat(db, now: datetime | None = None) -> int:
+    """One Telegram line per operator per day: what the factory did in the last 24h plus the
+    quota/disk vitals — so "hands-off" means reading one message, not checking a dashboard.
+    Sent only to users with at least one active campaign. Returns digests sent."""
+    from sqlalchemy import func
+
+    from core.usage import ai_calls_today
+    from database.models import User
+
+    now = now or datetime.utcnow()
+    cutoff = now - timedelta(hours=24)
+    user_ids = set(db.scalars(
+        select(Campaign.user_id).where(Campaign.status == CampaignStatus.active)
+    ).all())
+    if not user_ids:
+        return 0
+    calls = ai_calls_today()
+    budget = settings.GEMINI_DAILY_BUDGET
+    quota_bit = f"{calls}/{budget}" if budget else str(calls)
+    disk = disk_usage_pct(settings.MEDIA_ROOT)
+    sent = 0
+    for uid in user_ids:
+        user = db.get(User, uid)
+        if user is None:
+            continue
+        counts = dict(db.execute(
+            select(Task.status, func.count()).where(
+                Task.user_id == uid, Task.finished_at >= cutoff
+            ).group_by(Task.status)
+        ).all())
+        awaiting = db.scalar(
+            select(func.count()).select_from(Task).where(
+                Task.user_id == uid, Task.status == TaskStatus.AWAITING_REVIEW)
+        ) or 0
+        video_worker._notify(
+            user,
+            f"📊 Factory heartbeat (24h): published {counts.get(TaskStatus.COMPLETED, 0)}, "
+            f"failed {counts.get(TaskStatus.FAILED, 0)}, awaiting review {awaiting}. "
+            f"AI calls today: {quota_bit}. Disk {disk:.0f}%.",
+        )
+        sent += 1
+    return sent
+
+
 def daily_learning_pass(db, now: datetime | None = None) -> dict:
-    """Once-a-day: collect platform stats, re-distill playbooks, and check daily minimums."""
+    """Once-a-day: collect platform stats, re-distill playbooks, check daily minimums, and send
+    the operator heartbeat digest."""
     from services.analytics_service import collect_stats
 
-    result = {"stats_updated": 0, "distilled": 0, "min_alerts": 0}
+    result = {"stats_updated": 0, "distilled": 0, "min_alerts": 0, "heartbeats": 0}
     result["stats_updated"] = collect_stats(db, now=now)
     for campaign in db.scalars(select(Campaign)).all():
         if maybe_distill_campaign(db, campaign, now=now):
             result["distilled"] += 1
     result["min_alerts"] = check_daily_minimums(db, now=now)
+    result["heartbeats"] = send_daily_heartbeat(db, now=now)
     return result
 
 

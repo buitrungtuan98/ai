@@ -45,9 +45,12 @@ class Settings(BaseSettings):
     FIREBASE_WEB_API_KEY: str | None = None
 
     # --- Optional global fallback provider keys (per-user keys take priority) ---
-    # `-latest` alias auto-tracks Google's current flash model, so it never breaks when an older
-    # dated model is retired. Pin a specific version here only if you need reproducibility.
-    GEMINI_MODEL: str = "gemini-flash-latest"
+    # May be a comma-separated FALLBACK CHAIN (first = primary): a retired model or a spent daily
+    # quota fails over to the next entry. `-latest` aliases auto-track current models.
+    GEMINI_MODEL: str = "gemini-flash-lite-latest,gemini-flash-latest"
+    # Your model's free-tier requests/day (see the AI Studio Rate limits page). Powers the
+    # dashboard quota meter + heartbeat warnings. Optional — leave unset to just count calls.
+    GEMINI_DAILY_BUDGET: int | None = None
     GEMINI_API_KEY: str | None = None
     # Free key from freesound.org — enables per-campaign automatic CC0 background music.
     FREESOUND_API_KEY: str | None = None

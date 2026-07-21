@@ -18,21 +18,35 @@ from typing import Literal, TypeVar
 from pydantic import BaseModel, Field, ValidationError
 
 from core.config import settings
+from core.usage import record_ai_call
 
 logger = logging.getLogger(__name__)
 
 Language = Literal["vi", "en", "es"]
 T = TypeVar("T", bound=BaseModel)
 
-DEFAULT_MODEL = settings.GEMINI_MODEL  # swap models via .env, no code change
+# GEMINI_MODEL may be a single model or a comma-separated FALLBACK CHAIN
+# (e.g. "gemini-3.1-flash-lite,gemini-flash-latest"): when a model is retired (404) or its daily
+# free quota is spent, generation automatically falls through to the next one.
+DEFAULT_MODEL = settings.GEMINI_MODEL
 _BACKOFF_BASE_SECONDS = 1.0  # patched to 0 in tests
 _RATE_LIMIT_BACKOFF_SECONDS = 30.0  # per-MINUTE 429s need far longer than the standard backoff
+
+
+def model_chain(model: str) -> list[str]:
+    """Split a (possibly comma-separated) model setting into an ordered fallback chain."""
+    return [m.strip() for m in model.split(",") if m.strip()] or [model]
 
 
 def _is_daily_quota_error(message: str) -> bool:
     """A 429 whose quota_id is the per-DAY free-tier cap. Retrying cannot succeed until the daily
     reset — and every retry burns another request against that same cap."""
     return "429" in message and "PerDay" in message
+
+
+def _is_model_not_found(message: str) -> bool:
+    """A 404 for the model itself (retired/renamed). Deterministic — retrying is pure waste."""
+    return "404" in message and "not found" in message.lower()
 
 
 # ── Output schemas (the single source of truth for shape) ────────────────────
@@ -101,6 +115,7 @@ def _call_gemini(
     """
     import google.generativeai as genai
 
+    record_ai_call()  # quota meter: every attempt counts against the daily budget
     genai.configure(api_key=api_key)
     gen_model = genai.GenerativeModel(
         model_name=model,
@@ -142,8 +157,41 @@ def generate_structured(
 ) -> T:
     """Call Gemini and return a validated instance of `schema`.
 
-    Retries with exponential backoff and a repair turn on JSON/validation errors.
-    """
+    `model` may be a comma-separated fallback chain: a retired model (404) or an exhausted daily
+    quota fails over to the next entry automatically, so a Google-side model retirement or a spent
+    free tier degrades instead of halting the factory."""
+    models = model_chain(model)
+    last: GeminiError | None = None
+    for i, m in enumerate(models):
+        try:
+            return _generate_structured_single(
+                prompt=prompt, schema=schema, api_key=api_key, system_prompt=system_prompt,
+                model=m, temperature=temperature, max_output_tokens=max_output_tokens,
+                max_retries=max_retries,
+            )
+        except GeminiError as exc:
+            msg = str(exc)
+            if i < len(models) - 1 and ("daily quota" in msg or "model not found" in msg):
+                logger.warning("Model %s unavailable — falling back to %s", m, models[i + 1])
+                last = exc
+                continue
+            raise
+    raise last if last is not None else GeminiError("no model in the chain succeeded")
+
+
+def _generate_structured_single(
+    *,
+    prompt: str,
+    schema: type[T],
+    api_key: str,
+    system_prompt: str | None,
+    model: str,
+    temperature: float,
+    max_output_tokens: int,
+    max_retries: int,
+) -> T:
+    """One model's attempt loop: retries with backoff and a repair turn on JSON/validation errors;
+    fails FAST (no retry burn) on deterministic errors — daily quota spent, model not found."""
     schema_hint = json.dumps(schema.model_json_schema(), ensure_ascii=False)
     base_prompt = (
         f"{prompt}\n\n"
@@ -184,6 +232,9 @@ def generate_structured(
                     "Gemini daily quota exhausted — resets ~midnight US-Pacific; see RUNBOOK "
                     f"'Gemini API quota & cost'. {exc}"
                 ) from exc
+            if _is_model_not_found(msg):
+                # Fail FAST: a retired/renamed model 404s deterministically — retrying is waste.
+                raise GeminiError(f"Gemini model not found ({model}) — update GEMINI_MODEL. {exc}") from exc
             rate_limited = "429" in msg
             logger.warning("Gemini call failed (attempt %d/%d): %s", attempt + 1, max_retries, exc)
 
@@ -482,9 +533,10 @@ def _call_gemini_vision(
     import google.generativeai as genai
     from PIL import Image
 
+    record_ai_call()  # quota meter
     genai.configure(api_key=api_key)
     gen_model = genai.GenerativeModel(
-        model_name=model,
+        model_name=model_chain(model)[0],  # vision runs single-shot on the chain's primary model
         generation_config={
             "temperature": temperature,
             "max_output_tokens": max_output_tokens,

@@ -45,8 +45,9 @@ def test_daily_quota_429_fails_fast(monkeypatch):
 
     monkeypatch.setattr(ai, "_call_gemini", quota_hit)
     with pytest.raises(GeminiError, match="daily quota"):
-        generate_structured(prompt="x", schema=VideoScript, api_key="k")
-    assert len(calls) == 1  # fail fast — no wasted retries
+        # single model (no chain): the point is zero retries within one model
+        generate_structured(prompt="x", schema=VideoScript, api_key="k", model="one-model")
+    assert len(calls) == 1  # fail fast — no wasted retries against the daily cap
 
 
 def test_per_minute_429_still_retries(monkeypatch):
@@ -66,6 +67,58 @@ def test_per_minute_429_still_retries(monkeypatch):
     monkeypatch.setattr(ai, "_call_gemini", flaky)
     assert generate_structured(prompt="x", schema=VideoScript, api_key="k").topic == "Space"
     assert not seq  # second attempt consumed
+
+
+def test_model_fallback_chain(monkeypatch):
+    """A retired model (404) or spent daily quota fails over to the next model in the chain —
+    each dead model is tried exactly ONCE (fail fast), and the working model completes."""
+    import core.ai_engine as ai
+    from core.ai_engine import GeminiError, VideoScript, generate_structured
+
+    calls = []
+
+    def by_model(**k):
+        calls.append(k["model"])
+        if k["model"] == "retired-model":
+            raise RuntimeError("404 models/retired-model is not found for API version v1beta")
+        if k["model"] == "quota-model":
+            raise RuntimeError('429 quota_id: "GenerateRequestsPerDayPerProjectPerModel-FreeTier"')
+        return json.dumps(VALID)
+
+    monkeypatch.setattr(ai, "_call_gemini", by_model)
+    res = generate_structured(prompt="x", schema=VideoScript, api_key="k",
+                              model="retired-model,quota-model,good-model")
+    assert res.topic == "Space"
+    assert calls == ["retired-model", "quota-model", "good-model"]  # one attempt per dead model
+
+    # A chain where everything is dead surfaces the last failure.
+    calls.clear()
+    with pytest.raises(GeminiError):
+        generate_structured(prompt="x", schema=VideoScript, api_key="k",
+                            model="retired-model,quota-model")
+    assert calls == ["retired-model", "quota-model"]
+
+
+def test_ai_call_counter(monkeypatch):
+    """Every Gemini attempt is metered in Redis; a Redis outage never breaks the call path."""
+    from core import usage
+
+    assert usage.ai_calls_today() >= 0  # readable with the test fakeredis
+    before = usage.ai_calls_today()
+    usage.record_ai_call()
+    usage.record_ai_call(2)
+    assert usage.ai_calls_today() == before + 3
+
+    # Fail-silent: a broken Redis must not raise from either function.
+    class Boom:
+        def __getattr__(self, name):
+            raise ConnectionError("redis down")
+
+    import workers.task_queue as tq
+
+    monkeypatch.setattr(tq, "conn", Boom())
+    usage.record_ai_call()                 # no exception
+    assert usage.ai_calls_today() == 0     # degrades to 0, never raises
 
 
 def test_propose_campaign_drops_invalid_voice(monkeypatch):

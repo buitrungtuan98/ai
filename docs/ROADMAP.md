@@ -189,6 +189,21 @@ For running several campaigns (and accounts) side by side on one shared Gemini q
 - Verified: 98 tests passing (2 new — cap beats buffer size + same-day re-hydrate creates none;
   watchdog alerts the behind campaign and stays silent for the on-track one).
 
+## Observability & resilience — quota meter, heartbeat digest, model fallback `DONE`
+The factory now tells the operator before it breaks:
+- **Quota meter** (`core/usage.py`): every Gemini call attempt is counted in Redis, keyed to
+  Google's Pacific quota day. The dashboard health strip shows "AI calls today: N / budget"
+  (budget = optional `GEMINI_DAILY_BUDGET` env) and turns amber at 80%.
+- **Daily heartbeat digest**: one Telegram line per operator per day — published / failed /
+  awaiting-review in the last 24h, AI calls vs budget, disk %. Runs in the daily pass.
+- **Model fallback chain**: `GEMINI_MODEL` accepts a comma-separated chain
+  (e.g. `gemini-3.1-flash-lite,gemini-flash-latest`); a retired model (404, fail-fast) or a spent
+  daily quota fails over to the next entry instead of halting generation. Vision calls use the
+  chain's primary. New default: `gemini-flash-lite-latest,gemini-flash-latest`.
+- Verified: 101 tests passing (4 new — chain fallback order + all-dead surfaces error, counter
+  increments + fail-silent on Redis outage, heartbeat contents; quota fail-fast pinned to a
+  single model), ruff clean.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

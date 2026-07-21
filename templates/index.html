@@ -19,6 +19,8 @@
   <span class="hitem">Buffer: <b>{{ health.buffer_ready }}</b> pre-rendered</span>
   <span class="hitem {{ 'warn' if health.disk_pct and health.disk_pct >= 85 }}">
     Disk: <b>{{ health.disk_pct ~ '%' if health.disk_pct is not none else '—' }}</b> used</span>
+  <span class="hitem {{ 'warn' if health.ai_budget and health.ai_calls >= health.ai_budget * 0.8 }}">
+    AI calls today: <b>{{ health.ai_calls }}{{ ' / ' ~ health.ai_budget if health.ai_budget }}</b></span>
 </div>
 
 {% if counts.failed > 0 %}

@@ -490,6 +490,39 @@ def test_min_per_day_watchdog_alerts(session, user, channel, monkeypatch):
     assert len(alerts) == 1 and "1/2" in alerts[0] and "Behind" in alerts[0]
 
 
+def test_daily_heartbeat_digest(session, user, channel, monkeypatch):
+    """Operators with an active campaign get one daily Telegram digest of the last 24h."""
+    from datetime import datetime, timedelta
+
+    from database.models import Campaign, Task
+    from database.types import CampaignStatus, TaskStatus
+    from workers import scheduler as sch
+    from workers import video_worker
+
+    now = datetime.utcnow()
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="HB", total_episodes=9,
+                   status=CampaignStatus.active)
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    session.add_all([
+        Task(campaign_id=cam.id, user_id=user.id, episode_number=1,
+             status=TaskStatus.COMPLETED, finished_at=now - timedelta(hours=2)),
+        Task(campaign_id=cam.id, user_id=user.id, episode_number=2,
+             status=TaskStatus.FAILED, finished_at=now - timedelta(hours=1)),
+        Task(campaign_id=cam.id, user_id=user.id, episode_number=3,
+             status=TaskStatus.AWAITING_REVIEW),
+    ])
+    session.commit()
+
+    digests = []
+    monkeypatch.setattr(video_worker, "_notify", lambda u, msg: digests.append(msg))
+    assert sch.send_daily_heartbeat(session, now=now) == 1
+    assert len(digests) == 1
+    assert "published 1" in digests[0] and "failed 1" in digests[0] and "awaiting review 1" in digests[0]
+    assert "AI calls today" in digests[0]
+
+
 def test_hydrate_respects_campaign_buffer_size(session, user, channel):
     from database.models import Campaign, Task
     from database.types import CampaignStatus

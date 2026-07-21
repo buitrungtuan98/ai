@@ -228,6 +228,12 @@ box. How to pick a model and stay within quota:
 - **For serious volume, enable billing** on the Google Cloud project. Flash models cost fractions
   of a cent per call — dozens of QC'd videos/day is cents/month — and limits jump into the
   thousands. The $0 goal holds for the infrastructure (Oracle box, Cloudflare, GHCR).
+- **Watch the meter, not the failures:** the dashboard health strip shows **AI calls today**
+  (counted per Google's Pacific quota day). Set `GEMINI_DAILY_BUDGET` in `.env` to your model's
+  RPD and the chip turns amber at 80% — and the daily Telegram heartbeat includes the same number.
+- **Model fallback chain:** `GEMINI_MODEL` accepts a comma-separated list, first = primary
+  (e.g. `GEMINI_MODEL=gemini-3.1-flash-lite,gemini-flash-latest`). If the primary is retired
+  (404) or its daily quota is spent, generation automatically continues on the next model.
 
 ## Running multiple campaigns / accounts on one quota (daily pacing)
 Campaigns already run in parallel (each channel/account gets its own campaigns, slots, timezone).
