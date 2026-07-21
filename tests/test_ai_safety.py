@@ -28,6 +28,46 @@ def _no_sleep(monkeypatch):
     monkeypatch.setattr(ai, "_BACKOFF_BASE_SECONDS", 0)
 
 
+def test_daily_quota_429_fails_fast(monkeypatch):
+    """A per-DAY quota 429 must NOT be retried — each retry burns another request against the
+    already-exhausted daily cap. One attempt, then a clear error."""
+    import core.ai_engine as ai
+    from core.ai_engine import GeminiError, VideoScript, generate_structured
+
+    calls = []
+
+    def quota_hit(**k):
+        calls.append(1)
+        raise RuntimeError(
+            "429 You exceeded your current quota. "
+            'quota_id: "GenerateRequestsPerDayPerProjectPerModel-FreeTier", limit: 20'
+        )
+
+    monkeypatch.setattr(ai, "_call_gemini", quota_hit)
+    with pytest.raises(GeminiError, match="daily quota"):
+        generate_structured(prompt="x", schema=VideoScript, api_key="k")
+    assert len(calls) == 1  # fail fast — no wasted retries
+
+
+def test_per_minute_429_still_retries(monkeypatch):
+    """Per-MINUTE rate limits recover, so those 429s stay retryable."""
+    import core.ai_engine as ai
+    from core.ai_engine import VideoScript, generate_structured
+
+    seq: list = [RuntimeError('429 quota_id: "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"'),
+                 json.dumps(VALID)]
+
+    def flaky(**k):
+        item = seq.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setattr(ai, "_call_gemini", flaky)
+    assert generate_structured(prompt="x", schema=VideoScript, api_key="k").topic == "Space"
+    assert not seq  # second attempt consumed
+
+
 def test_propose_campaign_drops_invalid_voice(monkeypatch):
     """The designer validates the voice against the curated list — an invented one falls back to
     the default ('') so TTS never gets an unusable voice name."""

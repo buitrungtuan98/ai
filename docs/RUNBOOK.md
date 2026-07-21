@@ -209,23 +209,25 @@ repo's GHCR package (Packages tab) or the commit history. (A manual run needs a 
 
 ## Gemini API quota & cost (free tier vs billing)
 Generation runs on the Gemini API, and the **free tier is the real throughput ceiling** — not the
-box. Key facts (verified against a live account):
-- The free tier is a tiny **per-day, per-model** cap that **varies by account and shrinks over
-  time** — do not assume a number. In practice only the **current** flash model carries any free
-  quota (observed: `gemini-3.5-flash` ≈ **20 requests/day**), and **older models can be `limit: 0`**
-  (e.g. `gemini-2.0-flash` returned zero free quota). So **switching models is not a reliable way
-  to get more free quota** — keep `GEMINI_MODEL=gemini-flash-latest`. Quotas reset daily
-  (~midnight US-Pacific).
+box. How to pick a model and stay within quota:
+- **Look up YOUR account's real limits** — AI Studio → the **Rate limits** page (ai.dev/rate-limit)
+  lists RPM / TPM / **RPD per model** for your account. Limits differ per model and per account and
+  change over time — never assume a number.
+- **Pick the model with the largest RPD.** Observed on a live account (2026-07): the flagship
+  flash models each had **20 req/day** (and some older ones **0**), while **`gemini-3.1-flash-lite`
+  had 500 req/day** — 25× more. Flash-lite quality is fine for short spoken scripts + structured
+  JSON, it barely "thinks" (fewer tokens, no truncation risk), and 500/day supports **~60 fully
+  Auto-QC'd episodes/day free**. Set it in `.env`: `GEMINI_MODEL=gemini-3.1-flash-lite`.
 - **Calls per episode add up.** Roughly: 1 (script) + 1 (self-critique, if on) + ~1 per footage
-  candidate vetted + 1 (final Auto-QC) — an Auto-QC episode can be **~8 calls**. To live within the
-  free ~20/day, turn **Auto-QC** and **Self-critique** off per campaign → **~1 call/episode**
-  (~15 videos/day). A `429 … GenerateRequestsPerDayPerProjectPerModel-FreeTier` in the worker log
-  means the daily cap is hit — reduce calls or wait for the reset.
-- **For any real volume with QC, enable billing** on the Google Cloud project. Flash is extremely
-  cheap (fractions of a cent per call), and billing raises the daily limit into the thousands —
-  full Auto-QC on dozens of videos/day costs on the order of cents/month. The $0 goal holds for the
-  infrastructure (Oracle box, Cloudflare, GHCR); Gemini's free tier alone cannot sustain automated
-  volume with QC.
+  candidate vetted + 1 (final Auto-QC) — an Auto-QC episode can be **~8 calls**; with QC and
+  critique off it's **~1 call**. Turn those off per campaign if you're squeezed.
+- **Quota-efficient failures:** a per-DAY quota 429 now **fails fast** (no retry burn — retrying an
+  exhausted daily cap just wastes more of it), while per-minute 429s retry after a longer backoff.
+  A `429 … PerDay … FreeTier` in the worker log = daily cap hit; wait for the reset
+  (~midnight US-Pacific) or switch to a bigger-RPD model.
+- **For serious volume, enable billing** on the Google Cloud project. Flash models cost fractions
+  of a cent per call — dozens of QC'd videos/day is cents/month — and limits jump into the
+  thousands. The $0 goal holds for the infrastructure (Oracle box, Cloudflare, GHCR).
 
 ## Operational notes from the hardening review (ADR-014)
 - **`WORK_ROOT` / `MEDIA_ROOT` paths:** keep them free of spaces and quotes (the defaults

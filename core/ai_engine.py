@@ -26,6 +26,13 @@ T = TypeVar("T", bound=BaseModel)
 
 DEFAULT_MODEL = settings.GEMINI_MODEL  # swap models via .env, no code change
 _BACKOFF_BASE_SECONDS = 1.0  # patched to 0 in tests
+_RATE_LIMIT_BACKOFF_SECONDS = 30.0  # per-MINUTE 429s need far longer than the standard backoff
+
+
+def _is_daily_quota_error(message: str) -> bool:
+    """A 429 whose quota_id is the per-DAY free-tier cap. Retrying cannot succeed until the daily
+    reset — and every retry burns another request against that same cap."""
+    return "429" in message and "PerDay" in message
 
 
 # ── Output schemas (the single source of truth for shape) ────────────────────
@@ -147,6 +154,7 @@ def generate_structured(
     convo = base_prompt
 
     for attempt in range(max_retries):
+        rate_limited = False
         try:
             raw = _call_gemini(
                 api_key=api_key,
@@ -168,10 +176,24 @@ def generate_structured(
             )
         except Exception as exc:  # noqa: BLE001 — transient API/network errors are retryable
             last_error = exc
+            msg = str(exc)
+            if _is_daily_quota_error(msg):
+                # Fail FAST: the daily free-tier cap is spent, so retries cannot succeed today and
+                # each one would burn yet another request against the same cap (quota efficiency).
+                raise GeminiError(
+                    "Gemini daily quota exhausted — resets ~midnight US-Pacific; see RUNBOOK "
+                    f"'Gemini API quota & cost'. {exc}"
+                ) from exc
+            rate_limited = "429" in msg
             logger.warning("Gemini call failed (attempt %d/%d): %s", attempt + 1, max_retries, exc)
 
         if attempt < max_retries - 1 and _BACKOFF_BASE_SECONDS:
-            time.sleep(_BACKOFF_BASE_SECONDS * (2**attempt))
+            delay = _BACKOFF_BASE_SECONDS * (2**attempt)
+            if rate_limited:
+                # Per-minute rate limits (RPM/TPM) recover on their own — but only if we wait
+                # meaningfully longer than the 1-2s parse-error backoff.
+                delay = max(delay, _RATE_LIMIT_BACKOFF_SECONDS)
+            time.sleep(delay)
 
     raise GeminiError(f"generate_structured failed after {max_retries} attempts: {last_error}")
 
