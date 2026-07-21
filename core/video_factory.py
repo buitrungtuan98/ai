@@ -81,7 +81,7 @@ _MOTION_MAX_ZOOM = 1.08
 # Per-campaign colour grades, baked into the one scene encode (no extra pass). Applied to the
 # footage before mirror/tint/watermark/captions so text is never graded.
 COLOR_GRADES: dict[str, str] = {
-    "cinematic": "eq=contrast=1.06:saturation=0.92,colorbalance=bs=0.06:ms=0.03:hs=-0.03",
+    "cinematic": "eq=contrast=1.06:saturation=0.92,colorbalance=bs=0.06:bm=0.03:bh=-0.03",
     "warm": "eq=contrast=1.03:saturation=1.08,colorbalance=rs=0.05:rm=0.03:bs=-0.04",
     "cool": "eq=contrast=1.05:saturation=0.95,colorbalance=bs=0.07:bm=0.04:rs=-0.03",
     "vivid": "eq=contrast=1.08:saturation=1.25",

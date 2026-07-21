@@ -66,6 +66,39 @@ def test_scene_render_and_concat_copy(tmp_path):
     assert media.probe_duration(master) > dur * 1.5  # two scenes stitched
 
 
+def _assert_filter_valid(graph: str) -> None:
+    """One lavfi frame through the filter — an invalid option name fails instantly."""
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=64x64:rate=10",
+         "-frames:v", "1", "-vf", graph, "-f", "null", "-"],
+        check=True, capture_output=True,
+    )
+
+
+def test_color_grades_are_valid_ffmpeg_filters():
+    """Every colour grade must parse on the REAL ffmpeg — unit tests only assert the string is in
+    the graph, which let an invalid colorbalance option (ms/hs) ship and fail every render that
+    picked that grade."""
+    from core.video_factory import COLOR_GRADES
+
+    for name, graph in COLOR_GRADES.items():
+        try:
+            _assert_filter_valid(graph)
+        except subprocess.CalledProcessError as exc:  # pragma: no cover - diagnostic
+            raise AssertionError(f"grade {name!r} rejected by ffmpeg: {exc.stderr.decode()[-300:]}")
+
+
+def test_motion_filters_are_valid_ffmpeg_filters():
+    from core.video_factory import MOTION_EFFECTS, motion_filter
+
+    for effect in MOTION_EFFECTS:
+        graph = motion_filter(effect, 2.0)
+        try:
+            _assert_filter_valid(graph)
+        except subprocess.CalledProcessError as exc:  # pragma: no cover - diagnostic
+            raise AssertionError(f"motion {effect!r} rejected by ffmpeg: {exc.stderr.decode()[-300:]}")
+
+
 def test_workspace_cleanup_removes_dir(tmp_path):
     from core.cleanup import RenderWorkspace
 
