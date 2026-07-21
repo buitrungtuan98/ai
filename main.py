@@ -640,7 +640,7 @@ def assets_page(request: Request, user: CurrentUser, db: DbDep,
         {"request": request, "user": user, "items": items, "nav": "assets",
          "camp_by_id": {c.id: c for c in campaigns}, "previewable": previewable,
          # Post-action feedback (whitelisted — never echo arbitrary input back into the page).
-         "flash": flash if flash in ("publish", "rerender", "rejected") else "",
+         "flash": flash if flash in ("publish", "rerender", "rejected", "missing") else "",
          "flash_reason": flash_reason[:200]},
     )
 
