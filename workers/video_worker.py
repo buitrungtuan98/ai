@@ -379,6 +379,7 @@ def render_task(task_id: int) -> None:
                 music_path=music_path,
                 music_volume=float(cfg.get("music_volume", 0.15)),
                 ab_testing=bool(cfg.get("ab_testing", True)),
+                title_prefix=cfg.get("title_prefix"),
                 vet_clip=vet_clip,
                 on_progress=lambda p: set_progress(task_id, 10 + p * 0.8),
             )

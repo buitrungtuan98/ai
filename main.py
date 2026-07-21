@@ -408,6 +408,7 @@ def _build_campaign_config(
     music_mode: str = "none", music_mood: str = "",
     color_grade: str = "", auto_qc: str = "on",
     max_per_day: str = "", min_per_day: str = "",
+    title_prefix: str = "",
 ) -> dict:
     """One place turns the campaign form into config_json (DRY: shared by create and edit)."""
     config: dict = {
@@ -442,6 +443,9 @@ def _build_campaign_config(
         # published-minimum watchdog that alerts (it cannot force publishes).
         "max_per_day": int(max_per_day) if max_per_day.strip().isdigit() and int(max_per_day) > 0 else None,
         "min_per_day": int(min_per_day) if min_per_day.strip().isdigit() and int(min_per_day) > 0 else None,
+        # Optional channel brand mark prepended to every AI title (titles themselves never carry
+        # the series name / episode number — they must stand alone as hooks).
+        "title_prefix": title_prefix.strip()[:40] or None,
     }
     if watermark_path or (tint_color and tint_opacity > 0) or mirror:
         config["branding"] = {
@@ -491,6 +495,7 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
     auto_qc: str = Form("on"),
     max_per_day: str = Form(""),
     min_per_day: str = Form(""),
+    title_prefix: str = Form(""),
 ) -> dict:
     return {
         "topic_name": topic_name, "channel_id": channel_id, "total_episodes": total_episodes,
@@ -506,6 +511,7 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
             music_mode=music_mode, music_mood=music_mood,
             color_grade=color_grade, auto_qc=auto_qc,
             max_per_day=max_per_day, min_per_day=min_per_day,
+            title_prefix=title_prefix,
         ),
     }
 

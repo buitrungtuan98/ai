@@ -204,6 +204,20 @@ The factory now tells the operator before it breaks:
   increments + fail-silent on Redis outage, heartbeat contents; quota fail-fast pinned to a
   single model), ruff clean.
 
+## Catchy standalone titles + series hashtag + brand prefix `DONE`
+Shorts are discovered individually, so titles must be hooks, not filing labels:
+- **Title rules** (prompt-enforced): never the series/campaign name, never episode numbering
+  ('Ep 5' / 'Tập 3' / 'Part 2'); the hook lands in the first 40 chars; 3 variants take genuinely
+  different angles.
+- **Series identity moved to the description**: a stable, code-computed ASCII hashtag
+  (`series_hashtag()`, e.g. `#LichSuVNNhaTran`) is injected into the prompt verbatim so every
+  episode carries the same tag — the series stays findable without polluting titles.
+- **Optional catchy brand prefix** per campaign (`title_prefix`, e.g. `🔥 SỬ VIỆT |`) prepended at
+  metadata-pick time with the 100-char YouTube cap held; proposed by the AI designer, editable in
+  the form (Distribution tab).
+- Verified: 108 tests passing (3 new — hashtag stability/diacritics/fallback, prompt bans, prefix
+  prepend + cap + absence).
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

@@ -184,6 +184,10 @@
         <p class="hint">A watchdog, not a guarantee: if this campaign publishes fewer episodes than this in 24h
           (failures, quota…), you get a Telegram alert instead of silence.</p></div>
       <div class="form-row"><label><input type="checkbox" name="ab_testing" style="width:auto" {{ 'checked' if cfg.get('ab_testing', true) }}> Enable A/B metadata testing (rotate 3 title/description variants)</label></div>
+      <div class="form-row"><label>Catchy title prefix (optional channel brand mark)</label>
+        <input name="title_prefix" maxlength="40" placeholder="🔥 SỬ VIỆT |" value="{{ cfg.get('title_prefix') or '' }}">
+        <p class="hint">Prepended to every video title. Titles themselves are standalone hooks — the AI never puts the
+          campaign name or episode number in them (the series stays findable via a stable hashtag in the description).</p></div>
       <div class="form-row"><label>Pinned comment / CTA</label>
         <textarea name="cta" placeholder="👉 Follow for daily shorts!">{{ cfg.get('cta') or '' }}</textarea></div>
     </div>
@@ -244,6 +248,7 @@
         setVal("music_mood", p.music_mood);
         setVal("privacy", p.privacy);
         setVal("cta", p.cta);
+        setVal("title_prefix", p.title_prefix);
         setVal("posting_slots", p.posting_slots);
         const ab = form.elements["ab_testing"];
         if (ab) ab.checked = !!p.ab_testing;
