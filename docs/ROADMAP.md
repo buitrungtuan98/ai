@@ -237,6 +237,39 @@ measured at TTS time (audio remains ground truth). Proposed by the AI designer.
 - Verified: 113 tests passing (1 new — estimator sanity + rate scaling, prompt budget line,
   length-fix rewrite fires once and the fixed draft wins; form auto-orders reversed bounds).
 
+## Kaizen batch — affiliate links, script preview, calendar, batched QC `DONE`
+- **Affiliate monetization**: per-campaign `affiliate_url` + `affiliate_label` (http(s)-validated)
+  auto-appended to every description AND pinned comment, always with an "(affiliate)" disclosure.
+- **Script preview (dry run)**: `POST /campaigns/preview-script` + a form button — generate one
+  script from the CURRENT (unsaved) form values, see scenes + estimated spoken seconds; 1 AI call,
+  nothing rendered/stored. Makes persona tuning a 10-second loop.
+- **Content calendar** (`/calendar`): 7-day grid of upcoming slots per active campaign (weekday
+  gate + campaign timezone aware) with pre-rendered runway counts; continuous/review campaigns
+  listed separately.
+- **Batched footage vetting**: `produce()` restructured into prep→vet→render phases; the whole
+  episode's lead candidates are judged in ONE vision call (rejects swap to candidate #2, verified
+  in one follow-up) → **≤2 vetting calls/episode instead of ~1/scene**; a QC'd episode now costs
+  ~4-5 Gemini calls (was ~8). All fail-open.
+- Verified: 118 tests passing (6 new), ruff clean, docs guard green.
+
+## Kaizen batch 2 — circuit breaker, closed A/B loop, grammar + voice QC `DONE`
+- **Failure circuit breaker**: 3 consecutive failed episodes flip the campaign to `failed`
+  (hydration/slot publishing skip it) + ONE Telegram alert with resume instructions — a systemic
+  fault (dead key, revoked token, spent quota) no longer burns API calls and alert noise all
+  night. ▶ Start resumes; a still-queued episode that succeeds anyway self-heals it (ADR-016).
+- **Closed A/B loop**: the metadata variant (A/B/C) that actually went live is recorded on the
+  Task at publish time (`ab_variant` column); the Performance page adds an "A/B Variant Results"
+  card (episodes measured, avg retention, avg views per variant) + a per-episode variant column.
+- **Grammar QC**: the existing critic pass gains a `grammar_score` dimension and its system
+  prompt demands a rewrite on ANY spelling/grammar/diacritics error (subtitles are the narration
+  verbatim — a typo is burned into every frame). Zero extra API calls.
+- **Voice QC**, two layers: (1) deterministic `voice_check` after each scene's TTS (ffmpeg
+  volumedetect + duration sanity; silent/truncated audio → one re-synthesis, then a loud
+  failure) — zero API cost, fails closed; (2) the final-QC vision call now attaches the master's
+  audio track (ADTS stream copy) so the SAME Gemini call also judges voice clarity, language and
+  music balance — zero extra API calls, falls back to frames-only if extraction fails.
+- Verified: 126 tests passing (8 new), ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

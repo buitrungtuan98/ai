@@ -96,3 +96,10 @@ def run_ffmpeg(
 def extract_frame(video_path: str, out_path: str, at_seconds: float) -> None:
     """Grab a single frame (used for thumbnails)."""
     run_ffmpeg(["-ss", f"{at_seconds:.2f}", "-i", video_path, "-frames:v", "1", "-q:v", "2", out_path])
+
+
+def extract_audio(video_path: str, out_path: str) -> None:
+    """Copy the audio track out of a finished master without re-encoding (used by audio-aware
+    final QC). Masters carry AAC audio, so an `.aac` out_path yields a raw ADTS stream — one of
+    the audio formats Gemini accepts inline."""
+    run_ffmpeg(["-i", video_path, "-vn", "-acodec", "copy", "-f", "adts", out_path])

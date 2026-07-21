@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Calendar · AI Video Factory{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>Content Calendar</h1>
+  <p class="subtitle">Upcoming posting slots for the next 7 days. Each row is computed in its own
+    campaign's timezone; the header dates use the server timezone.</p></div></div>
+
+{% if slotted %}
+<div class="card" style="overflow-x:auto;">
+  <table style="width:100%; border-collapse:collapse; font-size:14px;">
+    <thead>
+      <tr>
+        <th style="text-align:left; padding:8px;">Campaign</th>
+        {% for h in day_headers %}<th style="padding:8px;">{{ h }}</th>{% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in slotted %}
+      <tr style="border-top:1px solid #2a2f3a;">
+        <td style="padding:8px; white-space:nowrap;">
+          <b>{{ row.campaign.topic_name }}</b><br>
+          <span class="hint">{{ row.tz }} · Ep {{ row.campaign.current_episode }}/{{ row.campaign.total_episodes }}
+            · <b>{{ row.ready }}</b> pre-rendered</span>
+        </td>
+        {% for times in row.cells %}
+        <td style="padding:8px; text-align:center; {{ 'opacity:.35;' if not times }}">
+          {{ times|join(', ') if times else '—' }}
+        </td>
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="hint" style="margin-top:10px;">A slot publishes only if a pre-rendered episode is ready —
+    the <b>pre-rendered</b> count shows the runway. — = weekday gate (no publishing that day).</p>
+</div>
+{% endif %}
+
+{% if unslotted %}
+<div class="card mt">
+  <h3>Not slot-scheduled</h3>
+  {% for row in unslotted %}
+  <p class="meta">{{ row.campaign.topic_name }} — {{ 'Review mode: episodes wait in the Asset Pool for your approval'
+    if row.mode == 'review' else 'Continuous mode: publishes immediately after each render' }}.</p>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if not slotted and not unslotted %}
+<div class="empty">No active campaigns. <a href="/campaigns/new">Create one →</a></div>
+{% endif %}
+{% endblock %}

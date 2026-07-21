@@ -17,6 +17,27 @@ def probe_duration(path: str) -> float:
     return float(out.stdout.strip())
 
 
+def probe_audio_stats(path: str) -> dict:
+    """Return {'mean_volume_db', 'max_volume_db'} (floats, dBFS; None if undetectable) via
+    ffmpeg's volumedetect filter — the deterministic basis for the voice sanity check."""
+    out = subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-nostats", "-i", path,
+            "-map", "0:a:0", "-af", "volumedetect", "-f", "null", "-",
+        ],
+        capture_output=True, text=True, check=True,
+    )
+    stats: dict = {"mean_volume_db": None, "max_volume_db": None}
+    for line in out.stderr.splitlines():  # volumedetect reports on stderr
+        for key, marker in (("mean_volume_db", "mean_volume:"), ("max_volume_db", "max_volume:")):
+            if marker in line:
+                try:
+                    stats[key] = float(line.split(marker, 1)[1].replace("dB", "").strip())
+                except ValueError:
+                    pass
+    return stats
+
+
 def probe_video_meta(path: str) -> dict:
     """Return {width, height, duration, codec, fps} for the first video stream."""
     out = subprocess.run(

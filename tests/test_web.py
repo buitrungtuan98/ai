@@ -174,6 +174,69 @@ def test_rerender_discards_and_requeues(client, monkeypatch, tmp_path):
     db.close()
 
 
+def test_preview_script_route(client, monkeypatch):
+    """The dry-run returns scenes + estimated duration from the current form values (1 AI call,
+    nothing rendered or stored)."""
+    from core import ai_engine
+    from core.config import settings
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "k")
+    captured = {}
+
+    def fake_generate(**kwargs):
+        captured.update(kwargs)
+        from core.ai_engine import VideoScript
+
+        return VideoScript(
+            language="vi", topic="ma", synopsis="Chuyện chiếc ghe",
+            scenes=[{"index": i, "narration": "mười từ " * 5, "pexels_keywords": ["river"]}
+                    for i in range(3)],
+            metadata_variations=[{"variant": v, "title": "Nghe kỹ nè", "description": "d",
+                                  "tags": ["a", "b", "c"]} for v in "ABC"],
+        )
+
+    monkeypatch.setattr(ai_engine, "generate_script", lambda **k: fake_generate(**k))
+    r = client.post("/campaigns/preview-script",
+                    data={"topic_name": "chuyện ma", "language": "vi", "persona": "Chú Ba"})
+    assert r.status_code == 200
+    j = r.json()
+    assert len(j["scenes"]) == 3 and j["title"] == "Nghe kỹ nè" and j["est_seconds"] > 0
+    assert captured["persona"] == "Chú Ba" and captured["self_critique"] is False
+
+    # No topic → friendly 400, no AI call.
+    assert client.post("/campaigns/preview-script", data={"topic_name": ""}).status_code == 400
+
+
+def test_calendar_page_and_slot_cells(client):
+    """The calendar shows slot times on allowed days and dashes on gated days."""
+
+    import main
+    from database.db_session import SessionLocal
+    from database.models import Campaign, Channel
+    from database.types import CampaignStatus
+    from workers.scheduler import WEEKDAY_KEYS, local_now
+
+    client.post("/channels/facebook", data={"channel_name": "P", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    db = SessionLocal()
+    ch = db.query(Channel).first()
+    today_key = WEEKDAY_KEYS[local_now().weekday()]
+    cam = Campaign(user_id=ch.user_id, channel_id=ch.id, topic_name="CalCam", total_episodes=5,
+                   status=CampaignStatus.active,
+                   config_json={"posting_slots": ["21:00"], "posting_days": [today_key]})
+    db.add(cam)
+    db.commit()
+    db.refresh(cam)
+
+    cells = main.upcoming_slot_cells(cam)
+    assert cells[0] == ["21:00"]                       # today is an allowed day
+    assert [] in cells                                  # other days are gated off
+    db.close()
+
+    page = client.get("/calendar")
+    assert page.status_code == 200 and "CalCam" in page.text and "21:00" in page.text
+
+
 def test_propose_campaign_route(client, monkeypatch):
     """The AI designer returns a full config as JSON for the form to fill (nothing is saved)."""
     from core import ai_engine
@@ -433,6 +496,49 @@ def test_performance_page_and_reset(client):
     db = SessionLocal()
     assert db.get(Campaign, cam.id).learning_json is None
     db.close()
+
+
+def test_ab_variant_summary_closes_the_loop():
+    """Per-variant aggregation: only episodes with BOTH a recorded variant and stats count;
+    metrics average within each variant so the operator sees which style actually retains."""
+    from types import SimpleNamespace
+
+    from main import ab_variant_summary
+
+    episodes = [
+        SimpleNamespace(ab_variant="A", stats_json={"avg_pct_viewed": 60, "views": 100}),
+        SimpleNamespace(ab_variant="A", stats_json={"avg_pct_viewed": 50, "views": 300}),
+        SimpleNamespace(ab_variant="B", stats_json={"avg_pct_viewed": 70}),      # no view count yet
+        SimpleNamespace(ab_variant="C", stats_json=None),                        # no stats yet
+        SimpleNamespace(ab_variant=None, stats_json={"views": 5}),               # pre-feature episode
+    ]
+    summary = ab_variant_summary(episodes)
+    assert [s["variant"] for s in summary] == ["A", "B"]
+    assert summary[0] == {"variant": "A", "episodes": 2, "avg_retention": 55.0, "avg_views": 200}
+    assert summary[1]["avg_retention"] == 70.0 and summary[1]["avg_views"] is None
+    assert ab_variant_summary([]) == []
+
+
+def test_performance_page_shows_variant_results(client):
+    from database.db_session import SessionLocal
+    from database.models import Task
+    from database.types import TaskStatus
+
+    cam = _seed_campaign(client)
+    db = SessionLocal()
+    db.add_all([
+        Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=1, ab_variant="A",
+             status=TaskStatus.COMPLETED, stats_json={"avg_pct_viewed": 62.0, "views": 500}),
+        Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=2, ab_variant="B",
+             status=TaskStatus.COMPLETED, stats_json={"avg_pct_viewed": 48.0, "views": 200}),
+    ])
+    db.commit()
+    db.close()
+
+    page = client.get(f"/campaigns/{cam.id}/performance")
+    assert page.status_code == 200
+    assert "A/B Variant Results" in page.text
+    assert "62.0%" in page.text and "48.0%" in page.text
 
 
 def test_asset_stream_404s(client, tmp_path):

@@ -96,6 +96,7 @@ def test_render_task_full_flow_and_failure(session, user, channel, monkeypatch):
     assert t.published_video_id == "vid-1"
     assert t.published_url and "vid-1" in t.published_url
     assert t.started_at is not None and t.finished_at is not None
+    assert t.ab_variant == "A"  # closed A/B loop: the variant that went live is recorded
     buf = session.query(BufferPoolItem).filter_by(campaign_id=cam.id, episode_number=1).one()
     assert buf.status == BufferStatus.consumed and cam.current_episode == 1
 
@@ -315,7 +316,7 @@ def test_auto_qc_pass_publishes_with_verdict(session, user, channel, monkeypatch
     video_worker.render_task(t.id)
     session.refresh(t)
     assert t.status == TaskStatus.COMPLETED
-    assert len(produce_calls) == 1 and produce_calls[0]["vet_clip"] is not None  # vetter wired in
+    assert len(produce_calls) == 1 and produce_calls[0]["vet_batch"] is not None  # batch vetter wired in
     buf = session.query(BufferPoolItem).filter_by(campaign_id=cam.id, episode_number=1).one()
     assert buf.metadata_json["qc"] == {"passed": True, "score": 9, "issues": [], "attempts": 1}
 
@@ -365,7 +366,7 @@ def test_auto_qc_off_skips_gate(session, user, channel, monkeypatch):
     video_worker.render_task(t.id)
     session.refresh(t)
     assert t.status == TaskStatus.COMPLETED
-    assert produce_calls[0]["vet_clip"] is None  # no vision vetting when the gate is off
+    assert produce_calls[0]["vet_batch"] is None  # no vision vetting when the gate is off
 
 
 def test_rerender_replaces_existing_buffer(session, user, channel, monkeypatch, tmp_path):
@@ -562,6 +563,85 @@ def test_daily_heartbeat_digest(session, user, channel, monkeypatch):
     assert len(digests) == 1
     assert "published 1" in digests[0] and "failed 1" in digests[0] and "awaiting review 1" in digests[0]
     assert "AI calls today" in digests[0]
+
+
+def test_circuit_breaker_pauses_after_three_consecutive_failures(session, user, channel, monkeypatch):
+    """3 consecutive failed episodes trip the breaker: the campaign stops (status `failed`, which
+    hydration/publishing skip and the ▶ Start button resumes) and the operator is alerted ONCE."""
+    from datetime import datetime, timedelta
+
+    from database.models import Campaign, Task
+    from database.types import CampaignStatus, TaskStatus
+    from workers import video_worker
+
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="Fragile", total_episodes=9,
+                   status=CampaignStatus.active)
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    now = datetime.utcnow()
+    session.add_all([
+        Task(campaign_id=cam.id, user_id=user.id, episode_number=1, status=TaskStatus.FAILED,
+             finished_at=now - timedelta(minutes=30)),
+        Task(campaign_id=cam.id, user_id=user.id, episode_number=2, status=TaskStatus.FAILED,
+             finished_at=now - timedelta(minutes=20)),
+    ])
+    t3 = Task(campaign_id=cam.id, user_id=user.id, episode_number=3)
+    session.add(t3)
+    session.commit()
+    session.refresh(t3)
+
+    alerts = []
+    monkeypatch.setattr(video_worker, "_notify", lambda u, msg: alerts.append(msg))
+    video_worker._fail_task(session, t3, user, cam, RuntimeError("boom"), "render_task")
+
+    session.refresh(cam)
+    assert cam.status == CampaignStatus.failed  # tripped: no new renders will start
+    assert any("3 consecutive failures" in m for m in alerts)
+
+    # A further failure on the already-paused campaign must not re-alert the breaker.
+    t4 = Task(campaign_id=cam.id, user_id=user.id, episode_number=4)
+    session.add(t4)
+    session.commit()
+    session.refresh(t4)
+    alerts.clear()
+    video_worker._fail_task(session, t4, user, cam, RuntimeError("boom"), "render_task")
+    assert not any("consecutive failures" in m for m in alerts)
+
+
+def test_circuit_breaker_success_resets_streak(session, user, channel, monkeypatch):
+    """Any non-failed outcome (publish, parked review, scheduled render) between failures proves
+    the pipeline works — the streak restarts from zero and the campaign stays active."""
+    from datetime import datetime, timedelta
+
+    from database.models import Campaign, Task
+    from database.types import CampaignStatus, TaskStatus
+    from workers import video_worker
+
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="Wobbly", total_episodes=9,
+                   status=CampaignStatus.active)
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    now = datetime.utcnow()
+    session.add_all([
+        Task(campaign_id=cam.id, user_id=user.id, episode_number=1, status=TaskStatus.FAILED,
+             finished_at=now - timedelta(minutes=40)),
+        Task(campaign_id=cam.id, user_id=user.id, episode_number=2, status=TaskStatus.FAILED,
+             finished_at=now - timedelta(minutes=30)),
+        Task(campaign_id=cam.id, user_id=user.id, episode_number=3, status=TaskStatus.COMPLETED,
+             finished_at=now - timedelta(minutes=20)),  # success breaks the streak
+    ])
+    t4 = Task(campaign_id=cam.id, user_id=user.id, episode_number=4)
+    session.add(t4)
+    session.commit()
+    session.refresh(t4)
+
+    monkeypatch.setattr(video_worker, "_notify", lambda u, msg: None)
+    video_worker._fail_task(session, t4, user, cam, RuntimeError("boom"), "render_task")
+    session.refresh(cam)
+    assert cam.status == CampaignStatus.active  # streak is 1, not 3 — breaker stays closed
+    assert video_worker.consecutive_failures(session, cam) == 1
 
 
 def test_hydrate_respects_campaign_buffer_size(session, user, channel):

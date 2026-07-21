@@ -568,9 +568,10 @@ def generate_script(
             review = critique_script(script, api_key=api_key, persona=persona,
                                      previous_synopses=previous_synopses, model=model)
             if review.verdict != "pass":
-                logger.info("Critic requested a rewrite (hook=%d natural=%d persona=%d fresh=%d)",
+                logger.info("Critic requested a rewrite (hook=%d natural=%d persona=%d fresh=%d "
+                            "grammar=%d)",
                             review.hook_score, review.natural_score, review.persona_score,
-                            review.fresh_score)
+                            review.fresh_score, review.grammar_score)
                 fixes = "\n".join(f"- {i}" for i in review.issues) \
                     or "- strengthen the hook and spoken rhythm"
                 script = generate_structured(
@@ -607,16 +608,26 @@ def generate_script(
 
 
 # ── Vision judging (Auto-QC: the machine watches the footage and the output) ─
+_AUDIO_MIME_BY_EXT: dict[str, str] = {
+    ".aac": "audio/aac", ".mp3": "audio/mp3", ".wav": "audio/wav",
+    ".ogg": "audio/ogg", ".flac": "audio/flac",
+}
+
+
 def _call_gemini_vision(
     *,
     api_key: str,
     model: str,
     prompt: str,
     image_paths: list[str],
+    audio_path: str | None = None,
     temperature: float = 0.2,
     max_output_tokens: int = 2048,  # room for thinking tokens + the small verdict JSON
 ) -> str:
-    """Single point that calls Gemini with images. Returns raw response text."""
+    """Single point that calls Gemini with images (and optionally one audio track).
+    Returns raw response text."""
+    import os
+
     import google.generativeai as genai
     from PIL import Image
 
@@ -630,7 +641,12 @@ def _call_gemini_vision(
             "response_mime_type": "application/json",
         },
     )
-    resp = gen_model.generate_content([prompt, *[Image.open(p) for p in image_paths]])
+    parts: list = [prompt, *[Image.open(p) for p in image_paths]]
+    if audio_path:
+        ext = os.path.splitext(audio_path)[1].lower()
+        with open(audio_path, "rb") as f:
+            parts.append({"mime_type": _AUDIO_MIME_BY_EXT.get(ext, "audio/aac"), "data": f.read()})
+    resp = gen_model.generate_content(parts)
     return resp.text
 
 
@@ -653,21 +669,58 @@ def judge_footage(frame_path: str, narration: str, *, api_key: str,
     return FootageVerdict.model_validate_json(_strip_code_fence(raw))
 
 
+class FootageBatchVerdicts(BaseModel):
+    verdicts: list[FootageVerdict]
+
+
+def judge_footage_batch(items: list[tuple[str, str]], *, api_key: str,
+                        model: str = DEFAULT_MODEL) -> list[FootageVerdict]:
+    """Judge N (frame_path, narration) pairs in ONE vision call — quota efficiency: an episode's
+    whole footage set costs 1-2 calls instead of one per scene. Raises on a count mismatch
+    (callers fail open)."""
+    schema_hint = json.dumps(FootageBatchVerdicts.model_json_schema(), ensure_ascii=False)
+    lines = "\n".join(f'Image {i + 1} narration: "{n}"' for i, (_, n) in enumerate(items))
+    raw = _call_gemini_vision(
+        api_key=api_key, model=model, image_paths=[p for p, _ in items],
+        prompt=(f"You are judging stock-footage choices for {len(items)} scenes of one short "
+                f"video. Image i is the candidate background for narration i:\n{lines}\n"
+                "For EACH image in order, judge whether the visual genuinely fits its narration's "
+                "subject and mood. Return ONLY JSON matching this schema, with exactly "
+                f"{len(items)} verdicts in the same order:\n{schema_hint}"),
+        max_output_tokens=4096,
+    )
+    verdicts = FootageBatchVerdicts.model_validate_json(_strip_code_fence(raw)).verdicts
+    if len(verdicts) != len(items):
+        raise ValueError(f"expected {len(items)} verdicts, got {len(verdicts)}")
+    return verdicts
+
+
 class VideoQCVerdict(BaseModel):
     quality_score: int = Field(ge=1, le=10)
     issues: list[str] = Field(default_factory=list, max_length=6)
 
 
 def judge_video_frames(frame_paths: list[str], *, api_key: str, context: str = "",
+                       audio_path: str | None = None,
                        model: str = DEFAULT_MODEL) -> VideoQCVerdict:
-    """Final-output spot check: are captions readable, visuals coherent, nothing broken?"""
+    """Final-output spot check: are captions readable, visuals coherent, nothing broken?
+    With `audio_path` set, the SAME call also judges the voice track (clear speech, right
+    language, music not drowning the narration) — audio-aware QC at zero extra API cost."""
     schema_hint = json.dumps(VideoQCVerdict.model_json_schema(), ensure_ascii=False)
+    audio_line = ""
+    if audio_path:
+        audio_line = (
+            "The video's full audio track is attached — also check the VOICE: the narration is "
+            "clearly audible and natural (no garbling, artifacts or cut-off words), it matches "
+            "the stated language, background music (if any) never drowns the voice, and there "
+            "are no long unintended silences. "
+        )
     raw = _call_gemini_vision(
-        api_key=api_key, model=model, image_paths=frame_paths,
+        api_key=api_key, model=model, image_paths=frame_paths, audio_path=audio_path,
         prompt=("These are frames sampled from an automatically produced vertical (9:16) short "
                 f"video. {context}\n"
                 "Check: captions present and readable (not clipped), visuals look coherent and "
-                "intentional (no broken/black/garbled frames), overall watchable quality. "
+                f"intentional (no broken/black/garbled frames), overall watchable quality. {audio_line}"
                 f"Return ONLY JSON matching this schema:\n{schema_hint}"),
     )
     return VideoQCVerdict.model_validate_json(_strip_code_fence(raw))
@@ -679,6 +732,8 @@ class ScriptCritique(BaseModel):
     natural_score: int = Field(ge=1, le=10, description="Does it sound like a real person talking?")
     persona_score: int = Field(ge=1, le=10, description="Is it 100% in character?")
     fresh_score: int = Field(ge=1, le=10, description="Is the premise fresh vs previous episodes?")
+    grammar_score: int = Field(ge=1, le=10, description="Spelling, grammar, diacritics and "
+                               "punctuation are flawless for the target language.")
     verdict: Literal["pass", "rewrite"]
     issues: list[str] = Field(default_factory=list, max_length=6,
                               description="Concrete fixes if verdict is rewrite.")
@@ -687,8 +742,11 @@ class ScriptCritique(BaseModel):
 _CRITIC_SYSTEM = (
     "You are a ruthless short-form video editor. Viewers swipe away in under 2 seconds; judge "
     "this script like their thumb is already moving. Score harshly. Verdict 'rewrite' whenever "
-    "the hook is weak, any sentence reads like an essay or AI text, the persona slips, or the "
-    "premise repeats an earlier episode. Issues must be concrete, actionable edits."
+    "the hook is weak, any sentence reads like an essay or AI text, the persona slips, the "
+    "premise repeats an earlier episode, or the text contains ANY spelling, grammar, diacritics "
+    "or punctuation error in the target language — the narration is burned on screen as "
+    "subtitles verbatim, so a single typo is visible in every frame. Issues must be concrete, "
+    "actionable edits (for language errors, quote the exact broken word/phrase)."
 )
 
 

@@ -92,10 +92,30 @@ freesound.org/apiv2 and set `FREESOUND_API_KEY` in `.env`. If the API is unreach
 renders without music (never fails). The chosen track (title/author/id) is recorded per episode in
 the buffer metadata for transparency.
 
+## Monetization: affiliate links (works from video #1)
+Set a campaign's **Affiliate / product link** (Distribution tab, with a short label like
+"📚 Sách hay về thời Trần:"). The link is auto-appended to **every description and pinned
+comment**, always marked "(affiliate link)" — the disclosure is mandatory under platform and
+advertising rules, so it cannot be turned off. Note: very new channels sometimes have link
+comments held by YouTube's spam filter; the description link always sticks.
+
+## Script preview (dry run — tune the persona cheaply)
+On the campaign form (Core tab): **📝 Preview a script** generates one script from the values
+currently in the form — unsaved edits included — and shows the scenes plus the estimated spoken
+seconds. 1 AI call, nothing rendered or stored. Iterate persona → preview → adjust until the voice
+on paper is right, then create the campaign.
+
+## Content calendar
+**Calendar** (sidebar) shows the next 7 days of posting slots per active campaign — weekday gate
+and campaign timezone applied — plus each campaign's pre-rendered runway. A slot only publishes if
+an episode is `ready`; a low runway with many upcoming slots means renders aren't keeping up
+(check quota / Task Logs).
+
 ## Auto-QC (machine review — makes hands-off publishing safe)
 Every campaign has **Auto-QC** ON by default (Distribution tab). Per episode it:
-1. **Vets footage** — a frame from each leading stock-clip candidate is shown to Gemini vision with
-   the scene's narration; clips that don't match are swapped for the next candidate before render.
+1. **Vets footage** — the whole episode's lead clips are judged against their narrations in ONE
+   batched vision call (rejected scenes swap to their next candidate, checked in one follow-up
+   call — ≤2 calls per episode).
 2. **Judges the finished video** — 4 sampled frames are checked for readable captions and coherent
    visuals. Fail → the episode is automatically re-rendered once. Fail again → it is **parked in
    the Asset Pool for your review** (with the issues listed) instead of publishing, and you get a
@@ -106,6 +126,22 @@ Recommended rollout: run new campaigns in *Review first* mode for the first ~2 w
 trust what Auto-QC lets through, switch to auto-publish and review only what QC rejects.
 Related quality knobs: **Colour grade** (Aesthetics tab) gives a channel one consistent look;
 audio loudness is always normalized to −14 LUFS (the YouTube/Reels target) — no knob needed.
+
+**Grammar & voice are covered too, at no extra API cost:** the script critic scores grammar/
+spelling/diacritics and forces a rewrite on any error (subtitles show the narration verbatim);
+after each scene's TTS a deterministic ffmpeg check catches silent/truncated audio (one automatic
+re-synthesis, then the episode fails loudly — this one never fails open, it's free and exact);
+and the final-QC call listens to the finished master's audio track in the same Gemini request,
+judging voice clarity, language match and music balance alongside the visuals.
+
+## Circuit breaker (campaign paused after repeated failures)
+If **3 episodes in a row fail**, the campaign automatically stops (status shows **Failed**) and
+you get ONE Telegram alert — instead of every queued episode burning API quota and pinging you
+about the same root cause (dead API key, revoked channel token, spent daily quota…). To resume:
+check the newest errors in **Task Logs**, fix the cause, then press **▶ Start** on the campaign
+(then **Retry** the failed episodes you still want). If an episode that was already in the queue
+happens to succeed after the pause, the campaign reactivates itself. One successful publish,
+review-parked render, or scheduled render resets the failure count.
 
 ## TTS failures (edge-tts 403 handshake)
 The voice rides Microsoft's undocumented Edge read-aloud endpoint via the `edge-tts` library.
@@ -260,9 +296,9 @@ box. How to pick a model and stay within quota:
   had 500 req/day** — 25× more. Flash-lite quality is fine for short spoken scripts + structured
   JSON, it barely "thinks" (fewer tokens, no truncation risk), and 500/day supports **~60 fully
   Auto-QC'd episodes/day free**. Set it in `.env`: `GEMINI_MODEL=gemini-3.1-flash-lite`.
-- **Calls per episode add up.** Roughly: 1 (script) + 1 (self-critique, if on) + ~1 per footage
-  candidate vetted + 1 (final Auto-QC) — an Auto-QC episode can be **~8 calls**; with QC and
-  critique off it's **~1 call**. Turn those off per campaign if you're squeezed.
+- **Calls per episode.** Roughly: 1 (script) + 1 (self-critique, if on) + 1-2 (BATCHED footage
+  vetting for the whole episode) + 1 (final Auto-QC) — a fully QC'd episode is **~4-5 calls**;
+  with QC and critique off it's **~1 call**. A duration-range miss or a parse repair can add one.
 - **Quota-efficient failures:** a per-DAY quota 429 now **fails fast** (no retry burn — retrying an
   exhausted daily cap just wastes more of it), while per-minute 429s retry after a longer backoff.
   A `429 … PerDay … FreeTier` in the worker log = daily cap hit; wait for the reset

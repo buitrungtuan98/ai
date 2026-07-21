@@ -256,3 +256,31 @@ on x86 runners (slow first build, then Actions-cached) rather than on free nativ
 (public-repo only). Accepted: deploys are infrequent and the cache makes steady-state builds
 reasonable; keeping build load off the render box is worth more than build latency. Secrets posture
 is unchanged — `.env` still lives only on the box, and GHCR auth uses the run's short-lived token.
+
+### ADR-016 — Failure circuit breaker, closed A/B loop, and layered voice/grammar QC
+**Decision:** (1) After **3 consecutive** failed episodes (newest-first streak of terminal task
+outcomes; anything non-FAILED resets it), the worker's failure path flips the campaign to the
+existing `failed` status and sends ONE Telegram alert. `failed` was already skipped by hydration
+and slot publishing and already had a ▶ Start (resume) button — the breaker gives that status its
+purpose instead of adding a new `paused` enum value. Guarding the trip on `status == active`
+makes the alert fire exactly once; if an episode already in the queue later succeeds anyway,
+`advance_campaign` re-activates the campaign (self-heal). Reaper-failed tasks count toward the
+streak only on the NEXT `_fail_task` evaluation — the breaker is an anti-noise valve, not an SLA.
+(2) The A/B loop closes with one nullable `tasks.ab_variant` column copied from the buffer's
+metadata at publish time; the Performance page aggregates retention/views per variant in Python
+(3 variants × small N — no SQL aggregation needed).
+(3) QC gains grammar and voice coverage at ~zero marginal API cost, layered by what each check
+costs: grammar rides on the EXISTING critic call (a `grammar_score` dimension + rewrite trigger —
+subtitles are the narration verbatim, so a typo is burned into every frame); voice sanity is a
+DETERMINISTIC ffmpeg `volumedetect` + duration check after each scene's TTS (silent/truncated
+output → one re-synthesis, then a loud failure — it fails CLOSED, unlike vision QC, because it is
+free and exact); and perceptual voice quality (clarity, language, music balance) rides on the
+EXISTING final-QC vision call by attaching the master's audio track (ADTS stream copy, no
+re-encode), falling back to frames-only judging if extraction fails.
+**Why:** a systemic fault (dead API key, revoked channel token, spent daily quota) used to retry
+every queued episode and alert on each — burning quota and waking the operator with noise that
+all had one cause. The breaker turns N alerts into one actionable one. The A/B rotation had been
+generating variants blindly since Phase 5 — recording which variant actually shipped is the
+missing half that makes the rotation an experiment. The QC layering keeps the quota math from
+ADR-013/the batching work intact: an episode still costs ~4-5 Gemini calls with strictly more
+coverage.
