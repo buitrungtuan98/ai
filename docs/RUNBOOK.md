@@ -207,6 +207,25 @@ fails loudly if the build fails to push or the web container doesn't become heal
 repo's GHCR package (Packages tab) or the commit history. (A manual run needs a one-time
 `docker login ghcr.io` with a PAT that has `read:packages`; the CD path logs in automatically.)
 
+## Gemini API quota & cost (free tier vs billing)
+Generation runs on the Gemini API, and the **free tier is the real throughput ceiling** — not the
+box. Key facts:
+- The free tier is a **per-day, per-model** request cap. The **newest** flash model has the
+  *smallest* free allowance (e.g. `gemini-3.5-flash` ≈ 20 req/day); older ones are more generous
+  (e.g. `gemini-2.0-flash` ≈ 200 req/day). Because `GEMINI_MODEL=gemini-flash-latest` tracks the
+  newest model, **free-tier operators should instead pin an older flash model** for headroom:
+  `GEMINI_MODEL=gemini-2.0-flash`. Quotas reset daily (~midnight US-Pacific).
+- **Calls per episode add up.** Roughly: 1 (script) + 1 (self-critique, if on) + ~1 per footage
+  candidate vetted + 1 (final Auto-QC) — an Auto-QC episode can be **~8 calls**. To stretch the
+  free tier, turn **Auto-QC** and **Self-critique** off per campaign (biggest savers → ~1 call
+  each). A `429 ... GenerateRequestsPerDayPerProjectPerModel-FreeTier` in the worker log means the
+  daily cap is hit — switch model, reduce calls, or wait for reset.
+- **For a real daily factory, enable billing** on the Google Cloud project. Flash is extremely
+  cheap (fractions of a cent per call), and billing raises the daily limit into the thousands —
+  full Auto-QC on dozens of videos/day costs on the order of cents/month. The $0 goal holds for the
+  infrastructure (Oracle box, Cloudflare, GHCR); Gemini's free tier alone can't sustain automated
+  volume with QC.
+
 ## Operational notes from the hardening review (ADR-014)
 - **`WORK_ROOT` / `MEDIA_ROOT` paths:** keep them free of spaces and quotes (the defaults
   `/data/media/...` are fine). Scene render passes embed the subtitle path into an ffmpeg filter
