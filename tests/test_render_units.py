@@ -96,7 +96,7 @@ def test_ab_rotation_and_toggle():
     from core.video_factory import pick_metadata
 
     vs = VideoScript(
-        language="en", topic="t",
+        language="en", topic="t", synopsis="s",
         scenes=[{"index": i, "narration": "n", "pexels_keywords": ["k"]} for i in range(3)],
         metadata_variations=[{"variant": v, "title": f"T{v}", "description": "d", "tags": ["a", "b", "c"]} for v in "ABC"],
     )
@@ -282,7 +282,7 @@ def test_affiliate_link_in_description():
     from core.video_factory import pick_metadata
 
     vs = VideoScript(
-        language="vi", topic="t",
+        language="vi", topic="t", synopsis="s",
         scenes=[{"index": i, "narration": "n", "pexels_keywords": ["k"]} for i in range(3)],
         metadata_variations=[{"variant": v, "title": "T", "description": "Mô tả video.",
                               "tags": ["a", "b", "c"]} for v in "ABC"],
@@ -346,7 +346,7 @@ def test_title_prefix_prepended_and_capped():
     from core.video_factory import pick_metadata
 
     vs = VideoScript(
-        language="vi", topic="t",
+        language="vi", topic="t", synopsis="s",
         scenes=[{"index": i, "narration": "n", "pexels_keywords": ["k"]} for i in range(3)],
         metadata_variations=[{"variant": v, "title": "Một bí mật ít ai biết", "description": "d",
                               "tags": ["a", "b", "c"]} for v in "ABC"],
@@ -355,6 +355,21 @@ def test_title_prefix_prepended_and_capped():
     assert meta["title"].startswith("🔥 SỬ VIỆT | Một bí mật")
     assert len(pick_metadata(vs, 1, title_prefix="X" * 90)["title"]) <= 100  # YouTube cap held
     assert pick_metadata(vs, 1)["title"] == "Một bí mật ít ai biết"  # no prefix → untouched
+
+
+def test_voice_catalog_single_source_of_truth():
+    """core/tts.VOICE_CHOICES is THE voice list: the form dropdown renders it and the AI designer
+    may only propose from it — so a picked voice can never be one TTS can't synthesize."""
+    from core.ai_engine import PROPOSABLE_VOICES
+    from core.tts import DEFAULT_VOICES, VOICE_CHOICES
+
+    assert set(VOICE_CHOICES) == {"vi", "en", "es"}
+    for lang, voices in VOICE_CHOICES.items():
+        ids = [vid for vid, _label in voices]
+        assert PROPOSABLE_VOICES[lang] == ids            # designer list derives from the catalog
+        assert DEFAULT_VOICES[lang] in ids               # the language default is always offered
+        assert all(vid.startswith(f"{lang}-") for vid in ids)  # no cross-language voice ids
+        assert all(label.strip() for _vid, label in voices)    # every entry has a human label
 
 
 def test_tts_retries_transient_failures(monkeypatch):

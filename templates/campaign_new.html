@@ -75,7 +75,9 @@
       <div class="form-row">
         <button type="button" class="btn ghost" id="script-preview">📝 Preview a script (1 AI call)</button>
         <p class="hint">Dry-run with the values in this form — read what the AI would write, tune the
-          persona, preview again. Nothing is rendered or saved.</p>
+          persona, preview again. Nothing is rendered or saved. Note: previews are one-off drafts with
+          NO episode memory — continuity (no-repeat/serial) applies only to real episodes, which each
+          receive the synopses of all previously rendered ones.</p>
         <div id="script-preview-out" class="mt" style="display:none;"></div>
       </div>
     </div>
@@ -124,8 +126,10 @@
         </select>
         <p class="hint">Pick one per channel and keep it — a consistent look is what makes a feed feel curated.</p>
       </div>
-      <div class="form-row"><label>Voice profile (edge-tts, optional)</label>
-        <input name="voice" placeholder="en-US-AriaNeural" value="{{ cfg.get('voice') or '' }}"></div>
+      <div class="form-row"><label>Voice profile (follows the Target language)</label>
+        <select name="voice" id="voice-select" data-current="{{ cfg.get('voice') or '' }}"></select>
+        <p class="hint">Voices are filtered to the campaign's Target language (Core tab). Default = the
+          language's standard voice. Tip: use 📝 Preview a script + your ear on the first render to pick.</p></div>
       <div class="form-row"><label>Audio speed adjustment: <span id="rate-val">{{ cfg.get('rate_pct', 0) }}</span>%</label>
         <input name="rate_pct" type="range" min="-20" max="20" value="{{ cfg.get('rate_pct', 0) }}"
                oninput="document.getElementById('rate-val').textContent=this.value"></div>
@@ -135,7 +139,8 @@
           <option value="auto" {{ 'selected' if cfg.get('music_mode')=='auto' }}>Auto — random free CC0 track by mood, new one each episode</option>
           <option value="file" {{ 'selected' if (cfg.get('music_mode') or ('file' if cfg.get('music_path') else ''))=='file' }}>My file on the server</option>
         </select>
-        <p class="hint">Auto uses Freesound.org filtered to CC0 (public domain) — safe for monetized videos, no attribution needed. Requires FREESOUND_API_KEY in .env (free).</p>
+        <p class="hint">Auto uses Freesound.org filtered to CC0 (public domain) — safe for monetized videos, no attribution needed. Requires FREESOUND_API_KEY in .env (free).
+          {% if not settings.FREESOUND_API_KEY %}<strong style="color: var(--danger);">⚠ FREESOUND_API_KEY is NOT set on this server — episodes of an Auto-music campaign will fail until you add it (or choose None).</strong>{% endif %}</p>
       </div>
       <div class="form-row"><label>Music mood (for Auto — in English)</label>
         <input name="music_mood" placeholder="dark ambient horror drone" value="{{ cfg.get('music_mood') or '' }}"></div>
@@ -246,6 +251,34 @@
     });
   });
 
+  // 🎙 Voice picker follows the Target language: options come from the server's ONE voice catalog
+  // (the same list the AI designer may propose from). Changing the language resets to the
+  // language default — a voice from another language would be a broken/mismatched narration.
+  const voiceData = {{ voice_choices | tojson }};
+  const voiceSel = document.getElementById("voice-select");
+  const langSel = document.querySelector('select[name="language"]');
+  const LANG_NAMES = { vi: "Vietnamese", en: "English", es: "Spanish" };
+  function fillVoices(keep) {
+    if (!voiceSel || !langSel) return;
+    const lang = langSel.value;
+    const current = keep !== undefined ? keep : (voiceSel.dataset.current || "");
+    voiceSel.textContent = "";
+    const mk = (v, label) => {
+      const o = document.createElement("option");
+      o.value = v;
+      o.textContent = label;
+      voiceSel.appendChild(o);
+    };
+    mk("", "Default — " + (LANG_NAMES[lang] || lang) + " standard voice");
+    (voiceData[lang] || []).forEach(pair => mk(pair[0], pair[1]));
+    if (current && !Array.from(voiceSel.options).some(o => o.value === current)) {
+      mk(current, current + " (custom)");   // keep a hand-typed legacy voice selectable
+    }
+    voiceSel.value = current || "";
+  }
+  fillVoices();
+  if (langSel) langSel.addEventListener("change", function () { fillVoices(""); });
+
   // 📝 Script preview: dry-run the scriptwriter with the current form values (nothing saved).
   const previewBtn = document.getElementById("script-preview");
   if (previewBtn) {
@@ -315,7 +348,8 @@
         setVal("catchphrase_open", p.catchphrase_open);
         setVal("catchphrase_close", p.catchphrase_close);
         setVal("continuity", p.continuity);
-        setVal("voice", p.voice);
+        fillVoices("");            // rebuild the voice list for the proposed language first
+        setVal("voice", p.voice);  // the proposal's voice is always in that language's catalog
         setVal("rate_pct", p.rate_pct);
         setVal("subtitle_style", p.subtitle_style);
         setVal("caption_theme", p.caption_theme);

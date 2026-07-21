@@ -8,7 +8,7 @@ def _script():
     from core.ai_engine import VideoScript
 
     return VideoScript(
-        language="en", topic="Robots",
+        language="en", topic="Robots", synopsis="Robots learn to dream",
         scenes=[{"index": i, "narration": "n", "pexels_keywords": ["k"]} for i in range(3)],
         metadata_variations=[{"variant": v, "title": f"T{v}", "description": "d", "tags": ["a", "b", "c"]} for v in "ABC"],
     )
@@ -239,6 +239,57 @@ def test_episode_memory_flows_into_prompt(session, user, channel, monkeypatch):
     # And this episode's synopsis was stored for the NEXT one.
     session.refresh(t3)
     assert t3.synopsis == "Căn nhà cuối xóm có tiếng ru"
+
+
+def test_resolve_music_config_truth(monkeypatch):
+    """music_mode=auto without a FREESOUND_API_KEY is a deterministic misconfiguration → the
+    episode fails LOUDLY (like a missing music file) instead of silently publishing without
+    music. A transient Freesound failure still degrades to no music."""
+    import pytest as _pytest
+
+    from core.config import settings
+    from services import music_service
+    from workers import video_worker
+
+    monkeypatch.setattr(settings, "FREESOUND_API_KEY", None)
+    with _pytest.raises(RuntimeError, match="FREESOUND_API_KEY"):
+        video_worker._resolve_music({"music_mode": "auto"})
+    # Other modes are unaffected by the missing key.
+    assert video_worker._resolve_music({}) == (None, None)
+    assert video_worker._resolve_music({"music_mode": "file", "music_path": "/x.mp3"}) == ("/x.mp3", None)
+
+    # Key present but Freesound yields nothing (down / no results) → transient → degrade.
+    monkeypatch.setattr(settings, "FREESOUND_API_KEY", "fs-key")
+    monkeypatch.setattr(music_service, "pick_music", lambda mood, key, cache: None)
+    assert video_worker._resolve_music({"music_mode": "auto"}) == (None, None)
+
+
+def test_synopsis_falls_back_to_title(session, user, channel, monkeypatch):
+    """Episode memory must never be empty: a script whose synopsis slipped through blank still
+    leaves the variant-A title as memory, so continuity never silently skips an episode."""
+    from database.models import Campaign, Task
+    from database.types import CampaignStatus
+    from workers import video_worker
+
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="M", total_episodes=3,
+                   status=CampaignStatus.active, config_json={"language": "en"})
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    t = Task(campaign_id=cam.id, user_id=user.id, episode_number=1)
+    session.add(t)
+    session.commit()
+    session.refresh(t)
+
+    script = _script()
+    script.synopsis = ""  # simulate a blank slipping past generation
+    monkeypatch.setattr(video_worker, "generate_script", lambda **k: script)
+    monkeypatch.setattr(video_worker.video_factory, "produce", lambda **k: _result())
+    monkeypatch.setattr(video_worker, "_publish", lambda *a, **k: "vid-m")
+
+    video_worker.render_task(t.id)
+    session.refresh(t)
+    assert t.synopsis == "TA"  # variant-A title stored as the fallback memory
 
 
 def test_auto_music_flows_into_render(session, user, channel, monkeypatch, tmp_path):

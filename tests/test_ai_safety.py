@@ -8,6 +8,7 @@ import pytest
 
 VALID = {
     "language": "en", "topic": "Space",
+    "synopsis": "Why the sun is a star",  # REQUIRED — episode memory must never be empty
     "scenes": [
         {"index": 0, "narration": "The sun is a star.", "caption_hook": "SUN", "pexels_keywords": ["sun"]},
         {"index": 1, "narration": "It is hot.", "caption_hook": None, "pexels_keywords": ["fire"]},
@@ -141,8 +142,10 @@ def test_duration_range_prompt_and_length_fix(monkeypatch):
     long_scenes = [{"index": i, "narration": "word " * 100, "pexels_keywords": ["k"]} for i in range(3)]
     short_scenes = [{"index": i, "narration": "word " * 20, "pexels_keywords": ["k"]} for i in range(3)]
     meta = [{"variant": v, "title": "T", "description": "d", "tags": ["a", "b", "c"]} for v in "ABC"]
-    responses = [json.dumps({"language": "en", "topic": "t", "scenes": long_scenes, "metadata_variations": meta}),
-                 json.dumps({"language": "en", "topic": "t", "scenes": short_scenes, "metadata_variations": meta})]
+    responses = [json.dumps({"language": "en", "topic": "t", "synopsis": "s",
+                             "scenes": long_scenes, "metadata_variations": meta}),
+                 json.dumps({"language": "en", "topic": "t", "synopsis": "s",
+                             "scenes": short_scenes, "metadata_variations": meta})]
     calls = []
 
     def fake(**k):

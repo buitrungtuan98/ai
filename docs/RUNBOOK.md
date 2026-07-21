@@ -88,9 +88,23 @@ Set a campaign's **Background music** to *Auto* and give a mood in English (e.g.
 horror drone"). Each episode gets a **random CC0 (public-domain) track** matching the mood from
 Freesound.org — safe for commercial/monetized videos, no attribution required — downloaded once
 into `/data/media/music_cache/` and mixed under the narration. Setup: register a free API key at
-freesound.org/apiv2 and set `FREESOUND_API_KEY` in `.env`. If the API is unreachable, the episode
-renders without music (never fails). The chosen track (title/author/id) is recorded per episode in
-the buffer metadata for transparency.
+freesound.org/apiv2, set `FREESOUND_API_KEY` in `.env`, and hit **Test** next to Freesound on the
+Credentials page to verify it live.
+
+**"Music not working" checklist:**
+1. `FREESOUND_API_KEY` missing → since the config-truth change, an Auto-music episode **fails
+   loudly** with a clear error in Task Logs (it used to silently publish without music). The
+   campaign form also shows a red warning when the server has no key. Fix: add the key (or set
+   music to None), then Retry.
+2. Key set but a very niche / non-English mood → the search retries once with a generic
+   "ambient background" query, so you get generic music rather than none. Keep moods short and
+   in English.
+3. Freesound temporarily down / no results at all → the episode renders without music (a
+   transient outage never fails a video); the worker log shows "Auto-music unavailable".
+4. Music too quiet? Raise **Music volume under narration** (0.05–0.5; default 0.15 is subtle by
+   design — narration must win).
+The chosen track (title/author/id/license) is recorded per episode in the buffer metadata for
+transparency.
 
 ## Monetization: affiliate links (works from video #1)
 Set a campaign's **Affiliate / product link** (Distribution tab, with a short label like
@@ -104,6 +118,17 @@ On the campaign form (Core tab): **📝 Preview a script** generates one script 
 currently in the form — unsaved edits included — and shows the scenes plus the estimated spoken
 seconds. 1 AI call, nothing rendered or stored. Iterate persona → preview → adjust until the voice
 on paper is right, then create the campaign.
+**Previews have NO episode memory** — continuity (no-repeat/serial) only applies to real episodes.
+
+## Episode continuity (series memory) — how to verify it
+Each rendered episode stores a one-line **synopsis** (required from the model; falls back to the
+episode's title, so it is never empty). Every later episode's prompt receives the previous
+synopses: `no_repeat` forbids reusing their premises; `serial` continues directly from the latest
+one. To verify it is working: open the campaign's **📊 Performance** page — the Episodes table
+shows each episode's synopsis; if episode N's premise ignores what N-1 established, check that
+N-1 actually has a synopsis (episodes rendered before this feature, or FAILED episodes, leave no
+memory). Two previews looking similar is NOT a continuity failure — previews are memory-less
+one-offs (see above).
 
 ## Content calendar
 **Calendar** (sidebar) shows the next 7 days of posting slots per active campaign — weekday gate

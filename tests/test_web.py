@@ -83,6 +83,45 @@ def test_ownership_guard_404(client):
     assert client.post("/campaigns/99999/delete", follow_redirects=False).status_code == 404
 
 
+def test_campaign_form_voice_dropdown(client):
+    """The voice picker is a per-language dropdown fed by the ONE catalog in core/tts.py; an
+    edit form keeps the saved voice via data-current (JS re-selects it on load)."""
+    client.post("/channels/facebook", data={"channel_name": "P", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    page = client.get("/campaigns/new")
+    assert 'id="voice-select"' in page.text
+    assert "vi-VN-HoaiMyNeural" in page.text and "en-US-AriaNeural" in page.text  # catalog JSON
+
+    from database.db_session import SessionLocal
+    from database.models import Campaign, Channel
+
+    db = SessionLocal()
+    ch = db.query(Channel).first()
+    cam = Campaign(user_id=ch.user_id, channel_id=ch.id, topic_name="V", total_episodes=3,
+                   config_json={"language": "vi", "voice": "vi-VN-NamMinhNeural"})
+    db.add(cam)
+    db.commit()
+    db.refresh(cam)
+    db.close()
+    edit = client.get(f"/campaigns/{cam.id}/edit")
+    assert 'data-current="vi-VN-NamMinhNeural"' in edit.text
+
+
+def test_credentials_test_freesound(client, monkeypatch):
+    """The Credentials page can live-test the server's Freesound key; a missing key explains
+    itself instead of failing at render time."""
+    from core.config import settings
+    from services import verification
+
+    monkeypatch.setattr(settings, "FREESOUND_API_KEY", None)
+    r = client.post("/credentials/test/freesound").json()
+    assert not r["ok"] and "FREESOUND_API_KEY" in r["detail"]
+
+    monkeypatch.setattr(settings, "FREESOUND_API_KEY", "fs-key")
+    monkeypatch.setattr(verification, "verify_freesound", lambda k: (True, "key ok"))
+    assert client.post("/credentials/test/freesound").json()["ok"]
+
+
 def _seed_ready_asset(client, tmp_path, status="ready"):
     from database.db_session import SessionLocal
     from database.models import BufferPoolItem, Campaign, Channel, Task
@@ -257,12 +296,19 @@ def test_propose_campaign_route(client, monkeypatch):
         )
 
     monkeypatch.setattr(ai_engine, "propose_campaign", lambda **k: fake_propose(**k))
+    monkeypatch.setattr(settings, "FREESOUND_API_KEY", "fs-key")  # box CAN run auto music
     r = client.post("/campaigns/propose", data={"topic": "ghost stories", "language": "vi"})
     assert r.status_code == 200
     j = r.json()
     assert j["persona"].startswith("Chú Ba") and j["caption_theme"] == "neon"
     assert j["music_mode"] == "auto" and j["posting_slots"] == "22:00"
     assert captured["topic"] == "ghost stories" and captured["language"] == "vi"
+
+    # Config truth: with no Freesound key on the box, an "auto" music proposal is downgraded to
+    # "none" — the designer must never propose a mode whose every episode would fail.
+    monkeypatch.setattr(settings, "FREESOUND_API_KEY", None)
+    j = client.post("/campaigns/propose", data={"topic": "ghost stories", "language": "vi"}).json()
+    assert j["music_mode"] == "none"
 
 
 def test_propose_campaign_needs_key(client, monkeypatch):

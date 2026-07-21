@@ -65,10 +65,12 @@ class Scene(BaseModel):
 
 class _SynopsisMixin(BaseModel):
     # Episode memory: a one-line summary stored per episode and fed back into later prompts so the
-    # series never repeats itself (no_repeat) or can genuinely continue (serial).
+    # series never repeats itself (no_repeat) or can genuinely continue (serial). REQUIRED
+    # (min_length=1): when it was optional the model sometimes omitted it, leaving episodes with
+    # no memory — which silently broke continuity for every episode after them.
     synopsis: str = Field(
-        default="", max_length=300,
-        description="One-sentence summary of THIS episode's specific premise/content.",
+        min_length=1, max_length=300,
+        description="One-sentence summary of THIS episode's specific premise/content. Required.",
     )
 
 
@@ -298,13 +300,16 @@ class CampaignProposal(BaseModel):
     rationale: str = Field(default="", max_length=400, description="One sentence on the angle.")
 
 
-# Curated edge-tts voices the designer may choose from (validated server-side so it can't invent
-# an unusable voice name that would break TTS).
-PROPOSABLE_VOICES: dict[str, list[str]] = {
-    "en": ["en-US-AriaNeural", "en-US-GuyNeural", "en-US-JennyNeural", "en-GB-SoniaNeural"],
-    "vi": ["vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural"],
-    "es": ["es-ES-ElviraNeural", "es-MX-DaliaNeural", "es-ES-AlvaroNeural"],
-}
+# Voices the designer may choose from — derived from the ONE curated catalog in core/tts.py
+# (DRY: the campaign form's per-language dropdown uses the same list) and validated server-side
+# so the model can't invent an unusable voice name that would break TTS.
+def _proposable_voices() -> dict[str, list[str]]:
+    from core.tts import VOICE_CHOICES
+
+    return {lang: [vid for vid, _label in voices] for lang, voices in VOICE_CHOICES.items()}
+
+
+PROPOSABLE_VOICES: dict[str, list[str]] = _proposable_voices()
 
 
 def propose_campaign(

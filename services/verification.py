@@ -44,6 +44,25 @@ def verify_pexels(api_key: str) -> tuple[bool, str]:
         return False, "Could not reach Pexels (network error)."
 
 
+def verify_freesound(api_key: str) -> tuple[bool, str]:
+    """One tiny search — proves the key works AND that CC0 results come back (auto music path)."""
+    try:
+        import requests
+
+        resp = requests.get(
+            "https://freesound.org/apiv2/search/text/",
+            params={"query": "ambient", "filter": 'license:"Creative Commons 0"',
+                    "page_size": 1, "fields": "id", "token": api_key},
+            timeout=TIMEOUT,
+        )
+        if resp.status_code == 200:
+            return True, "Freesound key is valid — Auto background music will work."
+        return False, f"Freesound rejected the key (HTTP {resp.status_code})."
+    except Exception as exc:  # noqa: BLE001 — the exception text embeds the URL (?token=…); never expose it
+        logger.warning("Freesound verification network error: %s", type(exc).__name__)
+        return False, "Could not reach Freesound (network error)."
+
+
 def verify_telegram(token: str, chat_id: str | None = None) -> tuple[bool, str]:
     try:
         import requests
