@@ -240,42 +240,54 @@ def search_footage(keywords: list[str], api_key: str) -> list:
     return []
 
 
-FOOTAGE_VET_CANDIDATES = 3  # bound the extra downloads/vision calls per scene
+def _batch_vet_plans(plans: list[dict], vet_batch, path_for, download=None) -> None:
+    """Batched Auto-QC footage vetting over prepared scene plans (mutates them in place).
 
-
-def vet_candidates(found: list, narration: str, vet, download, path_for) -> tuple[list, dict[int, str]]:
-    """Run the vision judge over the leading footage candidates (Auto-QC).
-
-    Each candidate is downloaded (`download(url, path)` to `path_for(idx)`) and judged with
-    `vet(path, narration)`; the first accepted one becomes the pool leader and the rejected
-    leaders are dropped. Returns (candidates, predownloaded {index: path}) so the render step
-    never downloads the same clip twice. If every vetted candidate is rejected, the original
-    order is kept — a rendered episode beats a failed one (fail-open)."""
-    downloaded: dict[int, str] = {}
-    for idx in range(min(FOOTAGE_VET_CANDIDATES, len(found))):
-        path = path_for(idx)
-        try:
-            download(found[idx].download_url, path)
-        except Exception:  # noqa: BLE001 — a candidate download failure must not fail the episode
-            logger.warning("Vet candidate %d download failed — skipping", idx, exc_info=True)
+    One vision call judges every scene's lead candidate at once; rejected scenes swap to their
+    next candidate, which is verified in ONE follow-up call — ≤2 vision calls per episode
+    (previously ~1 per scene). Everything fails open: a vet or download error keeps the current
+    candidate, because a rendered episode beats a failed one."""
+    download = download or pexels.download
+    idxs = [i for i, p in enumerate(plans) if 0 in p["pre"]]
+    if not idxs:
+        return
+    accepts = vet_batch([(plans[i]["pre"][0], plans[i]["clean"]) for i in idxs])
+    retry: list[int] = []
+    for i, ok in zip(idxs, accepts):
+        plan = plans[i]
+        if ok or len(plan["found"]) < 2:
             continue
-        downloaded[idx] = path
-        if vet(path, narration):
-            return found[idx:], {i - idx: p for i, p in downloaded.items() if i >= idx}
-    logger.info("Footage vetting rejected all %d candidates — keeping original order", len(downloaded))
-    return found, downloaded
+        plan["found"] = plan["found"][1:]  # drop the rejected leader
+        try:
+            p = path_for(i, 1)
+            download(plan["found"][0].download_url, p)
+            plan["pre"] = {0: p}
+            retry.append(i)
+        except Exception:  # noqa: BLE001
+            plan["pre"] = {}  # replacement download failed — render loop fetches by pick
+            logger.warning("Replacement candidate download failed for scene %d", i, exc_info=True)
+    if retry:
+        accepts2 = vet_batch([(plans[i]["pre"][0], plans[i]["clean"]) for i in retry])
+        for i, ok in zip(retry, accepts2):
+            if not ok:
+                logger.info("Scene %d replacement candidate still weak — keeping it (fail-open)", i)
 
 
 def pick_metadata(script: VideoScript, episode_number: int, ab_testing: bool = True,
-                  title_prefix: str | None = None) -> dict:
+                  title_prefix: str | None = None,
+                  affiliate_url: str | None = None, affiliate_label: str | None = None) -> dict:
     """A/B rotation: cycle the 3 metadata variations across episodes. With A/B testing disabled,
     variant A is always used. An optional operator-set `title_prefix` (channel brand mark, e.g.
-    '🔥 SỬ VIỆT |') is prepended to the AI's standalone hook title."""
+    '🔥 SỬ VIỆT |') is prepended to the AI's standalone hook title, and an optional affiliate link
+    is appended to the description WITH a disclosure marker (platform/FTC rules require it)."""
     variations = script.metadata_variations
     chosen = variations[0] if not ab_testing else variations[(max(episode_number, 1) - 1) % len(variations)]
     meta = chosen.model_dump()
     if title_prefix and title_prefix.strip():
         meta["title"] = f"{title_prefix.strip()} {meta['title']}"[:100]  # YouTube's hard cap
+    if affiliate_url:
+        footer = f"\n\n{(affiliate_label or '🔗').strip()} {affiliate_url}\n(affiliate link)"
+        meta["description"] = meta["description"][:4500] + footer  # stay well under YT's cap
     return meta
 
 
@@ -299,8 +311,10 @@ def produce(
     loudnorm: bool = True,
     ab_testing: bool = True,
     title_prefix: str | None = None,
+    affiliate_url: str | None = None,
+    affiliate_label: str | None = None,
     extra_blacklist: set[str] | None = None,
-    vet_clip=None,
+    vet_batch=None,
     on_progress=None,
 ) -> RenderResult:
     """Render one episode from a validated script. Output (master.mp4 + thumb.jpg) is written to
@@ -323,10 +337,13 @@ def produce(
 
     with RenderWorkspace(job_id) as ws:
         scene_files: list[str] = []
-        durations: list[float] = []
 
+        # Phase A — prep every scene first (filter → TTS → footage search + lead-candidate
+        # download). Collecting all scenes before rendering is what lets Auto-QC vet the WHOLE
+        # episode's footage in one batched vision call instead of one call per scene.
+        plans: list[dict] = []
         for si, scene in enumerate(script.scenes):
-            # 1. Safety filter narration before TTS (policy lives in safety_filter). If the filter
+            # Safety filter narration before TTS (policy lives in safety_filter). If the filter
             # emptied a non-empty narration (whole scene was blacklisted), do NOT fall back to the
             # raw text — that would defeat the brand-safety gate. The empty result surfaces as a
             # clear render failure instead of burning unsafe words into the video.
@@ -337,54 +354,65 @@ def produce(
             if not clean and not filtered.changed:
                 clean = scene.narration  # nothing filtered → empty means the source was empty
 
-            # 2. TTS → mp3 + word timings; audio duration = ground truth.
+            # TTS → mp3 + word timings; audio duration = ground truth.
             audio_path = ws.path(f"scene_{si}.mp3")
             timings = tts.synthesize(clean, audio_path, language=lang, voice=voice, rate_pct=rate_pct)
             d_i = media.probe_duration(audio_path)
-            durations.append(d_i)
 
-            # 3. Fetch footage to cover d_i (with keyword fallback chain).
+            # Footage to cover d_i (with keyword fallback chain).
             safety_filter.assert_licensed_footage("pexels")
             found = search_footage(scene.pexels_keywords, pexels_api_key)
             if not found:
                 raise RuntimeError(
                     f"No Pexels footage for scene {si} (keywords={scene.pexels_keywords!r})")
+            pre: dict[int, str] = {}
+            if vet_batch is not None and len(found) > 1:
+                p = ws.path(f"scene_{si}_vet_0.mp4")
+                try:
+                    pexels.download(found[0].download_url, p)
+                    pre[0] = p
+                except Exception:  # noqa: BLE001 — vetting is optional; render must proceed
+                    logger.warning("Lead-candidate download failed for scene %d", si, exc_info=True)
+            plans.append({"clean": clean, "audio": audio_path, "timings": timings,
+                          "d": d_i, "found": found, "pre": pre})
+            report("scenes", (si + 1) / n_scenes * 30)
 
-            # 3b. Optional AI footage vetting (Auto-QC): the first candidate the vision judge
-            # accepts leads the pool; rejected leaders are dropped. Downloads are reused below.
-            predownloaded: dict[int, str] = {}
-            if vet_clip is not None and len(found) > 1:
-                found, predownloaded = vet_candidates(
-                    found, scene.narration, vet_clip, pexels.download,
-                    lambda k, si=si: ws.path(f"scene_{si}_vet_{k}.mp4"),
-                )
+        # Phase B — batched Auto-QC footage vetting: ≤2 vision calls per EPISODE, fail-open.
+        if vet_batch is not None:
+            _batch_vet_plans(
+                plans, vet_batch,
+                path_for=lambda i, k: ws.path(f"scene_{i}_vet_{k}.mp4"),
+            )
+        durations = [p["d"] for p in plans]
 
-            picks = select_clips([c.duration for c in found], d_i)
+        # Phase C — render each scene (captions + motion + grade baked into one encode pass).
+        for si, plan in enumerate(plans):
+            d_i = plan["d"]
+            picks = select_clips([c.duration for c in plan["found"]], d_i)
             # Download each unique clip once (reusing vetted downloads), then expand `picks`
             # (which may repeat) to file paths.
-            path_by_idx: dict[int, str] = dict(predownloaded)
+            path_by_idx: dict[int, str] = dict(plan["pre"])
             for k, idx in enumerate(dict.fromkeys(picks)):
                 if idx in path_by_idx:
                     continue
                 p = ws.path(f"scene_{si}_clip_{k}.mp4")
-                pexels.download(found[idx].download_url, p)
+                pexels.download(plan["found"][idx].download_url, p)
                 path_by_idx[idx] = p
             clip_paths = [path_by_idx[idx] for idx in picks]
 
-            # 4. Captions + scene render (motion + theme baked into the same pass).
             ass_path = ws.path(f"scene_{si}.ass")
-            build_ass(timings, ass_path, clip_duration=d_i, style=subtitle_style,
+            build_ass(plan["timings"], ass_path, clip_duration=d_i, style=subtitle_style,
                       theme=caption_theme, accent_hex=branding.tint_color)
             scene_out = ws.path(f"scene_{si}.mp4")
             effect = MOTION_EFFECTS[si % len(MOTION_EFFECTS)] if motion else None
-            args = build_scene_args(clip_paths, audio_path, ass_path, scene_out, d_i, branding,
+            args = build_scene_args(clip_paths, plan["audio"], ass_path, scene_out, d_i, branding,
                                     motion_effect=effect, color_grade=color_grade)
             run_ffmpeg(
                 args, total_duration=d_i,
-                on_progress=lambda p, s=si: report("scenes", (s + p / 100) / n_scenes * 100),
+                on_progress=lambda p, s=si: report("scenes", 30 + (s + p / 100) / n_scenes * 70),
             )
             scene_files.append(scene_out)
-            report("scenes", (si + 1) / n_scenes * 100)
+            report("scenes", 30 + (si + 1) / n_scenes * 70)
 
         # 5. Stitch (video stream copy; audio-only re-encode when music is mixed in).
         list_file = ws.path("concat.txt")
@@ -398,7 +426,8 @@ def produce(
 
         # 6. Thumbnail + metadata.
         metadata = pick_metadata(script, episode_number, ab_testing=ab_testing,
-                                 title_prefix=title_prefix)
+                                 title_prefix=title_prefix,
+                                 affiliate_url=affiliate_url, affiliate_label=affiliate_label)
         thumb = os.path.join(output_dir, f"episode_{episode_number}.jpg")
         generate_thumbnail(master, thumb, metadata["title"],
                            logo_path=branding.watermark_path)

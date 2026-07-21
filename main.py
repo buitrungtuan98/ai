@@ -373,6 +373,59 @@ def campaign_new_form(request: Request, user: CurrentUser, db: DbDep, from_id: i
     return templates.TemplateResponse(request, "campaign_new.html", ctx)
 
 
+@app.post("/campaigns/preview-script")
+def preview_script(
+    user: CurrentUser,
+    topic_name: str = Form(""),
+    language: str = Form("en"),
+    system_prompt: str = Form(""),
+    persona: str = Form(""),
+    style_examples: str = Form(""),
+    catchphrase_open: str = Form(""),
+    catchphrase_close: str = Form(""),
+    rate_pct: int = Form(0),
+    duration_min_s: str = Form(""),
+    duration_max_s: str = Form(""),
+):
+    """Dry-run: generate ONE script from the current (possibly unsaved) form values so the
+    operator can tune the persona cheaply — 1 AI call, nothing rendered, nothing stored."""
+    from core import ai_engine
+
+    key = user.gemini_api_key or settings.GEMINI_API_KEY
+    if not key:
+        return JSONResponse({"error": "Add a Gemini API key first (Credentials page or .env)."},
+                            status_code=400)
+    if not topic_name.strip():
+        return JSONResponse({"error": "Enter a topic name first."}, status_code=400)
+    lang = language if language in ("en", "vi", "es") else "en"
+    lo = int(duration_min_s) if duration_min_s.strip().isdigit() else None
+    hi = int(duration_max_s) if duration_max_s.strip().isdigit() else None
+    try:
+        script = ai_engine.generate_script(
+            topic=topic_name.strip(), language=lang, total_episodes=10, episode=1, api_key=key,
+            custom_system_prompt=system_prompt.strip() or None,
+            persona=persona.strip() or None,
+            style_examples=style_examples.strip() or None,
+            catchphrase_open=catchphrase_open.strip() or None,
+            catchphrase_close=catchphrase_close.strip() or None,
+            self_critique=False,  # preview stays cheap: 1 call (2 if the length fix fires)
+            duration_min_s=lo if lo and hi else None,
+            duration_max_s=hi if lo and hi else None,
+            rate_pct=rate_pct,
+        )
+    except Exception as exc:  # noqa: BLE001 — clean retry message, never a stack trace
+        logger.warning("Script preview failed: %s", type(exc).__name__)
+        return JSONResponse({"error": "AI preview failed — please try again."}, status_code=502)
+    narration = " ".join(s.narration for s in script.scenes)
+    return {
+        "scenes": [{"narration": s.narration, "keywords": s.pexels_keywords}
+                   for s in script.scenes],
+        "title": script.metadata_variations[0].title,
+        "synopsis": script.synopsis,
+        "est_seconds": round(ai_engine.estimate_speech_seconds(narration, lang, rate_pct)),
+    }
+
+
 @app.post("/campaigns/propose")
 def propose_campaign_route(user: CurrentUser, topic: str = Form(""), language: str = Form("")):
     """AI-design a whole campaign config from a title (or from scratch). Returns JSON the New
@@ -411,6 +464,7 @@ def _build_campaign_config(
     title_prefix: str = "",
     posting_days: list[str] | None = None,
     duration_min_s: str = "", duration_max_s: str = "",
+    affiliate_url: str = "", affiliate_label: str = "",
 ) -> dict:
     """One place turns the campaign form into config_json (DRY: shared by create and edit)."""
     config: dict = {
@@ -451,6 +505,11 @@ def _build_campaign_config(
         # Optional channel brand mark prepended to every AI title (titles themselves never carry
         # the series name / episode number — they must stand alone as hooks).
         "title_prefix": title_prefix.strip()[:40] or None,
+        # Monetization: an affiliate/product link auto-appended to every description and pinned
+        # comment, always with a disclosure marker. Only http(s) URLs are accepted.
+        "affiliate_url": affiliate_url.strip()[:300]
+        if affiliate_url.strip().startswith(("http://", "https://")) else None,
+        "affiliate_label": affiliate_label.strip()[:30] or None,
     }
     # Target spoken length range (seconds). Stored only when BOTH bounds are valid; auto-ordered.
     lo = int(duration_min_s) if duration_min_s.strip().isdigit() else None
@@ -512,6 +571,8 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
     posting_days: list[str] = Form([]),
     duration_min_s: str = Form(""),
     duration_max_s: str = Form(""),
+    affiliate_url: str = Form(""),
+    affiliate_label: str = Form(""),
 ) -> dict:
     return {
         "topic_name": topic_name, "channel_id": channel_id, "total_episodes": total_episodes,
@@ -529,6 +590,7 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
             max_per_day=max_per_day, min_per_day=min_per_day,
             title_prefix=title_prefix, posting_days=posting_days,
             duration_min_s=duration_min_s, duration_max_s=duration_max_s,
+            affiliate_url=affiliate_url, affiliate_label=affiliate_label,
         ),
     }
 
@@ -837,6 +899,61 @@ def reset_learning(db: DbDep, campaign=Depends(get_owned_campaign)):
     campaign.learning_json = None
     db.commit()
     return RedirectResponse(f"/campaigns/{campaign.id}/performance", status_code=303)
+
+
+# ── Content calendar ─────────────────────────────────────────────────────────
+def upcoming_slot_cells(campaign: Campaign, days: int = 7) -> list[list[str]] | None:
+    """Per-day slot times for the next `days` days in the campaign's own timezone, honoring its
+    posting_days. None = the campaign doesn't slot-publish (continuous or review mode)."""
+    from datetime import timedelta
+
+    from workers.scheduler import WEEKDAY_KEYS, local_now
+
+    cfg = campaign.config_json or {}
+    slots = sorted(cfg.get("posting_slots") or [])
+    if not slots or not cfg.get("auto_publish", True):
+        return None
+    allowed = cfg.get("posting_days") or []
+    start = local_now(cfg.get("timezone"))
+    cells: list[list[str]] = []
+    for d in range(days):
+        day = start + timedelta(days=d)
+        key = WEEKDAY_KEYS[day.weekday()]
+        cells.append(slots if (not allowed or key in allowed) else [])
+    return cells
+
+
+@app.get("/calendar", response_class=HTMLResponse)
+def calendar_page(request: Request, user: CurrentUser, db: DbDep):
+    from datetime import timedelta
+
+    from workers.scheduler import local_now
+
+    campaigns = db.scalars(select(Campaign).where(
+        Campaign.user_id == user.id, Campaign.status == CampaignStatus.active)).all()
+    ready_counts = dict(db.execute(
+        select(BufferPoolItem.campaign_id, func.count())
+        .where(BufferPoolItem.status == BufferStatus.ready)
+        .group_by(BufferPoolItem.campaign_id)
+    ).all())
+    slotted, unslotted = [], []
+    for c in campaigns:
+        cells = upcoming_slot_cells(c)
+        entry = {"campaign": c, "ready": ready_counts.get(c.id, 0),
+                 "tz": (c.config_json or {}).get("timezone") or settings.TIMEZONE,
+                 "mode": "review" if not (c.config_json or {}).get("auto_publish", True) else "continuous"}
+        if cells is not None:
+            entry["cells"] = cells
+            slotted.append(entry)
+        else:
+            unslotted.append(entry)
+    base = local_now()
+    day_headers = [(base + timedelta(days=d)).strftime("%a %d/%m") for d in range(7)]
+    return templates.TemplateResponse(
+        request, "calendar.html",
+        {"request": request, "user": user, "nav": "calendar", "slotted": slotted,
+         "unslotted": unslotted, "day_headers": day_headers},
+    )
 
 
 # ── Real-Time Task Logs ──────────────────────────────────────────────────────

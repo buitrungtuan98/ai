@@ -653,6 +653,32 @@ def judge_footage(frame_path: str, narration: str, *, api_key: str,
     return FootageVerdict.model_validate_json(_strip_code_fence(raw))
 
 
+class FootageBatchVerdicts(BaseModel):
+    verdicts: list[FootageVerdict]
+
+
+def judge_footage_batch(items: list[tuple[str, str]], *, api_key: str,
+                        model: str = DEFAULT_MODEL) -> list[FootageVerdict]:
+    """Judge N (frame_path, narration) pairs in ONE vision call — quota efficiency: an episode's
+    whole footage set costs 1-2 calls instead of one per scene. Raises on a count mismatch
+    (callers fail open)."""
+    schema_hint = json.dumps(FootageBatchVerdicts.model_json_schema(), ensure_ascii=False)
+    lines = "\n".join(f'Image {i + 1} narration: "{n}"' for i, (_, n) in enumerate(items))
+    raw = _call_gemini_vision(
+        api_key=api_key, model=model, image_paths=[p for p, _ in items],
+        prompt=(f"You are judging stock-footage choices for {len(items)} scenes of one short "
+                f"video. Image i is the candidate background for narration i:\n{lines}\n"
+                "For EACH image in order, judge whether the visual genuinely fits its narration's "
+                "subject and mood. Return ONLY JSON matching this schema, with exactly "
+                f"{len(items)} verdicts in the same order:\n{schema_hint}"),
+        max_output_tokens=4096,
+    )
+    verdicts = FootageBatchVerdicts.model_validate_json(_strip_code_fence(raw)).verdicts
+    if len(verdicts) != len(items):
+        raise ValueError(f"expected {len(items)} verdicts, got {len(verdicts)}")
+    return verdicts
+
+
 class VideoQCVerdict(BaseModel):
     quality_score: int = Field(ge=1, le=10)
     issues: list[str] = Field(default_factory=list, max_length=6)

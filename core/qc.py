@@ -19,7 +19,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from core import media
-from core.ai_engine import judge_footage, judge_video_frames
+from core.ai_engine import judge_footage, judge_footage_batch, judge_video_frames
 from core.ffmpeg_runner import extract_frame
 
 logger = logging.getLogger(__name__)
@@ -50,6 +50,36 @@ def make_footage_vetter(api_key: str, *, threshold: int = FOOTAGE_MATCH_THRESHOL
         except Exception:  # noqa: BLE001 — QC must never fail a render
             logger.warning("Footage vetting errored — accepting clip (fail-open)", exc_info=True)
             return True
+
+    return vet
+
+
+def make_batch_vetter(api_key: str, *, threshold: int = FOOTAGE_MATCH_THRESHOLD,
+                      model: str | None = None) -> Callable[[list[tuple[str, str]]], list[bool]]:
+    """Return `vet(items) -> accepts` judging a whole episode's scene candidates in ONE vision
+    call. `items` is a list of (clip_path, narration); one frame is extracted per clip.
+
+    Fail-open: any error (extraction, API, count mismatch) accepts everything — Auto-QC must
+    never block a render."""
+    def vet(items: list[tuple[str, str]]) -> list[bool]:
+        try:
+            with tempfile.TemporaryDirectory(prefix="vet_") as tmp:
+                frames: list[str] = []
+                for i, (clip, _narration) in enumerate(items):
+                    frame = os.path.join(tmp, f"frame_{i}.jpg")
+                    extract_frame(clip, frame, 1.0)
+                    frames.append(frame)
+                kwargs = {"model": model} if model else {}
+                verdicts = judge_footage_batch(
+                    list(zip(frames, [n for _, n in items])), api_key=api_key, **kwargs)
+            accepts = [v.match_score >= threshold for v in verdicts]
+            for (_, narration), v, ok in zip(items, verdicts, accepts):
+                if not ok:
+                    logger.info("Footage rejected (score %s/10): %s", v.match_score, v.reason)
+            return accepts
+        except Exception:  # noqa: BLE001 — QC must never fail a render
+            logger.warning("Batch footage vetting errored — accepting all (fail-open)", exc_info=True)
+            return [True] * len(items)
 
     return vet
 

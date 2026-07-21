@@ -174,6 +174,69 @@ def test_rerender_discards_and_requeues(client, monkeypatch, tmp_path):
     db.close()
 
 
+def test_preview_script_route(client, monkeypatch):
+    """The dry-run returns scenes + estimated duration from the current form values (1 AI call,
+    nothing rendered or stored)."""
+    from core import ai_engine
+    from core.config import settings
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "k")
+    captured = {}
+
+    def fake_generate(**kwargs):
+        captured.update(kwargs)
+        from core.ai_engine import VideoScript
+
+        return VideoScript(
+            language="vi", topic="ma", synopsis="Chuyện chiếc ghe",
+            scenes=[{"index": i, "narration": "mười từ " * 5, "pexels_keywords": ["river"]}
+                    for i in range(3)],
+            metadata_variations=[{"variant": v, "title": "Nghe kỹ nè", "description": "d",
+                                  "tags": ["a", "b", "c"]} for v in "ABC"],
+        )
+
+    monkeypatch.setattr(ai_engine, "generate_script", lambda **k: fake_generate(**k))
+    r = client.post("/campaigns/preview-script",
+                    data={"topic_name": "chuyện ma", "language": "vi", "persona": "Chú Ba"})
+    assert r.status_code == 200
+    j = r.json()
+    assert len(j["scenes"]) == 3 and j["title"] == "Nghe kỹ nè" and j["est_seconds"] > 0
+    assert captured["persona"] == "Chú Ba" and captured["self_critique"] is False
+
+    # No topic → friendly 400, no AI call.
+    assert client.post("/campaigns/preview-script", data={"topic_name": ""}).status_code == 400
+
+
+def test_calendar_page_and_slot_cells(client):
+    """The calendar shows slot times on allowed days and dashes on gated days."""
+
+    import main
+    from database.db_session import SessionLocal
+    from database.models import Campaign, Channel
+    from database.types import CampaignStatus
+    from workers.scheduler import WEEKDAY_KEYS, local_now
+
+    client.post("/channels/facebook", data={"channel_name": "P", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    db = SessionLocal()
+    ch = db.query(Channel).first()
+    today_key = WEEKDAY_KEYS[local_now().weekday()]
+    cam = Campaign(user_id=ch.user_id, channel_id=ch.id, topic_name="CalCam", total_episodes=5,
+                   status=CampaignStatus.active,
+                   config_json={"posting_slots": ["21:00"], "posting_days": [today_key]})
+    db.add(cam)
+    db.commit()
+    db.refresh(cam)
+
+    cells = main.upcoming_slot_cells(cam)
+    assert cells[0] == ["21:00"]                       # today is an allowed day
+    assert [] in cells                                  # other days are gated off
+    db.close()
+
+    page = client.get("/calendar")
+    assert page.status_code == 200 and "CalCam" in page.text and "21:00" in page.text
+
+
 def test_propose_campaign_route(client, monkeypatch):
     """The AI designer returns a full config as JSON for the form to fill (nothing is saved)."""
     from core import ai_engine

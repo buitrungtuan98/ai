@@ -35,6 +35,38 @@ def test_footage_vetter_fails_open(monkeypatch):
     assert qc.make_footage_vetter("key")("clip.mp4", "narration") is True
 
 
+def test_batch_vetter_thresholds_and_fail_open(monkeypatch):
+    """The batch vetter judges all scenes in one call; per-item thresholding; any error accepts
+    everything (fail-open — QC must never block a render)."""
+    from core import qc
+
+    monkeypatch.setattr(qc, "extract_frame", lambda video, out, at: None)
+    monkeypatch.setattr(
+        qc, "judge_footage_batch",
+        lambda items, *, api_key, **kw: [FootageVerdict(match_score=s) for s in (9, 3, 7)])
+    vet = qc.make_batch_vetter("key")
+    assert vet([("a.mp4", "n1"), ("b.mp4", "n2"), ("c.mp4", "n3")]) == [True, False, True]
+
+    def boom(*a, **kw):
+        raise RuntimeError("vision down")
+
+    monkeypatch.setattr(qc, "judge_footage_batch", boom)
+    assert qc.make_batch_vetter("key")([("a.mp4", "n1"), ("b.mp4", "n2")]) == [True, True]
+
+
+def test_judge_footage_batch_count_mismatch(monkeypatch):
+    """A response with the wrong number of verdicts raises (the vetter then fails open)."""
+    import json as _json
+
+    import core.ai_engine as ai
+
+    monkeypatch.setattr(ai, "_call_gemini_vision",
+                        lambda **k: _json.dumps({"verdicts": [{"match_score": 9, "reason": ""}]}))
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="expected 2"):
+        ai.judge_footage_batch([("f1.jpg", "n1"), ("f2.jpg", "n2")], api_key="k")
+
+
 def test_final_qc_pass_fail_and_fail_open(monkeypatch):
     from core import qc
 

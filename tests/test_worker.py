@@ -315,7 +315,7 @@ def test_auto_qc_pass_publishes_with_verdict(session, user, channel, monkeypatch
     video_worker.render_task(t.id)
     session.refresh(t)
     assert t.status == TaskStatus.COMPLETED
-    assert len(produce_calls) == 1 and produce_calls[0]["vet_clip"] is not None  # vetter wired in
+    assert len(produce_calls) == 1 and produce_calls[0]["vet_batch"] is not None  # batch vetter wired in
     buf = session.query(BufferPoolItem).filter_by(campaign_id=cam.id, episode_number=1).one()
     assert buf.metadata_json["qc"] == {"passed": True, "score": 9, "issues": [], "attempts": 1}
 
@@ -365,7 +365,7 @@ def test_auto_qc_off_skips_gate(session, user, channel, monkeypatch):
     video_worker.render_task(t.id)
     session.refresh(t)
     assert t.status == TaskStatus.COMPLETED
-    assert produce_calls[0]["vet_clip"] is None  # no vision vetting when the gate is off
+    assert produce_calls[0]["vet_batch"] is None  # no vision vetting when the gate is off
 
 
 def test_rerender_replaces_existing_buffer(session, user, channel, monkeypatch, tmp_path):

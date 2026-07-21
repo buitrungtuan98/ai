@@ -356,11 +356,11 @@ def render_task(task_id: int) -> None:
         output_dir = os.path.join(settings.MEDIA_ROOT, "buffer", str(campaign.id))
         music_path, music_credit = _resolve_music(cfg)
 
-        vet_clip = None
+        vet_batch = None
         if auto_qc:
             from core import qc  # lazy, like the publishing services
 
-            vet_clip = qc.make_footage_vetter(gemini_key)
+            vet_batch = qc.make_batch_vetter(gemini_key)
 
         # Render, then let the machine review its own output. A failing verdict triggers exactly
         # one re-render; if it still fails, the episode is parked for human review (the backup).
@@ -383,7 +383,9 @@ def render_task(task_id: int) -> None:
                 music_volume=float(cfg.get("music_volume", 0.15)),
                 ab_testing=bool(cfg.get("ab_testing", True)),
                 title_prefix=cfg.get("title_prefix"),
-                vet_clip=vet_clip,
+                affiliate_url=cfg.get("affiliate_url"),
+                affiliate_label=cfg.get("affiliate_label"),
+                vet_batch=vet_batch,
                 on_progress=lambda p: set_progress(task_id, 10 + p * 0.8),
             )
             if not auto_qc:
@@ -406,6 +408,10 @@ def render_task(task_id: int) -> None:
         # review) has everything it needs.
         result.metadata.setdefault("cta", cfg.get("cta"))
         result.metadata.setdefault("privacy", cfg.get("privacy", "public"))
+        if cfg.get("affiliate_url"):
+            # The pinned comment carries the affiliate link too (with disclosure).
+            line = f"{(cfg.get('affiliate_label') or '🔗').strip()} {cfg['affiliate_url']} (affiliate)"
+            result.metadata["cta"] = ((result.metadata.get("cta") or "") + "\n" + line).strip()
         if music_credit:
             result.metadata["music_credit"] = music_credit  # per-episode transparency (CC0)
         if qc_report:

@@ -72,6 +72,12 @@
       </div>
       <div class="form-row"><label>Custom system prompt (optional)</label>
         <textarea name="system_prompt" placeholder="Tone, style, constraints for the scriptwriter…">{{ cfg.get('system_prompt') or '' }}</textarea></div>
+      <div class="form-row">
+        <button type="button" class="btn ghost" id="script-preview">📝 Preview a script (1 AI call)</button>
+        <p class="hint">Dry-run with the values in this form — read what the AI would write, tune the
+          persona, preview again. Nothing is rendered or saved.</p>
+        <div id="script-preview-out" class="mt" style="display:none;"></div>
+      </div>
     </div>
     <div class="card mt">
       <h3>Persona — make it sound like a real person</h3>
@@ -209,6 +215,14 @@
         <input name="title_prefix" maxlength="40" placeholder="🔥 SỬ VIỆT |" value="{{ cfg.get('title_prefix') or '' }}">
         <p class="hint">Prepended to every video title. Titles themselves are standalone hooks — the AI never puts the
           campaign name or episode number in them (the series stays findable via a stable hashtag in the description).</p></div>
+      <div class="form-row"><label>Affiliate / product link (optional — monetization)</label>
+        <input name="affiliate_url" maxlength="300" placeholder="https://shope.ee/your-link"
+               value="{{ cfg.get('affiliate_url') or '' }}">
+        <p class="hint">Auto-appended to every description and pinned comment, always marked
+          “(affiliate link)” — platform &amp; advertising rules require the disclosure.</p></div>
+      <div class="form-row"><label>Affiliate label (short text before the link)</label>
+        <input name="affiliate_label" maxlength="30" placeholder="📚 Sách hay về thời Trần:"
+               value="{{ cfg.get('affiliate_label') or '' }}"></div>
       <div class="form-row"><label>Pinned comment / CTA</label>
         <textarea name="cta" placeholder="👉 Follow for daily shorts!">{{ cfg.get('cta') or '' }}</textarea></div>
     </div>
@@ -231,6 +245,46 @@
       document.getElementById(b.dataset.tab).classList.add("active");
     });
   });
+
+  // 📝 Script preview: dry-run the scriptwriter with the current form values (nothing saved).
+  const previewBtn = document.getElementById("script-preview");
+  if (previewBtn) {
+    previewBtn.addEventListener("click", async function () {
+      const form = previewBtn.closest("form");
+      const out = document.getElementById("script-preview-out");
+      const orig = previewBtn.textContent;
+      previewBtn.disabled = true;
+      previewBtn.textContent = "📝 Writing…";
+      try {
+        const body = new URLSearchParams();
+        ["topic_name", "language", "system_prompt", "persona", "style_examples",
+         "catchphrase_open", "catchphrase_close", "rate_pct", "duration_min_s", "duration_max_s"]
+          .forEach(n => { const el = form.elements[n]; if (el) body.set(n, el.value || ""); });
+        const r = await fetch("/campaigns/preview-script", { method: "POST", body });
+        const p = await r.json();
+        if (!r.ok) throw new Error(p.error || "Preview failed");
+        out.textContent = "";                        // build with textContent — never innerHTML
+        const head = document.createElement("p");
+        head.className = "hint";
+        head.textContent = "🎬 " + (p.title || "") + " · ~" + p.est_seconds + "s spoken" +
+                           (p.synopsis ? " · " + p.synopsis : "");
+        out.appendChild(head);
+        (p.scenes || []).forEach(function (s, i) {
+          const line = document.createElement("p");
+          line.className = "meta";
+          line.textContent = (i + 1) + ". " + s.narration + "  [" + (s.keywords || []).join(", ") + "]";
+          out.appendChild(line);
+        });
+        out.style.display = "block";
+      } catch (e) {
+        out.textContent = e.message || "Preview failed — please try again.";
+        out.style.display = "block";
+      } finally {
+        previewBtn.disabled = false;
+        previewBtn.textContent = orig;
+      }
+    });
+  }
 
   // ✨ AI campaign designer: ask the server for a full proposal and fill the form for review.
   const proposeBtn = document.getElementById("ai-propose");

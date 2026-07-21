@@ -237,6 +237,21 @@ measured at TTS time (audio remains ground truth). Proposed by the AI designer.
 - Verified: 113 tests passing (1 new — estimator sanity + rate scaling, prompt budget line,
   length-fix rewrite fires once and the fixed draft wins; form auto-orders reversed bounds).
 
+## Kaizen batch — affiliate links, script preview, calendar, batched QC `DONE`
+- **Affiliate monetization**: per-campaign `affiliate_url` + `affiliate_label` (http(s)-validated)
+  auto-appended to every description AND pinned comment, always with an "(affiliate)" disclosure.
+- **Script preview (dry run)**: `POST /campaigns/preview-script` + a form button — generate one
+  script from the CURRENT (unsaved) form values, see scenes + estimated spoken seconds; 1 AI call,
+  nothing rendered/stored. Makes persona tuning a 10-second loop.
+- **Content calendar** (`/calendar`): 7-day grid of upcoming slots per active campaign (weekday
+  gate + campaign timezone aware) with pre-rendered runway counts; continuous/review campaigns
+  listed separately.
+- **Batched footage vetting**: `produce()` restructured into prep→vet→render phases; the whole
+  episode's lead candidates are judged in ONE vision call (rejects swap to candidate #2, verified
+  in one follow-up) → **≤2 vetting calls/episode instead of ~1/scene**; a QC'd episode now costs
+  ~4-5 Gemini calls (was ~8). All fail-open.
+- Verified: 118 tests passing (6 new), ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

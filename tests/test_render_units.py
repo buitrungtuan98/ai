@@ -161,13 +161,16 @@ def test_progress_is_monotonic(monkeypatch):
     def emit(frac):  # produce()'s report() maps stage fractions into 0..100 via _STAGE_BUDGET
         values.append(frac)
 
-    # Drive report() directly the way produce() does: per scene, encode progress then scene-done.
+    # Drive report() the way produce() does: prep sub-band (0-30% of the scenes band) for every
+    # scene first, then the render sub-band (30-100%) with encode progress + scene-done marks.
     n = 3
-    for si in range(n):
+    band = vf._STAGE_BUDGET["scenes"]
+    for si in range(n):                       # Phase A: prep
+        emit(min(99.0, ((si + 1) / n * 30) / 100 * band))
+    for si in range(n):                       # Phase C: render
         for p in (0, 40, 80, 100):
-            base = sum(v for k, v in vf._STAGE_BUDGET.items()
-                       if vf._stage_order(k) < vf._stage_order("scenes"))
-            emit(min(99.0, base + ((si + p / 100) / n * 100) / 100 * vf._STAGE_BUDGET["scenes"]))
+            emit(min(99.0, (30 + (si + p / 100) / n * 70) / 100 * band))
+        emit(min(99.0, (30 + (si + 1) / n * 70) / 100 * band))
     assert values == sorted(values)  # never decreases
 
 
@@ -208,31 +211,53 @@ def test_color_grade_in_scene_graph():
         assert all(g not in fc2[fc2.index("-filter_complex") + 1] for g in COLOR_GRADES.values())
 
 
-def test_vet_candidates_reorders_and_reuses_downloads():
+def test_batch_vet_plans():
+    """One batched vet call for the episode; rejected scenes swap to candidate #2 and only the
+    replacements get a second (single) batched call — ≤2 vision calls total, fail-open."""
     from types import SimpleNamespace
 
-    from core.video_factory import vet_candidates
+    from core.video_factory import _batch_vet_plans
 
-    found = [SimpleNamespace(download_url=f"u{i}", duration=5.0) for i in range(4)]
+    def mk_plan(n_found, pre_path):
+        return {"clean": "story text",
+                "found": [SimpleNamespace(download_url=f"u{i}", duration=5.0) for i in range(n_found)],
+                "pre": {0: pre_path}}
+
+    plans = [mk_plan(3, "/ws/s0_vet_0.mp4"), mk_plan(3, "/ws/s1_vet_0.mp4"), mk_plan(1, "/ws/s2_vet_0.mp4")]
+    calls: list[int] = []
     downloads: list[str] = []
 
-    def download(url, path):
-        downloads.append(url)
+    def vet_batch(items):
+        calls.append(len(items))
+        if len(calls) == 1:
+            return [True, False, False]   # scene 1 & 2 rejected
+        return [True] * len(items)        # replacements accepted
 
-    # First candidate rejected, second accepted → leader swaps, reject dropped, downloads reused.
-    verdicts = iter([False, True])
-    kept, pre = vet_candidates(found, "narration", lambda p, n: next(verdicts), download,
-                               lambda k: f"/ws/vet_{k}.mp4")
-    assert [c.download_url for c in kept] == ["u1", "u2", "u3"]
-    assert pre == {0: "/ws/vet_1.mp4"}      # the accepted clip's file, re-keyed to lead
-    assert downloads == ["u0", "u1"]        # vetting stopped at the first accept
+    _batch_vet_plans(plans, vet_batch, path_for=lambda i, k: f"/ws/s{i}_vet_{k}.mp4",
+                     download=lambda url, path: downloads.append(url))
 
-    # All vetted candidates rejected → fail-open: original order kept, downloads still reusable.
-    downloads.clear()
-    kept2, pre2 = vet_candidates(found, "narration", lambda p, n: False, download,
-                                 lambda k: f"/ws/vet_{k}.mp4")
-    assert kept2 is found and set(pre2) == {0, 1, 2}  # bounded at FOOTAGE_VET_CANDIDATES
-    assert downloads == ["u0", "u1", "u2"]
+    assert calls == [3, 1]                                 # 1 episode call + 1 replacement call
+    assert plans[0]["pre"] == {0: "/ws/s0_vet_0.mp4"}      # accepted → untouched
+    assert [c.download_url for c in plans[1]["found"]] == ["u1", "u2"]  # leader dropped
+    assert plans[1]["pre"] == {0: "/ws/s1_vet_1.mp4"} and downloads == ["u1"]
+    assert len(plans[2]["found"]) == 1                     # no second candidate → kept (fail-open)
+
+
+def test_affiliate_link_in_description():
+    """An affiliate link is appended to the description with a disclosure marker; absent → untouched."""
+    from core.ai_engine import VideoScript
+    from core.video_factory import pick_metadata
+
+    vs = VideoScript(
+        language="vi", topic="t",
+        scenes=[{"index": i, "narration": "n", "pexels_keywords": ["k"]} for i in range(3)],
+        metadata_variations=[{"variant": v, "title": "T", "description": "Mô tả video.",
+                              "tags": ["a", "b", "c"]} for v in "ABC"],
+    )
+    meta = pick_metadata(vs, 1, affiliate_url="https://shope.ee/x", affiliate_label="📚 Sách:")
+    assert "📚 Sách: https://shope.ee/x" in meta["description"]
+    assert "(affiliate link)" in meta["description"]  # disclosure is mandatory
+    assert pick_metadata(vs, 1)["description"] == "Mô tả video."  # no link → untouched
 
 
 def test_search_footage_fallback_chain(monkeypatch):
