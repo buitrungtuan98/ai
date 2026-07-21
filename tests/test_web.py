@@ -121,6 +121,10 @@ def test_publish_now_skips_the_slot(client, monkeypatch, tmp_path):
     monkeypatch.setattr(main.task_queue, "enqueue_publish", lambda bid: queued.append(bid) or "j1")
     r = client.post(f"/assets/{buf.id}/publish-now", follow_redirects=False)
     assert r.status_code == 303 and queued == [buf.id]
+    assert "flash=publish" in r.headers["location"]
+    # The follow-up page explains what "queued" means (worker publishes when free).
+    page = client.get(r.headers["location"]).text
+    assert "Publish queued" in page
 
     # Guard: a consumed item can't be re-published.
     from database.db_session import SessionLocal
@@ -146,6 +150,7 @@ def test_rerender_discards_and_requeues(client, monkeypatch, tmp_path):
     monkeypatch.setattr(main.task_queue, "enqueue_render", lambda tid: renders.append(tid) or "j2")
     r = client.post(f"/assets/{buf.id}/rerender", follow_redirects=False)
     assert r.status_code == 303 and renders == [task.id]
+    assert "flash=rerender" in r.headers["location"]
     assert not video.exists()  # bad render's file removed
     db = SessionLocal()
     assert db.get(BufferPoolItem, buf.id).status == BufferStatus.rejected

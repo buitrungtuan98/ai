@@ -619,7 +619,8 @@ def save_credentials(
 
 # ── Asset Pool Cache (+ preview & review) ────────────────────────────────────
 @app.get("/assets", response_class=HTMLResponse)
-def assets_page(request: Request, user: CurrentUser, db: DbDep):
+def assets_page(request: Request, user: CurrentUser, db: DbDep,
+                flash: str = "", flash_reason: str = ""):
     items = db.scalars(
         select(BufferPoolItem)
         .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
@@ -631,7 +632,10 @@ def assets_page(request: Request, user: CurrentUser, db: DbDep):
     return templates.TemplateResponse(
         request, "assets.html",
         {"request": request, "user": user, "items": items, "nav": "assets",
-         "camp_by_id": {c.id: c for c in campaigns}, "previewable": previewable},
+         "camp_by_id": {c.id: c for c in campaigns}, "previewable": previewable,
+         # Post-action feedback (whitelisted — never echo arbitrary input back into the page).
+         "flash": flash if flash in ("publish", "rerender", "rejected") else "",
+         "flash_reason": flash_reason[:200]},
     )
 
 
@@ -719,7 +723,7 @@ def publish_asset_now(db: DbDep, item=Depends(get_owned_buffer_item)):
     if item.status != BufferStatus.ready:
         raise HTTPException(400, "Only pre-rendered (ready) items can be published now")
     task_queue.enqueue_publish(item.id)
-    return RedirectResponse("/assets", status_code=303)
+    return RedirectResponse("/assets?flash=publish", status_code=303)
 
 
 @app.post("/assets/{item_id}/rerender")
@@ -747,7 +751,7 @@ def rerender_asset(db: DbDep, item=Depends(get_owned_buffer_item)):
     db.commit()
     task.rq_job_id = task_queue.enqueue_render(task.id)
     db.commit()
-    return RedirectResponse("/assets", status_code=303)
+    return RedirectResponse("/assets?flash=rerender", status_code=303)
 
 
 @app.post("/assets/{item_id}/reject")
@@ -777,7 +781,12 @@ def reject_asset(db: DbDep, item=Depends(get_owned_buffer_item), reason: str = F
             learning["reject_reasons"] = reasons + [reason]
             campaign.learning_json = learning
     db.commit()
-    return RedirectResponse("/assets", status_code=303)
+    from urllib.parse import quote
+
+    return RedirectResponse(
+        "/assets?flash=rejected" + (f"&flash_reason={quote(reason)}" if reason else ""),
+        status_code=303,
+    )
 
 
 # ── Performance & learning (self-improvement transparency) ──────────────────
