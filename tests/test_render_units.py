@@ -263,6 +263,37 @@ def test_pexels_keywords_prompt_demands_english():
     assert "ENGLISH" in build_script_prompt("chuyện ma", "vi", 30, 1)
 
 
+def test_tts_retries_transient_failures(monkeypatch):
+    """The TTS endpoint occasionally drops a handshake — synthesize retries before surfacing."""
+    from core import tts
+
+    monkeypatch.setattr(tts, "_RETRY_SLEEP_SECONDS", 0)
+    attempts = []
+
+    async def flaky(text, voice, rate_pct, out_path):
+        attempts.append(1)
+        if len(attempts) < 2:
+            raise ConnectionError("403 handshake dropped")
+        return [tts.WordTiming("hi", 0.0, 0.4)]
+
+    monkeypatch.setattr(tts, "_synthesize_async", flaky)
+    timings = tts.synthesize("hi", "/tmp/x.mp3", language="en")
+    assert len(attempts) == 2 and timings[0].text == "hi"  # failed once, then recovered
+
+    # A persistent failure still raises (the episode must fail visibly).
+    attempts.clear()
+
+    async def dead(text, voice, rate_pct, out_path):
+        attempts.append(1)
+        raise ConnectionError("403 forever")
+
+    monkeypatch.setattr(tts, "_synthesize_async", dead)
+    import pytest as _pytest
+    with _pytest.raises(ConnectionError):
+        tts.synthesize("hi", "/tmp/x.mp3", language="en")
+    assert len(attempts) == tts._RETRY_ATTEMPTS
+
+
 def test_ffmpeg_runner_uses_nice_threads(monkeypatch):
     """run_ffmpeg composes the command with nice + -threads without executing (Popen mocked)."""
     import core.ffmpeg_runner as fr
