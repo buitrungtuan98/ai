@@ -216,6 +216,77 @@ def test_maybe_distill_guards_and_updates(session, user, channel, monkeypatch):
     assert sch.maybe_distill_campaign(session, cam, now=now + timedelta(days=8)) is True
 
 
+def test_posting_days_gate(session, user, channel, monkeypatch):
+    """Weekday-gated campaigns publish only on their configured days (campaign timezone)."""
+    from database.models import BufferPoolItem, Campaign
+    from database.types import BufferStatus, CampaignStatus
+    from workers import scheduler as sch
+
+    now = datetime(2026, 7, 21, 21, 0)  # a Tuesday
+    today = sch.WEEKDAY_KEYS[now.weekday()]
+    other = sch.WEEKDAY_KEYS[(now.weekday() + 1) % 7]
+    assert sch.is_posting_day([], now) is True            # empty = every day
+    assert sch.is_posting_day([today], now) is True
+    assert sch.is_posting_day([other], now) is False
+
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="D", total_episodes=5,
+                   status=CampaignStatus.active,
+                   config_json={"auto_publish": True, "posting_slots": ["21:00"],
+                                "posting_days": [other]})
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    buf = BufferPoolItem(campaign_id=cam.id, channel_id=channel.id, episode_number=1,
+                         video_path="/x.mp4", status=BufferStatus.ready)
+    session.add(buf)
+    session.commit()
+
+    queued = []
+    # Wrong day → slot matches but nothing publishes.
+    assert sch.publish_due_campaign(session, cam, now=now, enqueue=queued.append) is None
+    assert queued == []
+    # Right day → publishes.
+    cam.config_json = {**cam.config_json, "posting_days": [today]}
+    session.commit()
+    assert sch.publish_due_campaign(session, cam, now=now, enqueue=queued.append) == buf.id
+    assert queued == [buf.id]
+
+
+def test_expiry_stretched_for_day_gated_campaigns(session, user, channel, tmp_path):
+    """A day-gated campaign's pre-render may wait most of a week — 4 days old must NOT expire
+    (default 72h would have destroyed it before its publish day)."""
+    from datetime import timedelta
+
+    from database.models import BufferPoolItem, Campaign
+    from database.types import BufferStatus, CampaignStatus
+    from workers import scheduler as sch
+
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="W", total_episodes=3,
+                   status=CampaignStatus.active,
+                   config_json={"posting_slots": ["21:00"], "posting_days": ["mon"]})
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    vp = tmp_path / "gated.mp4"
+    vp.write_bytes(b"x")
+    item = BufferPoolItem(campaign_id=cam.id, channel_id=channel.id, episode_number=1,
+                          video_path=str(vp), status=BufferStatus.ready)
+    session.add(item)
+    session.commit()
+    session.refresh(item)
+    now = datetime(2026, 7, 21, 10, 0)
+    item.created_at = now - timedelta(days=4)     # past 72h, within the stretched week
+    session.commit()
+
+    assert sch.expire_stale_buffers(session, now=now) == 0
+    session.refresh(item)
+    assert item.status == BufferStatus.ready and vp.exists()
+
+    item.created_at = now - timedelta(days=9)     # beyond even the stretched window
+    session.commit()
+    assert sch.expire_stale_buffers(session, now=now) == 1
+
+
 def test_expire_stale_buffers(session, user, channel, tmp_path):
     from database.models import BufferPoolItem, Campaign
     from database.types import BufferStatus, CampaignStatus

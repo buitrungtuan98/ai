@@ -409,6 +409,7 @@ def _build_campaign_config(
     color_grade: str = "", auto_qc: str = "on",
     max_per_day: str = "", min_per_day: str = "",
     title_prefix: str = "",
+    posting_days: list[str] | None = None,
 ) -> dict:
     """One place turns the campaign form into config_json (DRY: shared by create and edit)."""
     config: dict = {
@@ -419,6 +420,9 @@ def _build_campaign_config(
         "rate_pct": rate_pct, "subtitle_style": subtitle_style,
         "music_path": music_path or None, "music_volume": music_volume,
         "posting_slots": [s.strip() for s in posting_slots.split(",") if s.strip()],
+        # Weekday gate for the slots (empty = every day). Whitelisted to real day keys.
+        "posting_days": [d for d in (posting_days or [])
+                         if d in ("mon", "tue", "wed", "thu", "fri", "sat", "sun")],
         "ab_testing": ab_testing, "cta": cta or None,
         "privacy": privacy, "auto_publish": publish_mode != "review",
         "buffer_size": int(buffer_size) if buffer_size.strip().isdigit() else None,
@@ -496,6 +500,7 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
     max_per_day: str = Form(""),
     min_per_day: str = Form(""),
     title_prefix: str = Form(""),
+    posting_days: list[str] = Form([]),
 ) -> dict:
     return {
         "topic_name": topic_name, "channel_id": channel_id, "total_episodes": total_episodes,
@@ -511,7 +516,7 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
             music_mode=music_mode, music_mood=music_mood,
             color_grade=color_grade, auto_qc=auto_qc,
             max_per_day=max_per_day, min_per_day=min_per_day,
-            title_prefix=title_prefix,
+            title_prefix=title_prefix, posting_days=posting_days,
         ),
     }
 
