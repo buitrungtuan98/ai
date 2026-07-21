@@ -110,6 +110,10 @@ failed episodes. Transient one-off 403s are retried automatically (3 attempts). 
 edge-tts still 403s persistently from the box, Microsoft may be blocking that IP range — the
 escape hatch is swapping `core/tts.py`'s backend for a paid/keyed TTS API (e.g. Azure Speech free
 tier) behind the same interface.
+**After any edge-tts upgrade, verify subtitles on one video**: library defaults can change
+silently — e.g. 7.x switched the default from word to SENTENCE boundaries, which produced perfect
+videos with zero captions until `boundary="WordBoundary"` was passed explicitly (a regression test
+now pins this).
 
 ## Retrying failed episodes
 Task Logs shows every failure with its full error. **Retry** re-runs the episode; if the rendered

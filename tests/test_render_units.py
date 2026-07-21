@@ -294,6 +294,30 @@ def test_tts_retries_transient_failures(monkeypatch):
     assert len(attempts) == tts._RETRY_ATTEMPTS
 
 
+def test_tts_requests_word_boundaries(monkeypatch, tmp_path):
+    """edge-tts >= 7 defaults to SentenceBoundary — synthesize must explicitly request per-WORD
+    boundaries or captions come back empty (videos silently render with no subtitles)."""
+    import edge_tts
+
+    from core import tts
+
+    captured = {}
+
+    class FakeCommunicate:
+        def __init__(self, text, voice, rate=None, boundary=None):
+            captured.update(text=text, voice=voice, rate=rate, boundary=boundary)
+
+        async def stream(self):
+            yield {"type": "audio", "data": b"mp3"}
+            yield {"type": "WordBoundary", "offset": 0, "duration": 5_000_000, "text": "hello"}
+            yield {"type": "SentenceBoundary", "offset": 0, "duration": 9_000_000, "text": "hello."}
+
+    monkeypatch.setattr(edge_tts, "Communicate", FakeCommunicate)
+    timings = tts.synthesize("hello", str(tmp_path / "o.mp3"))
+    assert captured["boundary"] == "WordBoundary"          # explicit — the 7.x default is sentences
+    assert [w.text for w in timings] == ["hello"]          # word events used, sentence events ignored
+
+
 def test_ffmpeg_runner_uses_nice_threads(monkeypatch):
     """run_ffmpeg composes the command with nice + -threads without executing (Popen mocked)."""
     import core.ffmpeg_runner as fr
