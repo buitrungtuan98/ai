@@ -229,6 +229,19 @@ box. How to pick a model and stay within quota:
   of a cent per call — dozens of QC'd videos/day is cents/month — and limits jump into the
   thousands. The $0 goal holds for the infrastructure (Oracle box, Cloudflare, GHCR).
 
+## Running multiple campaigns / accounts on one quota (daily pacing)
+Campaigns already run in parallel (each channel/account gets its own campaigns, slots, timezone).
+Two Distribution-tab fields pace them against the shared Gemini quota:
+- **Max new renders per day** — how many episodes the campaign may *start rendering* per local
+  day. Hydration stops at the cap and resumes after midnight. Sizing rule of thumb:
+  `sum over campaigns of (max_per_day × calls-per-episode) ≤ your model's RPD`
+  (calls/episode ≈ 8 with Auto-QC + critique on, ≈ 1 with both off). Example: 500 RPD free on
+  flash-lite → e.g. 5 campaigns × 10 renders/day with QC ≈ 400 calls — fits.
+- **Min published per day** — a watchdog: if the campaign publishes fewer than this in 24h, you
+  get a Telegram alert (it cannot force publishes — it makes shortfalls loud instead of silent).
+Publishing cadence itself is still the posting slots; these fields govern generation pace and
+monitoring.
+
 ## Operational notes from the hardening review (ADR-014)
 - **`WORK_ROOT` / `MEDIA_ROOT` paths:** keep them free of spaces and quotes (the defaults
   `/data/media/...` are fine). Scene render passes embed the subtitle path into an ffmpeg filter

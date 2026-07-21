@@ -437,6 +437,59 @@ def test_publish_task_idempotent_on_consumed(session, user, channel, monkeypatch
     assert published == []  # no second upload
 
 
+def test_hydrate_respects_max_per_day(session, user, channel):
+    """max_per_day caps how many renders a campaign may START per (local) day — the Gemini-quota
+    rationing knob for running several campaigns/accounts side by side."""
+    from database.models import Campaign, Task
+    from database.types import CampaignStatus
+    from workers import video_worker
+
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="Capped", total_episodes=10,
+                   status=CampaignStatus.active,
+                   config_json={"buffer_size": 5, "max_per_day": 2})
+    session.add(cam)
+    session.commit()
+
+    created = video_worker.hydrate_buffers(session, enqueue=lambda t: f"j{t}")
+    assert len(created) == 2  # cap wins over the buffer size (5)
+    # Re-hydrating the same day creates nothing more — today's budget is spent.
+    assert video_worker.hydrate_buffers(session, enqueue=lambda t: "x") == []
+    assert session.query(Task).count() == 2
+
+
+def test_min_per_day_watchdog_alerts(session, user, channel, monkeypatch):
+    """A campaign below its min_per_day in the last 24h triggers one Telegram alert; a campaign
+    meeting its minimum stays silent."""
+    from datetime import datetime, timedelta
+
+    from database.models import Campaign, Task
+    from database.types import CampaignStatus, TaskStatus
+    from workers import scheduler as sch
+    from workers import video_worker
+
+    now = datetime.utcnow()
+    behind = Campaign(user_id=user.id, channel_id=channel.id, topic_name="Behind", total_episodes=9,
+                      status=CampaignStatus.active, config_json={"min_per_day": 2})
+    ok = Campaign(user_id=user.id, channel_id=channel.id, topic_name="OnTrack", total_episodes=9,
+                  status=CampaignStatus.active, config_json={"min_per_day": 1})
+    session.add_all([behind, ok])
+    session.commit()
+    session.refresh(behind)
+    session.refresh(ok)
+    session.add_all([
+        Task(campaign_id=behind.id, user_id=user.id, episode_number=1,
+             status=TaskStatus.COMPLETED, finished_at=now - timedelta(hours=3)),   # 1 of 2 → behind
+        Task(campaign_id=ok.id, user_id=user.id, episode_number=1,
+             status=TaskStatus.COMPLETED, finished_at=now - timedelta(hours=3)),   # 1 of 1 → fine
+    ])
+    session.commit()
+
+    alerts = []
+    monkeypatch.setattr(video_worker, "_notify", lambda u, msg: alerts.append(msg))
+    assert sch.check_daily_minimums(session, now=now) == 1
+    assert len(alerts) == 1 and "1/2" in alerts[0] and "Behind" in alerts[0]
+
+
 def test_hydrate_respects_campaign_buffer_size(session, user, channel):
     from database.models import Campaign, Task
     from database.types import CampaignStatus

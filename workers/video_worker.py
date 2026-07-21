@@ -16,7 +16,7 @@ import traceback
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from core import video_factory
 from core.ai_engine import generate_script
@@ -126,12 +126,47 @@ def advance_campaign(db, campaign: Campaign) -> AdvanceEvents:
 
 
 # ── Buffer hydration ─────────────────────────────────────────────────────────
+def _campaign_day_start_utc(campaign: Campaign, now: datetime | None = None) -> datetime:
+    """Midnight of 'today' in the campaign's timezone, as a naive-UTC datetime (DB timestamps are
+    naive UTC). Falls back to UTC on a bad/absent timezone."""
+    from zoneinfo import ZoneInfo
+
+    tz_name = (campaign.config_json or {}).get("timezone") or settings.TIMEZONE
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:  # noqa: BLE001 — a bad tz must not break hydration
+        tz = ZoneInfo("UTC")
+    now_local = (now or datetime.utcnow()).replace(tzinfo=ZoneInfo("UTC")).astimezone(tz)
+    day_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return day_start.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+
+
+def renders_started_today(db, campaign: Campaign, now: datetime | None = None) -> int:
+    """How many episode renders were enqueued for this campaign since its local midnight — the
+    basis for the per-campaign daily render cap (Gemini-quota rationing across campaigns)."""
+    return db.scalar(
+        select(func.count()).select_from(Task).where(
+            Task.campaign_id == campaign.id,
+            Task.created_at >= _campaign_day_start_utc(campaign, now),
+        )
+    ) or 0
+
+
 def hydrate_campaign(db, campaign: Campaign, *, buffer_size: int | None = None, enqueue=enqueue_render) -> list[int]:
     """Ensure ONE campaign has up to `buffer_size` upcoming (not-yet-finished) episodes queued.
     Precedence: explicit arg > campaign config `buffer_size` > global default. Idempotent —
-    unique(campaign,episode) prevents duplicates. Returns Task ids created."""
-    cfg_size = (campaign.config_json or {}).get("buffer_size")
+    unique(campaign,episode) prevents duplicates. Returns Task ids created.
+
+    Config `max_per_day` caps how many NEW renders this campaign may start per local day, so one
+    campaign can't monopolize the shared Gemini quota when several campaigns/accounts run at once
+    (publishing cadence is still governed by posting slots)."""
+    cfg = campaign.config_json or {}
+    cfg_size = cfg.get("buffer_size")
     size = buffer_size or (int(cfg_size) if cfg_size else None) or settings.DEFAULT_BUFFER_SIZE
+    day_budget: int | None = None
+    max_per_day = cfg.get("max_per_day")
+    if max_per_day:
+        day_budget = max(0, int(max_per_day) - renders_started_today(db, campaign))
     created: list[int] = []
     # Query episode numbers directly (never via the cached `campaign.tasks` relationship, which can
     # be stale after we insert Tasks by campaign_id within the same session).
@@ -146,6 +181,10 @@ def hydrate_campaign(db, campaign: Campaign, *, buffer_size: int | None = None, 
     )
     next_ep = campaign.current_episode + 1
     while len(active_eps) < size and next_ep <= campaign.total_episodes:
+        if day_budget is not None and len(created) >= day_budget:
+            logger.info("Campaign %s reached its daily render cap (%s) — resuming tomorrow",
+                        campaign.id, max_per_day)
+            break
         if next_ep not in all_eps:
             task = Task(campaign_id=campaign.id, user_id=campaign.user_id, episode_number=next_ep)
             db.add(task)

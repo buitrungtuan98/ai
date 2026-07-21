@@ -233,15 +233,53 @@ def maybe_distill_campaign(db, campaign: Campaign, now: datetime | None = None) 
     return True
 
 
+def check_daily_minimums(db, now: datetime | None = None) -> int:
+    """Min-per-day watchdog: a config `min_per_day` can't FORCE publishes (failures happen), but
+    the operator must never find out by accident. Alert via Telegram when an active campaign
+    published fewer episodes in the last 24h than its configured minimum. Returns alerts sent."""
+    from sqlalchemy import func
+
+    from database.models import User
+
+    now = now or datetime.utcnow()
+    cutoff = now - timedelta(hours=24)
+    alerts = 0
+    for campaign in db.scalars(
+        select(Campaign).where(Campaign.status == CampaignStatus.active)
+    ).all():
+        min_per_day = (campaign.config_json or {}).get("min_per_day")
+        if not min_per_day:
+            continue
+        published = db.scalar(
+            select(func.count()).select_from(Task).where(
+                Task.campaign_id == campaign.id,
+                Task.status == TaskStatus.COMPLETED,
+                Task.finished_at >= cutoff,
+            )
+        ) or 0
+        if published < int(min_per_day):
+            user = db.get(User, campaign.user_id)
+            if user is not None:
+                video_worker._notify(
+                    user,
+                    f"⚠️ Campaign '{campaign.topic_name}' published {published}/{min_per_day} "
+                    "episodes in the last 24h (below its daily minimum). Check Task Logs for "
+                    "failures or quota limits.",
+                )
+            alerts += 1
+    return alerts
+
+
 def daily_learning_pass(db, now: datetime | None = None) -> dict:
-    """Once-a-day: collect platform stats, then re-distill playbooks that have enough data."""
+    """Once-a-day: collect platform stats, re-distill playbooks, and check daily minimums."""
     from services.analytics_service import collect_stats
 
-    result = {"stats_updated": 0, "distilled": 0}
+    result = {"stats_updated": 0, "distilled": 0, "min_alerts": 0}
     result["stats_updated"] = collect_stats(db, now=now)
     for campaign in db.scalars(select(Campaign)).all():
         if maybe_distill_campaign(db, campaign, now=now):
             result["distilled"] += 1
+    result["min_alerts"] = check_daily_minimums(db, now=now)
     return result
 
 
