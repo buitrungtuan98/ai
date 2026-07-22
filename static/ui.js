@@ -4,21 +4,18 @@
 
   // ── Async-button busy state ───────────────────────────────────────────────
   // Generalises the save-label → disable + swap → run → restore-in-finally idiom that was
-  // copy-pasted across the campaign form, credentials and login. `run` receives no args and
-  // returns a promise; its result/rejection is propagated so callers can render inline output.
+  // copy-pasted across the campaign form, credentials and login. `run` returns a promise.
   function busyButton(btn, busyLabel, run) {
     var orig = btn.textContent;
     btn.disabled = true;
     if (busyLabel != null) btn.textContent = busyLabel;
-    return Promise.resolve()
-      .then(run)
-      .finally(function () {
-        btn.disabled = false;
-        if (busyLabel != null) btn.textContent = orig;
-      });
+    return Promise.resolve().then(run).finally(function () {
+      btn.disabled = false;
+      if (busyLabel != null) btn.textContent = orig;
+    });
   }
 
-  // Escape a string for safe insertion when building HTML by concatenation (mirrors app.js).
+  // Escape a string for safe HTML-string concatenation (mirrors app.js).
   function esc(s) {
     var d = document.createElement("div");
     d.textContent = s == null ? "" : String(s);
@@ -41,42 +38,58 @@
   }
 
   // ── Accessible confirm dialog (replaces native confirm()) ─────────────────
-  function confirmDialog(message) {
+  // Pass `typeToMatch` to require the user to type an exact string (e.g. a channel name)
+  // before Confirm enables — used for the most destructive, cascading actions.
+  function confirmDialog(message, typeToMatch) {
     var modal = document.getElementById("modal");
     var msgEl = document.getElementById("modal-msg");
     var okBtn = document.getElementById("modal-ok");
     var cancelBtn = document.getElementById("modal-cancel");
+    var input = document.getElementById("modal-input");
     if (!modal || !okBtn) return Promise.resolve(window.confirm(message));   // graceful fallback
+    var needType = !!typeToMatch;
     msgEl.textContent = message || "Are you sure?";
+    if (input) {
+      input.hidden = !needType;
+      input.value = "";
+      input.placeholder = needType ? 'Type “' + typeToMatch + '” to confirm' : "";
+    }
+    okBtn.disabled = needType;
     modal.hidden = false;
-    okBtn.focus();
+    (needType && input ? input : okBtn).focus();
     return new Promise(function (resolve) {
+      function onInput() { okBtn.disabled = input.value.trim() !== typeToMatch; }
       function done(val) {
         modal.hidden = true;
         okBtn.removeEventListener("click", onOk);
         cancelBtn.removeEventListener("click", onCancel);
         modal.removeEventListener("click", onBackdrop);
         document.removeEventListener("keydown", onKey);
+        if (input) input.removeEventListener("input", onInput);
         resolve(val);
       }
-      function onOk() { done(true); }
+      function onOk() { if (!okBtn.disabled) done(true); }
       function onCancel() { done(false); }
       function onBackdrop(e) { if (e.target === modal) done(false); }
-      function onKey(e) { if (e.key === "Escape") done(false); }
+      function onKey(e) {
+        if (e.key === "Escape") done(false);
+        else if (e.key === "Enter" && !okBtn.disabled && (!needType || document.activeElement === input)) done(true);
+      }
       okBtn.addEventListener("click", onOk);
       cancelBtn.addEventListener("click", onCancel);
       modal.addEventListener("click", onBackdrop);
       document.addEventListener("keydown", onKey);
+      if (needType && input) input.addEventListener("input", onInput);
     });
   }
 
-  // Any <form data-confirm="…"> is gated by the styled dialog instead of native confirm().
+  // Any <form data-confirm="…"> (optionally data-confirm-type="…") is gated by the styled dialog.
   function initConfirmForms() {
     document.querySelectorAll("form[data-confirm]").forEach(function (form) {
       form.addEventListener("submit", function (e) {
-        if (form.dataset.confirmed === "1") return;         // already approved → let it through
+        if (form.dataset.confirmed === "1") return;
         e.preventDefault();
-        confirmDialog(form.dataset.confirm).then(function (ok) {
+        confirmDialog(form.dataset.confirm, form.dataset.confirmType).then(function (ok) {
           if (ok) { form.dataset.confirmed = "1"; form.submit(); }
         });
       });
@@ -96,29 +109,59 @@
   function initRelTimes() {
     document.querySelectorAll("[data-reltime]").forEach(function (el) {
       var r = relTime(el.dataset.reltime);
-      if (r) { el.title = el.textContent.trim(); el.textContent = r; }  // full timestamp → tooltip
+      if (r) { el.title = el.textContent.trim(); el.textContent = r; }
     });
   }
 
+  // ── Theme (dark default, optional light) ──────────────────────────────────
+  function currentTheme() { return document.documentElement.dataset.theme === "light" ? "light" : "dark"; }
+  function setThemeLabels() {
+    var light = currentTheme() === "light";
+    var side = document.getElementById("theme-toggle-side");
+    if (side) side.textContent = (light ? "◑ Dark mode" : "◐ Light mode");
+  }
+  function toggleTheme() {
+    var next = currentTheme() === "light" ? "dark" : "light";
+    if (next === "light") document.documentElement.dataset.theme = "light";
+    else document.documentElement.removeAttribute("data-theme");
+    try { localStorage.setItem("theme", next); } catch (e) { /* private mode */ }
+    setThemeLabels();
+  }
+  function initTheme() {
+    ["theme-toggle", "theme-toggle-side"].forEach(function (id) {
+      var b = document.getElementById(id);
+      if (b) b.addEventListener("click", toggleTheme);
+    });
+    setThemeLabels();
+  }
+
   // ── Live summary: cross-page attention badge + dashboard auto-refresh ──────
+  var pollFails = 0, wasDown = false;
   function setBadge(key, n) {
     document.querySelectorAll('[data-badge="' + key + '"]').forEach(function (b) {
-      if (n > 0) { b.textContent = n > 99 ? "99+" : n; b.hidden = false; }
-      else { b.hidden = true; }
+      if (n > 0) { b.textContent = n > 99 ? "99+" : n; b.hidden = false; } else { b.hidden = true; }
     });
   }
   function setLive(key, val) {
-    document.querySelectorAll('[data-live="' + key + '"]').forEach(function (el) {
-      el.textContent = val;
-    });
+    document.querySelectorAll('[data-live="' + key + '"]').forEach(function (el) { el.textContent = val; });
   }
+  function setText(id, v) { var el = document.getElementById(id); if (el) el.textContent = v; }
   function updateHealth(h) {
     var strip = document.getElementById("health-strip");
     if (!strip) return;
     var degraded = !h.worker || !h.redis;
     strip.classList.toggle("degraded", degraded);
     var note = document.getElementById("degraded-note");
-    if (note) note.hidden = !degraded;
+    if (note) {
+      note.hidden = !degraded;
+      if (degraded) {
+        var c = [];
+        if (!h.worker) c.push("worker");
+        if (!h.redis) c.push("Redis");
+        note.textContent = "⚠ The factory is degraded — " + c.join(" and ") +
+          (c.length > 1 ? " are" : " is") + " down; rendering and publishing are paused.";
+      }
+    }
     var wd = document.getElementById("hd-worker"), wl = document.getElementById("hl-worker");
     if (wd) wd.className = "dot2 " + (h.worker ? "ok" : "bad");
     if (wl) wl.textContent = h.worker ? "running" : "stopped";
@@ -129,14 +172,18 @@
     setText("hv-buffer", h.buffer_ready);
     setText("hv-disk", h.disk_pct == null ? "—" : h.disk_pct + "%");
   }
-  function setText(id, v) { var el = document.getElementById(id); if (el) el.textContent = v; }
-
+  function flashLive() {
+    var d = document.getElementById("live-dot");
+    if (!d) return;
+    d.classList.remove("pulse");
+    void d.offsetWidth;            // restart the animation
+    d.classList.add("pulse");
+  }
   function applySummary(d) {
     var c = d.counts || {};
     setBadge("failed", c.failed || 0);
     setBadge("awaiting_review", c.awaiting_review || 0);
     setBadge("attn", (c.failed || 0) + (c.awaiting_review || 0));
-    // Dashboard live values (no-op on other pages — selectors simply match nothing).
     setLive("channels", d.channels);
     setLive("active_campaigns", d.active_campaigns);
     setLive("published", c.published);
@@ -148,16 +195,26 @@
     var br = document.getElementById("banner-review");
     if (br) br.hidden = !(c.awaiting_review > 0);
     if (d.health) updateHealth(d.health);
+    flashLive();
   }
   function pollSummary() {
     fetch("/api/summary", { headers: { Accept: "application/json" } })
-      .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (d) { if (d) applySummary(d); })
-      .catch(function () { /* transient — try again next tick */ });
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error(r.status)); })
+      .then(function (d) {
+        pollFails = 0;
+        if (wasDown) { wasDown = false; toast("Reconnected to the server.", "success"); }
+        applySummary(d);
+      })
+      .catch(function () {
+        pollFails++;
+        if (pollFails === 2 && !wasDown) { wasDown = true; toast("Lost connection to the server — retrying…", "danger"); }
+      });
   }
 
   // ── Mobile drawer navigation ──────────────────────────────────────────────
   function initNav() {
+    var active = document.querySelector(".sidebar .nav a.active");
+    if (active) active.setAttribute("aria-current", "page");
     var toggle = document.getElementById("nav-toggle");
     var backdrop = document.getElementById("nav-backdrop");
     var sidebar = document.getElementById("sidebar");
@@ -166,9 +223,7 @@
       document.body.classList.toggle("nav-open", open);
       toggle.setAttribute("aria-expanded", open ? "true" : "false");
     }
-    toggle.addEventListener("click", function () {
-      setOpen(!document.body.classList.contains("nav-open"));
-    });
+    toggle.addEventListener("click", function () { setOpen(!document.body.classList.contains("nav-open")); });
     if (backdrop) backdrop.addEventListener("click", function () { setOpen(false); });
     document.addEventListener("keydown", function (e) { if (e.key === "Escape") setOpen(false); });
     sidebar.querySelectorAll(".nav a").forEach(function (a) {
@@ -177,17 +232,15 @@
   }
 
   function init() {
+    initTheme();
     initNav();
     initConfirmForms();
     initRelTimes();
     pollSummary();
     setInterval(pollSummary, 6000);
   }
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", init);
-  } else {
-    init();
-  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
+  else init();
 
   window.ui = { busyButton: busyButton, esc: esc, toast: toast, confirmDialog: confirmDialog };
 })();

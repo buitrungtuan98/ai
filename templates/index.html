@@ -25,6 +25,7 @@
       <span style="width:{{ aipct if aipct < 100 else 100 }}%"></span></span>
     {% endif %}
   </span>
+  <span class="hitem live-stamp" title="Auto-refreshes every few seconds"><span class="live-dot" id="live-dot"></span> Live</span>
 </div>
 <p class="hint" id="degraded-note" style="margin:-12px 0 16px; color:var(--st-failed)"
    {{ '' if degraded else 'hidden' }}>⚠ The factory is degraded — rendering and publishing are paused until the worker and Redis are back.</p>

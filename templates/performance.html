@@ -60,6 +60,29 @@
   {% endif %}
 </div>
 
+{% set ns = namespace(vals=[]) %}
+{% for t in episodes %}
+  {% if t.stats_json and t.stats_json.get('avg_pct_viewed') is not none %}
+    {% set ns.vals = ns.vals + [t.stats_json.get('avg_pct_viewed')] %}
+  {% endif %}
+{% endfor %}
+{% if ns.vals|length >= 2 %}
+<div class="card mt">
+  <div class="card-head"><h3>Retention trend</h3><span class="meta">avg % viewed · oldest → newest measured episode</span></div>
+  {% set W = 600 %}{% set H = 60 %}{% set n = ns.vals|length %}
+  {% set pts = namespace(s='') %}
+  {% for v in ns.vals %}
+    {% set x = (loop.index0 * (W / (n - 1)))|round(1) %}
+    {% set y = (H - (v / 100 * H))|round(1) %}
+    {% set pts.s = pts.s ~ x ~ ',' ~ y ~ ' ' %}
+  {% endfor %}
+  <svg class="spark mt-sm" viewBox="0 0 {{ W }} {{ H }}" preserveAspectRatio="none" role="img" aria-label="Retention trend across episodes">
+    <polyline points="{{ pts.s|trim }}" fill="none" stroke="var(--st-working)" stroke-width="2" vector-effect="non-scaling-stroke"/>
+  </svg>
+  <div class="flex between"><span class="hint">{{ ns.vals[0] }}%</span><span class="hint">{{ ns.vals[-1] }}%</span></div>
+</div>
+{% endif %}
+
 <div class="card mt">
   <h3>Episodes</h3>
   <div class="table-wrap mt">

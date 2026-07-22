@@ -79,6 +79,29 @@ def test_create_and_start_campaign_queues(client):
     assert len(tasks) >= 1 and tasks[0]["status"] == "PENDING_QUEUE"
 
 
+def test_create_and_start_now_in_one_step(client):
+    """The campaign form's 'Create & Start' button (start_now) activates + hydrates in one POST."""
+    from database.db_session import SessionLocal
+    from database.models import Campaign, Channel
+    from database.types import CampaignStatus
+
+    client.post("/channels/facebook", data={"channel_name": "P", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    db = SessionLocal()
+    cid = db.query(Channel).first().id
+    db.close()
+    r = client.post("/campaigns", data={"topic_name": "Space", "channel_id": str(cid),
+                                        "total_episodes": "5", "language": "en", "start_now": "1"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    db = SessionLocal()
+    cam = db.query(Campaign).first()
+    assert cam.status == CampaignStatus.active
+    db.close()
+    tasks = client.get("/api/tasks").json()["tasks"]
+    assert len(tasks) >= 1 and tasks[0]["status"] == "PENDING_QUEUE"
+
+
 def test_ownership_guard_404(client):
     assert client.post("/campaigns/99999/delete", follow_redirects=False).status_code == 404
 

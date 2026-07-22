@@ -334,6 +334,21 @@ measured at TTS time (audio remains ground truth). Proposed by the AI designer.
 - Verified: 138 tests passing (1 new — `/api/summary`), ruff clean, docs guard green; interactions
   (badge, confirm modal, toast, form validation, tab-jump) screenshotted at 375px & 1280px.
 
+## Dashboard UX batch 2 (approved backlog) `DONE`
+- **Reviewer flow (Asset Pool)**: status filter chips (with counts), reject-reason quick-pick chips
+  from the channel's learned avoid-notes, keyboard review (J/K move · A approve · R reject).
+- **Strategist**: Performance retention sparkline (inline SVG); client-side search on Campaigns &
+  Task Logs; "Create & Start" one-click on the campaign form (`start_now` reuses the start route).
+- **Mobile**: bottom tab bar (Home/Tasks/Assets/Campaigns) with attention badges for one-thumb access;
+  a pulsing "Live" freshness indicator on the dashboard.
+- **Polish/correctness**: dynamic degraded copy that names the actual culprit; `aria-current` on the
+  active nav link; a "reconnecting…" toast when polling drops and a "reconnected" one on recovery.
+- **Light theme**: opt-in `[data-theme="light"]` with no-FOUC head script + sidebar/top-bar toggle.
+- **Safer deletes**: channel delete requires typing the channel name to confirm.
+- Verified: 139 tests passing (1 new — start_now), ruff clean, docs guard green; every new interaction
+  (tab bar, light theme, filter/reason chips, keyboard review, search, sparkline, typed-confirm,
+  live indicator) screenshotted at 375px & 1280px. ADR-021 records the theme + client-filtering stance.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

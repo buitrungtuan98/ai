@@ -3,6 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  {# Apply the saved theme before first paint to avoid a flash. #}
+  <script>try { var t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}</script>
   <title>{% block title %}AI Video Factory{% endblock %}</title>
   <link rel="stylesheet" href="/static/app.css">
 </head>
@@ -12,6 +14,7 @@
     <button class="nav-toggle" id="nav-toggle" aria-label="Open navigation"
             aria-controls="sidebar" aria-expanded="false">☰<span class="nav-badge" data-badge="attn" hidden></span></button>
     <div class="brand"><span class="dot"></span> AI Video Factory</div>
+    <button class="icon-btn" id="theme-toggle" aria-label="Toggle light / dark theme" title="Toggle theme">◐</button>
   </header>
   <div class="layout">
     <div class="nav-backdrop" id="nav-backdrop"></div>
@@ -29,6 +32,9 @@
         <p class="nav-group">Setup</p>
         <a href="/credentials" class="{{ 'active' if nav=='credentials' else '' }}"><span class="ico">⚿</span> Credentials</a>
       </nav>
+      <div class="sidebar-tools">
+        <button class="btn ghost sm block" id="theme-toggle-side" type="button">◐ Toggle theme</button>
+      </div>
       {% if settings.MULTI_TENANT_MODE %}
       <div class="sidebar-foot">
         <span class="who" title="{{ request.session.get('email') or '' }}">{{ request.session.get('email') or 'Signed in' }}</span>
@@ -41,10 +47,19 @@
     </main>
   </div>
 
+  {# Mobile bottom tab bar — one-thumb access to the Operator's most-used destinations. #}
+  <nav class="tabbar" aria-label="Primary (mobile)">
+    <a href="/" class="{{ 'active' if nav=='dashboard' else '' }}"><span class="ico">▚</span><span>Home</span></a>
+    <a href="/tasks" class="{{ 'active' if nav=='tasks' else '' }}"><span class="ico">≣</span><span>Tasks</span><span class="nav-badge" data-badge="failed" hidden></span></a>
+    <a href="/assets" class="{{ 'active' if nav=='assets' else '' }}"><span class="ico">▦</span><span>Assets</span><span class="nav-badge review" data-badge="awaiting_review" hidden></span></a>
+    <a href="/campaigns" class="{{ 'active' if nav=='campaigns' else '' }}"><span class="ico">▤</span><span>Campaigns</span></a>
+  </nav>
+
   {# Accessible confirm dialog (replaces native confirm()) + transient toast region #}
   <div class="modal-backdrop" id="modal" hidden>
     <div class="modal" role="alertdialog" aria-modal="true" aria-labelledby="modal-msg">
       <p id="modal-msg"></p>
+      <input id="modal-input" class="mt-sm" hidden aria-label="Type to confirm">
       <div class="row-actions" style="justify-content:flex-end">
         <button type="button" class="btn ghost sm" id="modal-cancel">Cancel</button>
         <button type="button" class="btn danger sm" id="modal-ok">Confirm</button>

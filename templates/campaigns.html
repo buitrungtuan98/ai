@@ -7,10 +7,11 @@
 {% endcall %}
 
 {% if campaigns %}
-<div class="grid cols-3">
+{% if campaigns|length > 3 %}<input class="search" id="campaign-search" placeholder="🔎 Search campaigns…" aria-label="Search campaigns">{% endif %}
+<div class="grid cols-3" id="campaign-grid">
   {% for c in campaigns %}
   {% set pct = (100 * c.current_episode / c.total_episodes)|round(0, 'floor')|int if c.total_episodes else 0 %}
-  <div class="card">
+  <div class="card" data-search="{{ (c.topic_name ~ ' ' ~ c.status.value)|lower }}">
     <div class="card-head">
       <h3>{{ c.topic_name }}</h3>
       {{ ui.pill(c.status.value) }}
@@ -41,4 +42,19 @@
 {% else %}
 {% call ui.empty('▤', 'No campaigns yet', 'Create your first campaign and map it to a channel — the AI can propose the whole thing from a topic.', '/campaigns/new', '+ New Campaign') %}{% endcall %}
 {% endif %}
+{% endblock %}
+{% block scripts %}
+<script>
+  (function () {
+    var s = document.getElementById("campaign-search");
+    var grid = document.getElementById("campaign-grid");
+    if (!s || !grid) return;
+    s.addEventListener("input", function () {
+      var q = s.value.trim().toLowerCase();
+      grid.querySelectorAll(".card").forEach(function (c) {
+        c.hidden = q && (c.dataset.search || "").indexOf(q) < 0;
+      });
+    });
+  })();
+</script>
 {% endblock %}

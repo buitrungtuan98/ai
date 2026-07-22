@@ -254,10 +254,15 @@
   </div>
 
   <div class="savebar">
-    <button class="btn" type="submit" id="save-campaign">{{ 'Save changes' if editing else 'Create Campaign' }}</button>
+    {% if editing %}
+    <button class="btn" type="submit" id="save-campaign">Save changes</button>
+    {% else %}
+    <button class="btn" type="submit" name="start_now" value="1" id="save-start">▶ Create &amp; Start</button>
+    <button class="btn ghost" type="submit" id="save-campaign">Create only</button>
+    {% endif %}
     <a class="btn ghost" href="/campaigns">Cancel</a>
     <span class="grow"></span>
-    <span class="hint" id="save-hint">Tune anything, then save. You can edit or duplicate later.</span>
+    <span class="hint" id="save-hint">{{ 'Save your changes.' if editing else '“Create & Start” begins rendering now; “Create only” saves it as pending.' }}</span>
   </div>
 </form>
 {% endif %}
@@ -430,8 +435,12 @@
       if (slots && !slots.split(",").map(s => s.trim()).filter(Boolean).every(s => /^([01]?\d|2[0-3]):[0-5]\d$/.test(s))) {
         e.preventDefault(); return fail("Posting slots must be HH:MM, comma-separated (e.g. 07:30, 21:00).", "dist", el("posting_slots"));
       }
-      // Valid → busy state (persists through the navigation).
-      if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = {{ ('Saving…' if editing else 'Creating…') | tojson }}; }
+      // Valid → busy state on whichever button was clicked (persists through the navigation).
+      const submitter = e.submitter;
+      [saveBtn, document.getElementById("save-start")].forEach(function (b) { if (b) b.disabled = true; });
+      const active = submitter || saveBtn;
+      if (active) active.textContent = (submitter && submitter.name === "start_now")
+        ? "Starting…" : {{ ('Saving…' if editing else 'Creating…') | tojson }};
     });
   }
 </script>

@@ -604,7 +604,8 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
 
 
 @app.post("/campaigns")
-def create_campaign(user: CurrentUser, db: DbDep, form: dict = Depends(_campaign_form)):
+def create_campaign(user: CurrentUser, db: DbDep, form: dict = Depends(_campaign_form),
+                    start_now: str = Form("")):
     # Verify the target channel belongs to the user (tenant isolation).
     channel = db.get(Channel, form["channel_id"])
     if channel is None or channel.user_id != user.id:
@@ -616,6 +617,10 @@ def create_campaign(user: CurrentUser, db: DbDep, form: dict = Depends(_campaign
     )
     db.add(campaign)
     db.commit()
+    if start_now:  # "Create & Start" — same path as the standalone start route
+        campaign.status = CampaignStatus.active
+        db.commit()
+        video_worker.hydrate_buffers(db)
     return RedirectResponse("/campaigns", status_code=303)
 
 

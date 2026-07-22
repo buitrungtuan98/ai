@@ -363,3 +363,21 @@ reload. Deriving counts client-side from the 50-row `/api/tasks` feed would drif
 totals, so a purpose-built snapshot that shares the dashboard's own code is the honest choice. The
 endpoint is read-only and tenant-scoped (`CurrentUser`), adds no business logic, and touches no other
 package — the only backend change in the UI work, and squarely a "template needs live data" one.
+
+### ADR-021 — Optional light theme via `[data-theme]`; client-owned filtering; thin flow shortcuts
+**Decision:** the design system stays dark-first but gains an OPTIONAL light theme as a single
+`:root[data-theme="light"]` token override block (status hues darken to keep WCAG-AA on white); a
+tiny inline `<head>` script applies the saved `localStorage` preference before first paint to avoid a
+flash, and a toggle in the sidebar/top bar flips it. List filtering (Asset Pool status chips,
+Campaigns + Task Logs search) and keyboard review (J/K/A/R) are done entirely client-side over the
+already-rendered rows — no new endpoints, no server round-trips. The one flow shortcut that needs the
+server, "Create & Start", is a single optional `start_now` form field on the existing `POST /campaigns`
+that reuses the standalone start route's exact logic (`status=active` + `hydrate_buffers`). The most
+destructive action (channel delete, which cascades campaigns + renders) upgrades its confirm to a
+type-the-name gate.
+**Why:** a light option is cheap once everything is tokenised and some operators prefer it on a
+bright desktop, but dark stays the default the product was designed around. Filtering/search/keyboard
+belong on the client — the data is already on the page, and a round-trip would only add latency and
+backend surface for what is pure presentation. "Create & Start" removes a two-step create-then-start
+dance without duplicating logic; and requiring the channel name to be typed makes the one irreversible
+cascading delete deliberate rather than a stray click.

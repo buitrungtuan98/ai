@@ -4,6 +4,7 @@
 {% block content %}
 {% call ui.page_head('Task Logs', 'Live render pipeline · refreshes every few seconds. Pending → AI Generation → Audio Synced → Rendering → Publishing → Completed. Retry a failed episode in one tap.') %}{% endcall %}
 
+<input class="search" id="task-filter" placeholder="🔎 Filter by topic, channel, status or #id…" aria-label="Filter tasks">
 <div class="card">
   <div class="table-wrap">
     <table class="stack-table">

@@ -20,11 +20,18 @@
 {% endif %}
 
 {% if items %}
+<div class="filter-bar" id="asset-filter">
+  <button type="button" class="chip active" data-filter="all">All ({{ items|length }})</button>
+  <button type="button" class="chip" data-filter="awaiting_review">Awaiting review ({{ items|selectattr('status.value','equalto','awaiting_review')|list|length }})</button>
+  <button type="button" class="chip" data-filter="ready">Ready ({{ items|selectattr('status.value','equalto','ready')|list|length }})</button>
+  <button type="button" class="chip" data-filter="consumed">Published ({{ items|selectattr('status.value','equalto','consumed')|list|length }})</button>
+</div>
+<p class="hint" style="margin:-8px 0 16px">Keyboard: <b>J</b>/<b>K</b> move · <b>A</b> approve · <b>R</b> reject.</p>
 <div class="grid cols-3">
   {% for i in items %}
   {% set camp = camp_by_id.get(i.campaign_id) %}
   {% set pill_cls = 'completed' if i.status.value=='consumed' else ('failed' if i.status.value in ['expired','rejected'] else ('AWAITING_REVIEW' if i.status.value=='awaiting_review' else 'active')) %}
-  <div class="card">
+  <div class="card asset-card" data-status="{{ i.status.value }}">
     {% if i.id in previewable %}
     <video class="preview" controls preload="metadata"
            {% if i.thumbnail_path %}poster="/assets/{{ i.id }}/thumb"{% endif %}
@@ -70,6 +77,12 @@
         <input name="reason" placeholder="Why? (teaches the AI — e.g. 'mở đầu chậm quá')" class="grow">
         <button class="btn danger sm nowrap" type="submit">✕ Reject</button>
       </div>
+      {% set reasons = (camp.learning_json or {}).get('reject_reasons') if camp else none %}
+      {% if reasons %}
+      <div class="reason-chips">
+        {% for r in reasons[:6] %}<button type="button" class="chip sm reason-chip" data-reason="{{ r }}">{{ r }}</button>{% endfor %}
+      </div>
+      {% endif %}
     </form>
     {% endif %}
   </div>
@@ -78,4 +91,55 @@
 {% else %}
 {% call ui.empty('▦', 'Buffer pool is empty', 'Active campaigns pre-render episodes here; review-mode campaigns park each video here for your approval before it publishes.', '/campaigns', 'View campaigns') %}{% endcall %}
 {% endif %}
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  // Filter chips — client-side show/hide by status.
+  const bar = document.getElementById("asset-filter");
+  function apply(f) {
+    document.querySelectorAll(".asset-card").forEach(function (c) {
+      c.hidden = !(f === "all" || c.dataset.status === f);
+    });
+    kbdIdx = -1; highlight();
+  }
+  if (bar) bar.addEventListener("click", function (e) {
+    const b = e.target.closest("[data-filter]"); if (!b) return;
+    bar.querySelectorAll(".chip").forEach(function (c) { c.classList.remove("active"); });
+    b.classList.add("active"); apply(b.dataset.filter);
+  });
+
+  // Reject-reason quick-pick — fill the reason input from a learned-reason chip.
+  document.addEventListener("click", function (e) {
+    const chip = e.target.closest(".reason-chip"); if (!chip) return;
+    const form = chip.closest("form");
+    const inp = form && form.querySelector('input[name="reason"]');
+    if (inp) { inp.value = chip.dataset.reason; inp.focus(); }
+  });
+
+  // Keyboard review: J/K move through awaiting-review cards, A approve, R focus reject.
+  let kbdIdx = -1;
+  function reviewCards() {
+    return Array.prototype.filter.call(
+      document.querySelectorAll('.asset-card[data-status="awaiting_review"]'), function (c) { return !c.hidden; });
+  }
+  function highlight() {
+    document.querySelectorAll(".asset-card").forEach(function (c) { c.classList.remove("kbd-active"); });
+    const list = reviewCards();
+    if (kbdIdx >= 0 && kbdIdx < list.length) {
+      list[kbdIdx].classList.add("kbd-active");
+      list[kbdIdx].scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  }
+  document.addEventListener("keydown", function (e) {
+    if (/^(input|textarea|select)$/i.test(e.target.tagName || "")) return;  // don't hijack typing
+    const list = reviewCards(); if (!list.length) return;
+    const k = e.key.toLowerCase();
+    if (k === "j") { kbdIdx = Math.min((kbdIdx < 0 ? -1 : kbdIdx) + 1, list.length - 1); highlight(); e.preventDefault(); }
+    else if (k === "k") { kbdIdx = Math.max((kbdIdx < 0 ? 0 : kbdIdx) - 1, 0); highlight(); e.preventDefault(); }
+    else if (k === "a" && kbdIdx >= 0) { const f = list[kbdIdx].querySelector('form[action$="/approve"]'); if (f) f.submit(); }
+    else if (k === "r" && kbdIdx >= 0) { const inp = list[kbdIdx].querySelector('input[name="reason"]'); if (inp) { inp.focus(); e.preventDefault(); } }
+  });
+})();
+</script>
 {% endblock %}

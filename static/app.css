@@ -77,6 +77,23 @@
   --z-savebar: 20; --z-backdrop: 30; --z-drawer: 40; --z-topbar: 50; --z-modal: 60; --z-toast: 70;
 }
 
+/* Optional light theme (opt-in via [data-theme="light"] on <html>). Status hues darken for AA on light. */
+:root[data-theme="light"] {
+  --bg: #f4f6fb; --surface: #ffffff; --surface-2: #eef1f7; --surface-3: #e3e8f0;
+  --border: #d7deea; --border-strong: #c2cbdb;
+  --text: #1a2030; --muted: #55607a; --text-subtle: #8a94a8;
+  --primary: #4f6ef7; --primary-hover: #3f5fe8; --primary-ink: #ffffff; --primary-weak: #4f6ef714;
+  --st-success: #0f9d6b; --st-success-bg: #0f9d6b14; --st-success-bd: #0f9d6b3d;
+  --st-working: #2563eb; --st-working-bg: #2563eb14; --st-working-bd: #2563eb3d;
+  --st-scheduled: #0d9488; --st-scheduled-bg: #0d948814; --st-scheduled-bd: #0d94883d;
+  --st-review: #b45309; --st-review-bg: #f59e0b1f; --st-review-bd: #f59e0b4d;
+  --st-failed: #dc2626; --st-failed-bg: #dc262614; --st-failed-bd: #dc26263d;
+  --st-pending: #64748b; --st-pending-bg: #64748b14; --st-pending-bd: #64748b33;
+  --shadow-1: 0 1px 2px rgba(16, 24, 40, .06), 0 1px 3px rgba(16, 24, 40, .1);
+  --shadow-2: 0 6px 20px rgba(16, 24, 40, .12); --shadow-3: 0 16px 40px rgba(16, 24, 40, .18);
+  --ring: 0 0 0 3px #4f6ef759;
+}
+
 /* ── 2. Reset / base ───────────────────────────────────────────────────────── */
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
@@ -382,6 +399,40 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 .toast.show { opacity: 1; transform: none; }
 .toast.success { border-left-color: var(--st-success); }
 .toast.danger { border-left-color: var(--st-failed); }
+.modal-input { display: block; }
+
+/* Theme toggle + sidebar tools */
+.icon-btn { margin-left: auto; width: 40px; height: 40px; background: transparent; border: none;
+  color: var(--text); font-size: 18px; cursor: pointer; border-radius: var(--radius-sm); flex-shrink: 0; }
+.icon-btn:hover { background: var(--surface-2); }
+.sidebar-tools { margin-top: var(--sp-5); }
+
+/* "Live" freshness indicator (pulses on each successful poll) */
+.live-stamp { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+.live-dot { display: inline-block; width: 7px; height: 7px; border-radius: var(--radius-round);
+  background: var(--st-success); }
+.live-dot.pulse { animation: livepulse .8s ease; }
+@keyframes livepulse { 0% { box-shadow: 0 0 0 0 var(--st-success); } 100% { box-shadow: 0 0 0 7px transparent; } }
+
+/* Filter / reason chips + keyboard-review highlight */
+.filter-bar { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-bottom: var(--sp-5); }
+.chip { background: var(--surface-2); border: 1px solid var(--border); color: var(--muted);
+  padding: 6px 12px; border-radius: var(--radius-pill); font-size: var(--fs-sm); font-weight: var(--fw-medium);
+  cursor: pointer; font-family: inherit; }
+.chip:hover { color: var(--text); border-color: var(--border-strong); }
+.chip.active { background: var(--primary-weak); border-color: var(--st-working-bd); color: var(--text); }
+.chip.sm { padding: 3px 10px; font-size: var(--fs-xs); }
+.reason-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: var(--sp-2); }
+.kbd-active { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+/* Search box */
+.search { max-width: 360px; margin-bottom: var(--sp-5); }
+
+/* Sparkline (retention trend) */
+.spark { width: 100%; height: 60px; display: block; }
+
+/* Mobile bottom tab bar (shown ≤720px) */
+.tabbar { display: none; }
 
 /* ── 18. Responsive ────────────────────────────────────────────────────────── */
 @media (max-width: 900px) {
@@ -406,8 +457,17 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
     background: rgba(0, 0, 0, .55); opacity: 0; pointer-events: none; transition: opacity .22s ease; }
   body.nav-open .nav-backdrop { opacity: 1; pointer-events: auto; }
   body.nav-open { overflow: hidden; }
-  .main { padding: var(--sp-5) var(--sp-4); max-width: none; }
+  .main { padding: var(--sp-5) var(--sp-4) 84px; max-width: none; }  /* bottom pad clears the tab bar */
   .page-head h1 { font-size: var(--fs-xl); }
+
+  /* Bottom tab bar — one-thumb access to the busiest destinations */
+  .tabbar { display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: var(--z-topbar);
+    height: 60px; background: var(--surface); border-top: 1px solid var(--border); box-shadow: var(--shadow-2); }
+  .tabbar a { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 2px; color: var(--muted); font-size: 11px; font-weight: var(--fw-medium); position: relative; }
+  .tabbar a.active { color: var(--primary); }
+  .tabbar .ico { font-size: 18px; }
+  .tabbar .nav-badge { position: absolute; top: 8px; left: 55%; margin: 0; }
 
   /* Bigger tap targets */
   .btn { min-height: 44px; }

@@ -2,6 +2,8 @@
 (function () {
   var tbody = document.getElementById("task-rows");
   if (!tbody) return;
+  var filterEl = document.getElementById("task-filter");
+  var lastTasks = [];
 
   var STATUS_LABELS = {
     PENDING_QUEUE: "Pending Queue",
@@ -48,11 +50,21 @@
     return '<button class="btn ghost sm" data-retry="' + t.id + '">↻ Retry</button>';
   }
 
-  function render(tasks) {
+  function matches(t, q) {
+    return (t.id + " " + (t.topic || "") + " " + (t.channel || "") + " " + (t.status || ""))
+      .toLowerCase().indexOf(q) >= 0;
+  }
+
+  function render(allTasks) {
+    var q = (filterEl && filterEl.value.trim().toLowerCase()) || "";
+    var tasks = q ? allTasks.filter(function (t) { return matches(t, q); }) : allTasks;
     if (!tasks.length) {
       tbody.innerHTML = '<tr><td colspan="7"><div class="empty">' +
-        '<span class="empty-ico">≣</span><h3>No tasks yet</h3>' +
-        '<p>Start a campaign to begin rendering — episodes will stream in here live.</p></td></tr>';
+        (q
+          ? '<span class="empty-ico">🔎</span><h3>No matching tasks</h3><p>No task matches “' + esc(q) + '”.</p>'
+          : '<span class="empty-ico">≣</span><h3>No tasks yet</h3>' +
+            '<p>Start a campaign to begin rendering — episodes will stream in here live.</p>') +
+        "</div></td></tr>";
       return;
     }
     tbody.innerHTML = tasks
@@ -94,9 +106,11 @@
         if (r.status === 401) { window.location.href = "/login"; throw new Error("unauthenticated"); }
         return r.json();
       })
-      .then(function (d) { render(d.tasks || []); })
+      .then(function (d) { lastTasks = d.tasks || []; render(lastTasks); })
       .catch(function () { /* transient — try again next tick */ });
   }
+
+  if (filterEl) filterEl.addEventListener("input", function () { render(lastTasks); });
 
   poll();
   setInterval(poll, 3000);
