@@ -75,6 +75,16 @@
     {% endif %}
 
     {% if i.status.value == 'awaiting_review' %}
+    {% set L = (camp.learning_json or {}) if camp else {} %}
+    {% if L.get('playbook') or L.get('reject_reasons') %}
+    <details class="disclosure criteria mt">
+      <summary>What good looks like for this channel</summary>
+      <div class="disclosure-body">
+        {% if L.get('playbook') %}<ul class="crit-list">{% for l in L.get('playbook')[:3] %}<li>{{ l }}</li>{% endfor %}</ul>{% endif %}
+        {% if L.get('reject_reasons') %}<p class="hint">Avoid (from your past reviews): {{ L.get('reject_reasons')|join(' · ') }}</p>{% endif %}
+      </div>
+    </details>
+    {% endif %}
     <div class="row-actions mt">
       <form method="post" action="/assets/{{ i.id }}/approve"><button class="btn sm" type="submit">✓ Approve &amp; publish</button></form>
       <form method="post" action="/assets/{{ i.id }}/rerender"
@@ -93,6 +103,7 @@
         {% for r in reasons[:6] %}<button type="button" class="chip sm reason-chip" data-reason="{{ r }}">{{ r }}</button>{% endfor %}
       </div>
       {% endif %}
+      <p class="hint">Your reason becomes a permanent <b>avoid-note</b> — the scriptwriter follows it on every future episode.</p>
     </form>
     {% endif %}
   </div>

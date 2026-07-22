@@ -400,3 +400,23 @@ eyeball parallel lists. The master–detail + scoped-list + breadcrumb pattern i
 BufferPoolItem}` model. Doing the scoping server-side from the URL (rather than client-side over a
 fully-loaded list) keeps it correct at any size and makes views shareable; reusing Performance as the
 hub delivers a true detail page without new top-level routes or a heavier backend.
+
+### ADR-023 — Dashboard as a "trust instrument": triage, narrative, and change over raw counts
+**Decision:** the dashboard is reframed from a status board into a sense-making surface for an
+unattended, self-learning system. It leads with a **triage inbox** ("Needs your attention") — the
+concrete failed/awaiting-review items, most-recent first, with inline Retry (reusing the task-retry
+endpoint) and Review links — or a calm **"All clear"** state when the queue is empty. Below it, an
+**activity feed** renders the pipeline as a narrative ("Published · Failed · Awaiting review", with
+relative times), and a client-side **"N new since your last visit"** marker (last-visit stamp in
+localStorage) answers the 2–3×/day checker's real question — *what changed?* The Asset Pool shows the
+channel's learned **playbook + avoid-notes beside the player** (review-in-context) so judgment happens
+against known criteria; rejecting with a reason states plainly that it becomes a permanent avoid-note,
+and Performance surfaces the closed **learning loop** ("your rejections shaped these notes; they steer
+every new script"). The campaign form carries a live **identity card** — a plain-language summary of
+the channel being created. A global `[hidden] { display:none !important }` rule guarantees the hidden
+attribute always beats component `display` (so JS-toggled cards/badges hide reliably).
+**Why:** the product's real UX job is trust, not controls — the operator glances for ~30 seconds and
+must know instantly whether to act. Counts are low-information; a prioritized action queue, a legible
+history, and a "what's new" diff are what make an autonomous factory feel steerable. Showing the
+learning loop closing is what keeps a human bothering to give feedback that improves the AI. The
+backend additions are read-only (two focused queries for the triage lists) and reuse existing helpers.

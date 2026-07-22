@@ -247,7 +247,18 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
     channels = db.scalars(select(Channel).where(Channel.user_id == user.id)).all()
     campaigns = db.scalars(select(Campaign).where(Campaign.user_id == user.id)).all()
     tasks = db.scalars(
-        select(Task).where(Task.user_id == user.id).order_by(Task.id.desc()).limit(10)
+        select(Task).where(Task.user_id == user.id).order_by(Task.id.desc()).limit(12)
+    ).all()
+    # Triage inbox: the concrete items that need a human, most-recent first.
+    attention_failed = db.scalars(
+        select(Task).where(Task.user_id == user.id, Task.status == TaskStatus.FAILED)
+        .order_by(Task.updated_at.desc()).limit(8)
+    ).all()
+    attention_review = db.scalars(
+        select(BufferPoolItem)
+        .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
+        .where(Campaign.user_id == user.id, BufferPoolItem.status == BufferStatus.awaiting_review)
+        .order_by(BufferPoolItem.id.desc()).limit(8)
     ).all()
     return templates.TemplateResponse(
         request,
@@ -257,6 +268,7 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
             "tasks": tasks, "nav": "dashboard",
             "health": _system_health(db),
             "counts": _task_counts(db, user.id),
+            "attention_failed": attention_failed, "attention_review": attention_review,
             "camp_by_id": {c.id: c for c in campaigns},
             "chan_by_id": {c.id: c for c in channels},
         },

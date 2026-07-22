@@ -32,7 +32,8 @@
   {% call ui.empty('📈', 'No playbook yet', 'It appears automatically once ≥5 published episodes have ~3 days of stats.') %}{% endcall %}
   {% endif %}
   {% if learning.get('reject_reasons') %}
-  <p class="hint mt-sm">Active avoid-notes from your reviews: {{ learning.get('reject_reasons')|join(' · ') }}</p>
+  <div class="loop-note mt-sm">↺ <b>Your feedback is shaping this channel.</b> These avoid-notes came from videos you rejected, and now steer every new script:
+    <span class="meta">{{ learning.get('reject_reasons')|join(' · ') }}</span></div>
   {% endif %}
   {% if learning %}
   <form method="post" action="/campaigns/{{ campaign.id }}/learning/reset" class="mt"

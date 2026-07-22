@@ -96,6 +96,7 @@
 
 /* ── 2. Reset / base ───────────────────────────────────────────────────────── */
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }  /* the hidden attribute must beat any component display */
 html, body { margin: 0; padding: 0; }
 body {
   background: var(--bg);
@@ -441,6 +442,51 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
   font-size: var(--fs-sm); border-bottom: 2px solid transparent; white-space: nowrap; }
 .hub-tab:hover { color: var(--text); }
 .hub-tab.active { color: var(--text); border-bottom-color: var(--primary); }
+
+/* Triage inbox + all-clear (dashboard) */
+.triage { border-color: var(--st-review-bd); }
+.triage-list { list-style: none; margin: 0; padding: 0; }
+.triage-list li { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-3) 0;
+  border-top: 1px solid var(--border); }
+.triage-list li:first-child { border-top: none; }
+.tri-dot { width: 8px; height: 8px; border-radius: var(--radius-round); flex-shrink: 0; }
+.tri-dot.failed { background: var(--st-failed); box-shadow: 0 0 8px var(--st-failed); }
+.tri-dot.review { background: var(--st-review); box-shadow: 0 0 8px var(--st-review); }
+.allclear { display: flex; align-items: center; gap: var(--sp-3);
+  border-color: var(--st-success-bd); background: var(--st-success-bg); }
+.allclear .ac-ico { width: 32px; height: 32px; border-radius: var(--radius-round); flex-shrink: 0;
+  background: var(--surface); color: var(--st-success); border: 1px solid var(--st-success-bd);
+  display: inline-flex; align-items: center; justify-content: center; font-weight: var(--fw-bold); }
+
+/* Activity feed (dashboard) */
+.feed { list-style: none; margin: 0; padding: 0; }
+.feed-item { display: flex; align-items: center; gap: var(--sp-3); padding: 10px 0;
+  border-top: 1px solid var(--border); }
+.feed-item:first-child { border-top: none; }
+.feed-dot { width: 8px; height: 8px; border-radius: var(--radius-round); flex-shrink: 0; }
+.feed-dot.done { background: var(--st-success); } .feed-dot.failed { background: var(--st-failed); }
+.feed-dot.review { background: var(--st-review); } .feed-dot.scheduled { background: var(--st-scheduled); }
+.feed-dot.working { background: var(--st-working); } .feed-dot.pending { background: var(--st-pending); }
+.feed-label { font-weight: var(--fw-semibold); }
+.feed-when { color: var(--muted); font-size: var(--fs-xs); white-space: nowrap; }
+.feed-item.is-new { background: var(--st-working-bg); border-radius: var(--radius-sm);
+  box-shadow: inset 3px 0 0 var(--st-working); padding-left: var(--sp-2); }
+
+/* Review-in-context criteria (Asset Pool) */
+.criteria { border-color: var(--st-review-bd); }
+.crit-list { margin: 0 0 var(--sp-2); padding-left: 1.1em; font-size: var(--fs-sm); }
+.crit-list li { margin-bottom: 3px; }
+
+/* Learning-loop note (Performance) */
+.loop-note { background: var(--st-success-bg); border: 1px solid var(--st-success-bd);
+  border-radius: var(--radius-sm); padding: var(--sp-3); font-size: var(--fs-sm); }
+
+/* Campaign identity card (live summary) */
+.identity-card { display: flex; align-items: center; gap: var(--sp-3); background: var(--surface-2);
+  border: 1px solid var(--border); border-left: 3px solid var(--primary); border-radius: var(--radius);
+  padding: var(--sp-3) var(--sp-4); margin-bottom: var(--sp-5); }
+.identity-card .id-ico { font-size: 20px; }
+.identity-card #identity-text { font-size: var(--fs-sm); line-height: 1.5; }
 
 /* Search box */
 .search { max-width: 360px; margin-bottom: var(--sp-5); }

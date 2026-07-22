@@ -20,6 +20,11 @@
     <button type="button" class="tab-btn" data-tab="dist">Distribution</button>
   </div>
 
+  <div class="identity-card" id="identity-card">
+    <span class="id-ico">🎬</span>
+    <div id="identity-text" class="grow">Fill in the form (or ✨ let AI propose) — a plain-language summary of the channel you're about to create appears here.</div>
+  </div>
+
   <div class="tab-panel active" id="core">
     <div class="card">
       <div class="form-row" id="ai-propose-row">
@@ -306,6 +311,37 @@
   fillVoices();
   if (langSel) langSel.addEventListener("change", function () { fillVoices(""); });
 
+  // 🎬 Live campaign "identity card": a plain-language summary of what you're about to create.
+  const idText = document.getElementById("identity-text");
+  const CAPTIONS = { highlight: "highlight captions", classic: "clean captions", boxed: "boxed captions", neon: "neon captions" };
+  const GRADES = { cinematic: "cinematic grade", warm: "warm grade", cool: "cool grade", vivid: "vivid grade", noir: "noir grade" };
+  function updateIdentity() {
+    const form = document.querySelector("form");
+    if (!idText || !form) return;
+    const g = (n) => { const el = form.elements[n]; return el ? (el.value || "").trim() : ""; };
+    const persona = g("persona"), topic = g("topic_name");
+    const lead = persona ? persona.split(/[.\n]/)[0].slice(0, 64) : (topic || "Your campaign");
+    const parts = [lead, LANG_NAMES[g("language")] || g("language")];
+    if (CAPTIONS[g("caption_theme")]) parts.push(CAPTIONS[g("caption_theme")]);
+    if (GRADES[g("color_grade")]) parts.push(GRADES[g("color_grade")]);
+    const voice = g("voice");
+    parts.push(voice ? "voice " + voice.split("-").pop().replace("Neural", "") : "default voice");
+    const mm = g("music_mode");
+    parts.push(mm === "auto" ? "auto music" : (mm === "file" ? "your music" : "no music"));
+    const slots = g("posting_slots");
+    if (slots) {
+      const days = Array.prototype.filter.call(form.querySelectorAll('[name="posting_days"]'), (c) => c.checked).map((c) => c.value);
+      parts.push("posts " + slots + (days.length ? " on " + days.join("/") : " daily"));
+    } else {
+      parts.push("publishes continuously");
+    }
+    parts.push(g("publish_mode") === "review" ? "review first" : "auto-publish");
+    idText.textContent = parts.filter(Boolean).join(" · ");
+  }
+  updateIdentity();
+  const idForm = document.querySelector("form");
+  if (idForm) { idForm.addEventListener("input", updateIdentity); idForm.addEventListener("change", updateIdentity); }
+
   // 📝 Script preview: dry-run the scriptwriter with the current form values (nothing saved).
   const previewBtn = document.getElementById("script-preview");
   if (previewBtn) {
@@ -394,6 +430,7 @@
             note.textContent = p.rationale ? ("💡 " + p.rationale) : "";
             note.style.display = p.rationale ? "block" : "none";
           }
+          updateIdentity();  // fields set programmatically don't fire input events
         } catch (e) {
           alert(e.message || "AI proposal failed — please try again.");
         }

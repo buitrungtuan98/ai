@@ -362,6 +362,20 @@ measured at TTS time (audio remains ground truth). Proposed by the AI designer.
 - Verified: 139 tests passing, ruff clean, docs guard green; the full drill-down flow (channel → its
   campaigns → a campaign's assets/tasks/performance, with breadcrumbs) screenshotted at 1280px.
 
+## Dashboard as a trust instrument (deep UX) `DONE`
+- **Triage inbox** ("Needs your attention"): the concrete failed / awaiting-review items with inline
+  Retry + Review, or a calm **"All clear"** state — the 30-second glance now yields a verdict, not a
+  count. **Activity feed** turns the pipeline into a narrative with relative times, and a client-side
+  **"N new since your last visit"** marker answers *what changed?*
+- **Review-in-context**: the channel's playbook + avoid-notes sit beside the player in the Asset Pool.
+- **Visible learning loop**: reject-with-reason states it becomes a permanent avoid-note; Performance
+  shows those notes as the feedback that steers every new script.
+- **Live campaign identity card**: a plain-language summary of the channel you're about to create.
+- Fixed a latent CSS trap with a global `[hidden]{display:none!important}` so JS-toggled cards/badges
+  hide reliably. Backend: two read-only triage queries reusing existing helpers. ADR-023 records it.
+- Verified: 139 tests passing, ruff clean, docs guard green; triage/all-clear, activity feed,
+  review-criteria, identity card and loop-note screenshotted (seeded + empty states).
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download
