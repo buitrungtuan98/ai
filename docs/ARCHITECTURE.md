@@ -321,3 +321,27 @@ for it violated the "manage in the dashboard" principle every other credential a
 Per-user (not per-campaign) matches the quota's blast radius — the daily cap is per API key, and
 keys are per user. The chain keeps the ADR-quoted fallback semantics (404/daily-quota fail over)
 unchanged; it now just originates from the DB instead of the environment.
+
+### ADR-019 — Front-end design system: tokens, 12-col grid, one status-colour vocabulary, Jinja macros
+**Decision:** the UI is rebuilt on an explicit design system instead of ad-hoc per-page markup.
+`static/app.css` starts with a token layer — colour (4 dark surfaces, text, a brand accent, and a
+SEMANTIC STATUS SET `--st-{success,working,scheduled,review,failed,pending}` each with solid/bg/border
+variants), a modular type scale, a 4px spacing scale, radii, and elevation — and every component reads
+those tokens, so status colours are defined ONCE and reused identically by pills, banners, table
+highlights and chart bars. Repeated components live as Jinja macros in `templates/macros.html`
+(pill/page_head/card/stat/progress/bar/banner/empty/field); shared behaviour lives in `static/ui.js`
+(a `busyButton(btn, label, run)` that generalises the copy-pasted async-button idiom, plus the mobile
+drawer toggle with aria state). Layout is a 12-column grid + `.grid.cols-N` auto-fill, collapsing to a
+single column at mobile. The sidebar becomes an off-canvas drawer under a top bar below 720px (it used
+to simply vanish). Data-viz is hand-rolled CSS/inline-SVG bars only — NO chart library, NO CDN, NO
+external fonts/icons — honouring the self-contained/CSP constraint; every metric answers a persona
+question (health strip + AI-quota meter, campaign progress, A/B retention comparison, episode
+mini-bars, calendar runway). All backend contracts are preserved: route paths, form field names,
+element ids/`data-*` the JS and tests key on (`voice-select`+`data-current`, `task-rows`, `data-test`,
+tab panels), the flash whitelist, and the `textContent`-only / `esc()` XSS boundary.
+**Why:** the dashboard had grown feature-by-feature into 11 templates with zero shared components,
+hard-coded px/hex everywhere, and a mobile experience that hid the entire navigation — unusable for the
+primary Operator persona, who checks in from a phone. One token vocabulary + a component layer kills
+copy-paste drift (a status colour or spacing change is now one edit, not eleven), makes the three usage
+modes (Operator/Reviewer/Strategist) first-class at both 375px and 1280px, and keeps the whole thing
+inside the box's no-egress, single-stylesheet, hand-written-JS constraints.

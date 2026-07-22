@@ -1,48 +1,48 @@
 {% extends "base.html" %}
+{% import "macros.html" as ui %}
 {% block title %}Asset Pool · AI Video Factory{% endblock %}
 {% block content %}
-<div class="page-head"><div><h1>Asset Pool Cache</h1>
-  <p class="subtitle">Pre-rendered episodes. Review-mode videos wait here for your approval — watch them before anything is published.</p></div></div>
+{% call ui.page_head('Asset Pool', 'Pre-rendered episodes. Review-mode videos wait here for your approval — watch them before anything is published.') %}{% endcall %}
 
 {% if flash == 'publish' %}
-<div class="banner">⏳ <b>Publish queued.</b> The episode uploads as soon as the worker is free (one job at a
+{% call ui.banner('success') %}⏳ <b>Publish queued.</b> The episode uploads as soon as the worker is free (one job at a
   time — a render in progress runs first). Track it in <a href="/tasks">Task Logs</a>; this card flips to
-  <i>Consumed</i> with the video link once it's live.</div>
+  <i>Consumed</i> with the video link once it's live.{% endcall %}
 {% elif flash == 'rerender' %}
-<div class="banner">⏳ <b>Re-render queued.</b> The old files were discarded; a fresh render starts as soon as
-  the worker is free. Watch progress in <a href="/tasks">Task Logs</a>.</div>
+{% call ui.banner() %}⏳ <b>Re-render queued.</b> The old files were discarded; a fresh render starts as soon as
+  the worker is free. Watch progress in <a href="/tasks">Task Logs</a>.{% endcall %}
 {% elif flash == 'rejected' %}
-<div class="banner">🗑 <b>Rejected.</b> The render was deleted{% if flash_reason %} and the AI was told to avoid:
-  “{{ flash_reason }}”{% endif %}. Re-render it anytime from Task Logs → Retry.</div>
+{% call ui.banner() %}🗑 <b>Rejected.</b> The render was deleted{% if flash_reason %} and the AI was told to avoid:
+  “{{ flash_reason }}”{% endif %}. Re-render it anytime from Task Logs → Retry.{% endcall %}
 {% elif flash == 'missing' %}
-<div class="banner danger">⚠️ <b>That episode's video file is no longer on disk</b>, so it can't be published.
-  Use <b>Discard &amp; re-render</b> on the card to produce it again.</div>
+{% call ui.banner('danger') %}⚠️ <b>That episode's video file is no longer on disk</b>, so it can't be published.
+  Use <b>Discard &amp; re-render</b> on the card to produce it again.{% endcall %}
 {% endif %}
 
 {% if items %}
 <div class="grid cols-3">
   {% for i in items %}
   {% set camp = camp_by_id.get(i.campaign_id) %}
+  {% set pill_cls = 'completed' if i.status.value=='consumed' else ('failed' if i.status.value in ['expired','rejected'] else ('AWAITING_REVIEW' if i.status.value=='awaiting_review' else 'active')) %}
   <div class="card">
-    <div class="flex between">
+    {% if i.id in previewable %}
+    <video class="preview" controls preload="metadata"
+           {% if i.thumbnail_path %}poster="/assets/{{ i.id }}/thumb"{% endif %}
+           src="/assets/{{ i.id }}/video"></video>
+    {% elif i.status.value == 'consumed' %}
+    <div class="empty" style="padding:var(--sp-6)">Published — local file cleaned up.</div>
+    {% endif %}
+
+    <div class="card-head mt">
       <h3>{{ camp.topic_name if camp else 'C' ~ i.campaign_id }} · Ep {{ i.episode_number }}</h3>
-      <span class="pill {{ 'completed' if i.status.value=='consumed' else ('failed' if i.status.value in ['expired','rejected'] else ('AWAITING_REVIEW' if i.status.value=='awaiting_review' else 'active')) }}">
-        {{ i.status.value.replace('_',' ')|title }}</span>
+      {{ ui.pill(pill_cls, i.status.value.replace('_',' ')|title) }}
     </div>
     <p class="meta">{{ i.metadata_json.get('title','—') }}
       {% if i.metadata_json.get('variant') %} · Variant {{ i.metadata_json.get('variant') }}{% endif %}<br>
       {{ i.created_at.strftime('%Y-%m-%d %H:%M') if i.created_at else '' }} UTC</p>
     {% set qc = i.metadata_json.get('qc') %}
     {% if qc %}
-    <p class="hint">🔍 Auto-QC: {{ 'passed' if qc.get('passed') else 'FAILED' }}{% if qc.get('score') is not none %} · score {{ qc.get('score') }}/10{% endif %}{% if qc.get('attempts', 1) > 1 %} · {{ qc.get('attempts') }} attempts{% endif %}{% if qc.get('issues') %} · {{ qc.get('issues')|join('; ') }}{% endif %}</p>
-    {% endif %}
-
-    {% if i.id in previewable %}
-    <video class="preview" controls preload="metadata"
-           {% if i.thumbnail_path %}poster="/assets/{{ i.id }}/thumb"{% endif %}
-           src="/assets/{{ i.id }}/video"></video>
-    {% elif i.status.value == 'consumed' %}
-    <p class="hint">Published — local file cleaned up.</p>
+    <p class="hint">{% if qc.get('passed') %}🟢 Auto-QC passed{% else %}🔴 Auto-QC FAILED{% endif %}{% if qc.get('score') is not none %} · score {{ qc.get('score') }}/10{% endif %}{% if qc.get('attempts', 1) > 1 %} · {{ qc.get('attempts') }} attempts{% endif %}{% if qc.get('issues') %} · {{ qc.get('issues')|join('; ') }}{% endif %}</p>
     {% endif %}
 
     {% if i.status.value == 'ready' %}
@@ -66,9 +66,9 @@
     </div>
     <form method="post" action="/assets/{{ i.id }}/reject" class="mt"
           onsubmit="return confirm('Reject and delete this render?')">
-      <div class="flex" style="gap:8px;">
-        <input name="reason" placeholder="Why? (teaches the AI — e.g. 'mở đầu chậm quá')" style="flex:1">
-        <button class="btn danger sm" type="submit">✕ Reject</button>
+      <div class="field-inline">
+        <input name="reason" placeholder="Why? (teaches the AI — e.g. 'mở đầu chậm quá')" class="grow">
+        <button class="btn danger sm nowrap" type="submit">✕ Reject</button>
       </div>
     </form>
     {% endif %}
@@ -76,6 +76,6 @@
   {% endfor %}
 </div>
 {% else %}
-<div class="empty">Buffer pool is empty. Active campaigns will pre-render episodes here; review-mode campaigns will wait here for your approval.</div>
+{% call ui.empty('▦', 'Buffer pool is empty', 'Active campaigns pre-render episodes here; review-mode campaigns park each video here for your approval before it publishes.', '/campaigns', 'View campaigns') %}{% endcall %}
 {% endif %}
 {% endblock %}

@@ -1,28 +1,29 @@
 {% extends "base.html" %}
+{% import "macros.html" as ui %}
 {% block title %}Campaigns · AI Video Factory{% endblock %}
 {% block content %}
-<div class="page-head">
-  <div>
-    <h1>Campaigns Manager</h1>
-    <p class="subtitle">Each campaign is mapped to a connected channel and runs episodic content.</p>
-  </div>
+{% call ui.page_head('Campaigns', 'Each campaign is mapped to a connected channel and runs episodic content.') %}
   <a class="btn" href="/campaigns/new">+ New Campaign</a>
-</div>
+{% endcall %}
 
 {% if campaigns %}
 <div class="grid cols-3">
   {% for c in campaigns %}
+  {% set pct = (100 * c.current_episode / c.total_episodes)|round(0, 'floor')|int if c.total_episodes else 0 %}
   <div class="card">
-    <div class="flex between">
+    <div class="card-head">
       <h3>{{ c.topic_name }}</h3>
-      <span class="pill {{ c.status.value }}">{{ c.status.value|title }}</span>
+      {{ ui.pill(c.status.value) }}
     </div>
     <p class="meta">
-      Channel: {{ channels[c.channel_id].channel_name if c.channel_id in channels else '—' }}<br>
-      Episode {{ c.current_episode }} / {{ c.total_episodes }} ·
-      Language: {{ c.config_json.get('language','en') }}
+      {{ channels[c.channel_id].channel_name if c.channel_id in channels else '—' }} ·
+      {{ c.config_json.get('language','en')|upper }}
     </p>
-    <div class="progress mt"><span style="width: {{ (100 * c.current_episode / c.total_episodes) if c.total_episodes else 0 }}%"></span></div>
+    <div class="flex between mt">
+      <span class="meta">Episode {{ c.current_episode }} / {{ c.total_episodes }}</span>
+      <span class="meta mono">{{ pct }}%</span>
+    </div>
+    {{ ui.progress(pct, 'done' if c.status.value == 'completed' else ('work' if c.status.value == 'active' else '')) }}
     <div class="row-actions mt">
       {% if c.status.value in ['pending','failed'] %}
       <form method="post" action="/campaigns/{{ c.id }}/start"><button class="btn sm" type="submit">▶ Start</button></form>
@@ -38,6 +39,6 @@
   {% endfor %}
 </div>
 {% else %}
-<div class="empty">No campaigns yet. Create one and map it to a channel.</div>
+{% call ui.empty('▤', 'No campaigns yet', 'Create your first campaign and map it to a channel — the AI can propose the whole thing from a topic.', '/campaigns/new', '+ New Campaign') %}{% endcall %}
 {% endif %}
 {% endblock %}

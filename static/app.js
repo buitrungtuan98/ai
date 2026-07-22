@@ -50,24 +50,27 @@
 
   function render(tasks) {
     if (!tasks.length) {
-      tbody.innerHTML = '<tr><td colspan="7"><div class="empty">No tasks yet. Start a campaign to begin rendering.</div></td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7"><div class="empty">' +
+        '<span class="empty-ico">≣</span><h3>No tasks yet</h3>' +
+        '<p>Start a campaign to begin rendering — episodes will stream in here live.</p></td></tr>';
       return;
     }
     tbody.innerHTML = tasks
       .map(function (t) {
         var label = STATUS_LABELS[t.status] || t.status;
         var retries = t.retry_count > 0 ? ' <span class="meta">(retry ' + t.retry_count + ")</span>" : "";
+        var ptone = t.status === "COMPLETED" ? " done" : (t.status === "FAILED" ? "" : " work");
         return (
           "<tr>" +
-          "<td>#" + t.id + "</td>" +
-          "<td>" + esc(t.topic) + " · Ep " + t.episode +
+          '<td data-label="Task">#' + t.id + "</td>" +
+          '<td data-label="Episode">' + esc(t.topic) + " · Ep " + t.episode +
             '<div class="meta">' + esc(t.channel) + "</div></td>" +
-          '<td><span class="pill ' + esc(t.status) + '">' + esc(label) + "</span>" + retries + "</td>" +
-          '<td><div class="progress"><span style="width:' + (t.progress || 0) + '%"></span></div>' +
+          '<td data-label="Status"><span class="pill ' + esc(t.status) + '">' + esc(label) + "</span>" + retries + "</td>" +
+          '<td data-label="Progress"><div class="progress' + ptone + '"><span style="width:' + (t.progress || 0) + '%"></span></div>' +
             '<span class="meta">' + (t.progress || 0) + "%</span></td>" +
-          "<td>" + fmtDuration(t.duration_s) + "</td>" +
-          "<td>" + resultCell(t) + "</td>" +
-          "<td>" + actionCell(t) + "</td>" +
+          '<td data-label="Time">' + fmtDuration(t.duration_s) + "</td>" +
+          '<td data-label="Result">' + resultCell(t) + "</td>" +
+          '<td data-label="">' + actionCell(t) + "</td>" +
           "</tr>"
         );
       })

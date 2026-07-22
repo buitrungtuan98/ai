@@ -300,6 +300,26 @@ measured at TTS time (audio remains ground truth). Proposed by the AI designer.
   playbook distiller.
 - Verified: 137 tests passing (4 new), ruff clean, docs guard green.
 
+## Dashboard UX/UI refactor `DONE`
+- **Design system** in `static/app.css`: dark-first token layer (colour/type/spacing/radii/elevation)
+  with ONE semantic status-colour set (`--st-*`) reused by pills, banners, table highlights and chart
+  bars; a 12-column grid + auto-fill card grid on a shared spacing rhythm.
+- **Component layer**: `templates/macros.html` (pill/page_head/card/stat/progress/bar/banner/empty/field)
+  replaces the copy-pasted markup across all pages; `static/ui.js` adds a shared `busyButton` helper
+  (generalises the async-button idiom) and the mobile drawer-nav toggle with aria state.
+- **Responsive**: intent-grouped nav (Monitor/Content/Setup); the sidebar becomes an off-canvas drawer
+  under a top bar ≤720px (it previously vanished with no replacement); tables stack into labelled cards
+  on mobile; ≥44px tap targets; both 375px (Operator) and 1280px (Strategist) are first-class.
+- **Per-persona pages + all system states**: health strip with a deliberate degraded (red) state +
+  AI-quota meter; guided campaign form (AI Propose/Preview lead-in, progressive-disclosure advanced
+  sections, sticky save bar); video-first Asset Pool review cards; Performance A/B retention comparison
+  bars + episode mini-bars; calendar runway indicators; skeleton loading states; teaching empty states.
+- **Data-viz**: hand-rolled CSS/inline-SVG bars only — no chart library, no CDN, no external assets.
+- Contracts preserved: route paths, form field names, JS/test element ids + `data-*`, flash whitelist,
+  and the `textContent`-only XSS boundary. ADR-019 records the design system.
+- Verified: 137 tests passing, ruff clean, docs guard green; every page screenshotted at 375px & 1280px
+  (seeded + fresh-install empty state) via the pre-installed Playwright Chromium.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

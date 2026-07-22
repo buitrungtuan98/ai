@@ -207,9 +207,8 @@ details.disclosure > summary::after { content: "▾"; color: var(--muted); trans
 details.disclosure[open] > summary::after { transform: rotate(180deg); }
 details.disclosure > summary:hover { color: var(--primary-hover); }
 details.disclosure .disclosure-body { padding: 0 var(--sp-4) var(--sp-2); }
-.savebar { position: sticky; bottom: 0; margin-top: var(--sp-6);
-  background: color-mix(in srgb, var(--surface) 92%, transparent);
-  backdrop-filter: blur(6px); border: 1px solid var(--border); border-radius: var(--radius);
+.savebar { position: sticky; bottom: var(--sp-4); margin-top: var(--sp-6);
+  background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius);
   padding: var(--sp-3) var(--sp-4); display: flex; align-items: center; gap: var(--sp-3);
   box-shadow: var(--shadow-2); z-index: var(--z-savebar); }
 .savebar .grow { flex: 1; }

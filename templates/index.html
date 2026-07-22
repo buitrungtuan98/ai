@@ -1,48 +1,51 @@
 {% extends "base.html" %}
+{% import "macros.html" as ui %}
 {% block title %}Dashboard · AI Video Factory{% endblock %}
 {% block content %}
-<div class="page-head">
-  <div>
-    <h1>Dashboard</h1>
-    <p class="subtitle">Automated vertical-video generation, running on your zero-cost box.</p>
-  </div>
+{% call ui.page_head('Dashboard', 'Automated vertical-video generation, running on your zero-cost box.') %}
   <a class="btn" href="/campaigns/new">+ New Campaign</a>
-</div>
+{% endcall %}
 
-{# ── System health strip ─────────────────────────────────────────────────── #}
-<div class="health">
-  <span class="hitem"><span class="dot2 {{ 'ok' if health.worker else 'bad' }}"></span>
-    Worker {{ 'running' if health.worker else 'stopped' }}</span>
-  <span class="hitem"><span class="dot2 {{ 'ok' if health.redis else 'bad' }}"></span>
-    Redis {{ 'connected' if health.redis else 'down' }}</span>
-  <span class="hitem">Queue: <b>{{ health.queue_depth if health.queue_depth is not none else '—' }}</b> waiting</span>
-  <span class="hitem">Buffer: <b>{{ health.buffer_ready }}</b> pre-rendered</span>
+{# ── System health strip (degraded = red when worker/redis down) ───────────── #}
+{% set degraded = not health.worker or not health.redis %}
+<div class="health{{ ' degraded' if degraded }}" role="status" aria-live="polite">
+  <span class="hitem {{ 'bad' if not health.worker }}"><span class="dot2 {{ 'ok' if health.worker else 'bad' }}"></span>
+    Worker <b>{{ 'running' if health.worker else 'stopped' }}</b></span>
+  <span class="hitem {{ 'bad' if not health.redis }}"><span class="dot2 {{ 'ok' if health.redis else 'bad' }}"></span>
+    Redis <b>{{ 'connected' if health.redis else 'down' }}</b></span>
+  <span class="hitem">Queue <b>{{ health.queue_depth if health.queue_depth is not none else '—' }}</b> waiting</span>
+  <span class="hitem">Buffer <b>{{ health.buffer_ready }}</b> pre-rendered</span>
   <span class="hitem {{ 'warn' if health.disk_pct and health.disk_pct >= 85 }}">
-    Disk: <b>{{ health.disk_pct ~ '%' if health.disk_pct is not none else '—' }}</b> used</span>
+    Disk <b>{{ health.disk_pct ~ '%' if health.disk_pct is not none else '—' }}</b></span>
   <span class="hitem {{ 'warn' if health.ai_budget and health.ai_calls >= health.ai_budget * 0.8 }}">
-    AI calls today: <b>{{ health.ai_calls }}{{ ' / ' ~ health.ai_budget if health.ai_budget }}</b></span>
+    AI today <b>{{ health.ai_calls }}{{ ' / ' ~ health.ai_budget if health.ai_budget }}</b>
+    {% if health.ai_budget %}
+    {% set aipct = (100 * health.ai_calls / health.ai_budget)|round(0,'floor')|int %}
+    <span class="meter {{ 'crit' if aipct >= 100 else ('warn' if aipct >= 80 else '') }}" style="width:70px">
+      <span style="width:{{ aipct if aipct < 100 else 100 }}%"></span></span>
+    {% endif %}
+  </span>
 </div>
+{% if degraded %}
+<p class="hint" style="margin:-12px 0 16px; color:var(--st-failed)">⚠ The factory is degraded — rendering and publishing are paused until the worker and Redis are back.</p>
+{% endif %}
 
 {% if counts.failed > 0 %}
-<div class="banner danger">
-  ⚠ {{ counts.failed }} task{{ 's' if counts.failed > 1 }} failed and need{{ '' if counts.failed > 1 else 's' }} attention.
-  <a href="/tasks">Review &amp; retry →</a>
-</div>
+{% call ui.banner('danger') %}⚠ {{ counts.failed }} task{{ 's' if counts.failed > 1 }} failed and need{{ '' if counts.failed > 1 else 's' }} attention.
+  <a href="/tasks">Review &amp; retry →</a>{% endcall %}
 {% endif %}
 {% if counts.awaiting_review > 0 %}
-<div class="banner info">
-  🎬 {{ counts.awaiting_review }} video{{ 's' if counts.awaiting_review > 1 }} waiting for your review.
-  <a href="/assets">Preview &amp; approve →</a>
-</div>
+{% call ui.banner('info') %}🎬 {{ counts.awaiting_review }} video{{ 's' if counts.awaiting_review > 1 }} waiting for your review.
+  <a href="/assets">Preview &amp; approve →</a>{% endcall %}
 {% endif %}
 
 <div class="stats">
-  <div class="stat"><div class="n">{{ channels|length }}</div><div class="l">Connected channels</div></div>
-  <div class="stat"><div class="n">{{ campaigns|selectattr('status.value','equalto','active')|list|length }}</div><div class="l">Active campaigns</div></div>
-  <div class="stat"><div class="n">{{ counts.published }}</div><div class="l">Videos published</div></div>
-  <div class="stat"><div class="n">{{ counts.working }}</div><div class="l">In pipeline</div></div>
-  <div class="stat"><div class="n">{{ counts.awaiting_review }}</div><div class="l">Awaiting review</div></div>
-  <div class="stat"><div class="n">{{ counts.failed }}</div><div class="l">Failed</div></div>
+  {{ ui.stat(channels|length, 'Connected channels', href='/channels') }}
+  {{ ui.stat(campaigns|selectattr('status.value','equalto','active')|list|length, 'Active campaigns', tone='work', href='/campaigns') }}
+  {{ ui.stat(counts.published, 'Videos published', tone='ok') }}
+  {{ ui.stat(counts.working, 'In pipeline', tone='work', href='/tasks') }}
+  {{ ui.stat(counts.awaiting_review, 'Awaiting review', tone='warn' if counts.awaiting_review else '', href='/assets') }}
+  {{ ui.stat(counts.failed, 'Failed', tone='bad' if counts.failed else '', href='/tasks') }}
 </div>
 
 <div class="card">
@@ -51,30 +54,33 @@
     <a href="/tasks">View all →</a>
   </div>
   {% if tasks %}
-  <table class="mt">
-    <thead><tr><th>Task</th><th>Episode</th><th>Status</th><th>Progress</th><th>Result</th></tr></thead>
-    <tbody>
-      {% for t in tasks %}
-      {% set camp = camp_by_id.get(t.campaign_id) %}
-      {% set chan = chan_by_id.get(camp.channel_id) if camp else none %}
-      <tr>
-        <td>#{{ t.id }}</td>
-        <td>{{ camp.topic_name if camp else 'C' ~ t.campaign_id }} · Ep {{ t.episode_number }}
-            <div class="meta">{{ chan.channel_name if chan else '' }}</div></td>
-        <td><span class="pill {{ t.status.value }}">{{ t.status.value.replace('_',' ').title() }}</span></td>
-        <td><div class="progress"><span style="width: {{ t.progress_pct }}%"></span></div></td>
-        <td>{% if t.published_url %}<a href="{{ t.published_url }}" target="_blank" rel="noopener">View ↗</a>{% endif %}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <div class="empty mt">
-    <p><b>Get started in 3 steps:</b></p>
-    <p>1. <a href="/channels">Connect a channel</a> {{ '✓' if channels }}<br>
-       2. <a href="/credentials">Add your API keys</a> {{ '✓' if user.gemini_api_key and user.pexels_api_key }}<br>
-       3. <a href="/campaigns/new">Create &amp; start a campaign</a></p>
+  <div class="table-wrap mt">
+    <table class="stack-table">
+      <thead><tr><th>Task</th><th>Episode</th><th>Status</th><th>Progress</th><th>Result</th></tr></thead>
+      <tbody>
+        {% for t in tasks %}
+        {% set camp = camp_by_id.get(t.campaign_id) %}
+        {% set chan = chan_by_id.get(camp.channel_id) if camp else none %}
+        <tr>
+          <td data-label="Task">#{{ t.id }}</td>
+          <td data-label="Episode">{{ camp.topic_name if camp else 'C' ~ t.campaign_id }} · Ep {{ t.episode_number }}
+              <div class="meta">{{ chan.channel_name if chan else '' }}</div></td>
+          <td data-label="Status">{{ ui.pill(t.status.value) }}</td>
+          <td data-label="Progress">{{ ui.progress(t.progress_pct, 'done' if t.status.value == 'COMPLETED' else 'work') }}</td>
+          <td data-label="Result">{% if t.published_url %}<a href="{{ t.published_url }}" target="_blank" rel="noopener">View ↗</a>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
   </div>
+  {% else %}
+  {% call ui.empty('🚀', 'Get started in 3 steps', 'Your factory is ready — set it up once and it runs itself.') %}
+    <ul class="steps">
+      <li><span class="tick {{ 'done' if channels }}">{{ '✓' if channels else '1' }}</span> <a href="/channels">Connect a channel</a></li>
+      <li><span class="tick {{ 'done' if user.gemini_api_key and user.pexels_api_key }}">{{ '✓' if user.gemini_api_key and user.pexels_api_key else '2' }}</span> <a href="/credentials">Add your API keys</a></li>
+      <li><span class="tick">3</span> <a href="/campaigns/new">Create &amp; start a campaign</a></li>
+    </ul>
+  {% endcall %}
   {% endif %}
 </div>
 {% endblock %}
