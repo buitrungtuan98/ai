@@ -23,6 +23,37 @@ DEFAULT_VOICES: dict[str, str] = {
     "es": "es-ES-ElviraNeural",
 }
 
+# Curated edge-tts voice catalog per language — THE single source of truth for voice pickers:
+# the campaign form's dropdown filters to the target language from this dict, and the AI campaign
+# designer may only propose voices from it (a typo'd/invented voice name would fail every render).
+# (voice id, human label) — labels describe gender/region/feel so an operator can choose blind.
+VOICE_CHOICES: dict[str, list[tuple[str, str]]] = {
+    "vi": [
+        ("vi-VN-HoaiMyNeural", "Hoài My — nữ, ấm áp, kể chuyện"),
+        ("vi-VN-NamMinhNeural", "Nam Minh — nam, trầm, điềm đạm"),
+    ],
+    "en": [
+        ("en-US-AriaNeural", "Aria — female US, warm & expressive"),
+        ("en-US-JennyNeural", "Jenny — female US, friendly"),
+        ("en-US-MichelleNeural", "Michelle — female US, confident"),
+        ("en-US-GuyNeural", "Guy — male US, energetic"),
+        ("en-US-ChristopherNeural", "Christopher — male US, deep & calm"),
+        ("en-US-EricNeural", "Eric — male US, mature"),
+        ("en-GB-SoniaNeural", "Sonia — female UK"),
+        ("en-GB-RyanNeural", "Ryan — male UK"),
+        ("en-AU-NatashaNeural", "Natasha — female AU"),
+        ("en-AU-WilliamNeural", "William — male AU"),
+    ],
+    "es": [
+        ("es-ES-ElviraNeural", "Elvira — mujer, España"),
+        ("es-ES-AlvaroNeural", "Álvaro — hombre, España"),
+        ("es-MX-DaliaNeural", "Dalia — mujer, México"),
+        ("es-MX-JorgeNeural", "Jorge — hombre, México"),
+        ("es-US-PalomaNeural", "Paloma — mujer, EE. UU."),
+        ("es-US-AlonsoNeural", "Alonso — hombre, EE. UU."),
+    ],
+}
+
 _TICKS_PER_SECOND = 1e7  # edge-tts offsets/durations are in 100-nanosecond ticks
 
 

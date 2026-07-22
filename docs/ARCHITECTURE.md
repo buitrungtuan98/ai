@@ -284,3 +284,24 @@ generating variants blindly since Phase 5 — recording which variant actually s
 missing half that makes the rotation an experiment. The QC layering keeps the quota math from
 ADR-013/the batching work intact: an episode still costs ~4-5 Gemini calls with strictly more
 coverage.
+
+### ADR-017 — One voice catalog, required episode memory, and music config-truth
+**Decision:** (1) `core/tts.py` gains `VOICE_CHOICES`, the single per-language voice catalog
+(id + human label); the campaign form renders it as a dropdown that follows the Target language,
+and the AI designer's `PROPOSABLE_VOICES` is derived from it at import time. (2) `VideoScript.
+synopsis` is now required (`min_length=1`) instead of defaulting to empty, and the worker falls
+back to the variant-A title when storing episode memory. (3) `music_mode=auto` without a
+`FREESOUND_API_KEY` raises at render time (mirroring the existing missing-music-file behavior),
+the AI designer downgrades auto→none on a keyless box, and a mood with zero CC0 matches retries
+once with a generic query.
+**Why:** the voice field was free text — a typo produced a campaign whose every render failed in
+TTS, and the designer kept its own separate voice list that could drift from what the form knew.
+One catalog makes an unusable voice unrepresentable in both entry paths. The optional synopsis
+was the continuity feature's silent failure mode: any episode whose model response omitted it
+became invisible to all later no-repeat/serial prompts, which is indistinguishable from
+"continuity doesn't work" for the operator. Making it required moves the failure into the
+existing repair-turn loop (one extra call only when the model misbehaves). Music followed the
+config-truth rule already applied to missing music files: a deterministic misconfiguration
+(missing key) fails loudly and visibly, while transient provider failures still degrade to a
+music-less render — an enhancement outage must never fail a video, but a permanent misconfig
+must never be silent.

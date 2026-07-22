@@ -40,6 +40,7 @@ from auth.dependencies import (
     get_owned_channel,
 )
 from core.config import settings
+from core.tts import VOICE_CHOICES
 from database.db_session import get_db, init_db
 from database.models import BufferPoolItem, Campaign, Channel, Task
 from database.types import BufferStatus, CampaignStatus, ChannelStatus, Platform, TaskStatus
@@ -65,6 +66,7 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 templates.env.globals["settings"] = settings  # e.g. MULTI_TENANT_MODE toggles the sign-out chip
+templates.env.globals["voice_choices"] = VOICE_CHOICES  # campaign form: per-language voice picker
 
 YOUTUBE_SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
@@ -447,6 +449,10 @@ def propose_campaign_route(user: CurrentUser, topic: str = Form(""), language: s
     except Exception as exc:  # noqa: BLE001 — return a clean retry message, not a stack trace
         logger.warning("Campaign proposal failed: %s", type(exc).__name__)
         return JSONResponse({"error": "AI proposal failed — please try again."}, status_code=502)
+    if proposal.music_mode == "auto" and not settings.FREESOUND_API_KEY:
+        # Config truth: never propose a mode this box cannot run (auto music needs a Freesound key
+        # in .env; without it every episode would fail loudly at render time).
+        proposal.music_mode = "none"
     return proposal.model_dump()
 
 
@@ -674,6 +680,10 @@ def test_credential(provider: str, user: CurrentUser):
         token = user.telegram_token or settings.TELEGRAM_BOT_TOKEN
         chat = user.telegram_chat_id or settings.TELEGRAM_CHAT_ID
         ok, detail = verification.verify_telegram(token, chat) if token else (False, "No Telegram token saved.")
+    elif provider == "freesound":
+        key = settings.FREESOUND_API_KEY  # server-wide (.env) — powers Auto background music
+        ok, detail = verification.verify_freesound(key) if key else \
+            (False, "FREESOUND_API_KEY is not set in .env — Auto background music can't run.")
     else:
         raise HTTPException(404, "Unknown provider")
     return {"ok": ok, "detail": detail}

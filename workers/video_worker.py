@@ -54,14 +54,24 @@ def _resolve_keys(user: User) -> tuple[str, str]:
 def _resolve_music(cfg: dict) -> tuple[str | None, dict | None]:
     """Resolve the campaign's music mode to a local file path (+ credit for transparency).
 
-    Modes: "auto" = random CC0 track by mood via Freesound (cached; degrades to no music on
-    failure); "file" = operator-supplied path (fails loudly if missing — config truth);
+    Modes: "auto" = random CC0 track by mood via Freesound; "file" = operator-supplied path;
     "none"/absent = narration only. Legacy configs with only music_path behave as "file".
+
+    Config truth: a DETERMINISTIC misconfiguration fails loudly — "file" with a missing file
+    (raised downstream by produce()) and "auto" without a FREESOUND_API_KEY both mean the operator
+    asked for music the box can never deliver; silently publishing music-less videos hid this for
+    weeks. A TRANSIENT auto failure (Freesound down, no results) still degrades to no music.
     """
     mode = cfg.get("music_mode") or ("file" if cfg.get("music_path") else "none")
     if mode == "file":
         return cfg.get("music_path") or None, None
-    if mode == "auto" and settings.FREESOUND_API_KEY:
+    if mode == "auto":
+        if not settings.FREESOUND_API_KEY:
+            raise RuntimeError(
+                "This campaign is set to Auto background music, but FREESOUND_API_KEY is not set "
+                "in .env — add the (free) key from freesound.org and Retry, or switch the "
+                "campaign's Background music to None."
+            )
         from services import music_service
 
         picked = music_service.pick_music(
@@ -72,8 +82,6 @@ def _resolve_music(cfg: dict) -> tuple[str | None, dict | None]:
         if picked:
             return picked
         logger.warning("Auto-music unavailable — rendering without music")
-    elif mode == "auto":
-        logger.warning("music_mode=auto but FREESOUND_API_KEY is not set — rendering without music")
     return None, None
 
 
@@ -395,9 +403,11 @@ def render_task(task_id: int) -> None:
             duration_max_s=cfg.get("duration_max_s"),
             rate_pct=int(cfg.get("rate_pct", 0)),
         )
-        if script.synopsis:
-            task.synopsis = script.synopsis[:300]
-            db.commit()
+        # Episode memory must NEVER be empty after a successful generation — an episode without a
+        # synopsis is invisible to every later episode's no-repeat/serial prompt (continuity
+        # silently degrades). The schema requires a synopsis; the variant-A title is the fallback.
+        task.synopsis = (script.synopsis or script.metadata_variations[0].title)[:300]
+        db.commit()
 
         _set_status(db, task, TaskStatus.RENDERING, 10)
         output_dir = os.path.join(settings.MEDIA_ROOT, "buffer", str(campaign.id))

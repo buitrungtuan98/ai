@@ -128,6 +128,52 @@ def test_pick_music_cc0_search_and_cache(monkeypatch, tmp_path):
     assert ms.pick_music("mood", "fs-key", cache) is None
 
 
+def test_pick_music_falls_back_to_generic_mood(monkeypatch, tmp_path):
+    """A niche/non-English mood with zero CC0 matches retries ONCE with the generic query, so the
+    episode gets *generic* music instead of *no* music."""
+    from services import music_service as ms
+
+    searches = []
+
+    def fake_search(query, key):
+        searches.append(query)
+        if query == ms.FALLBACK_MOOD:
+            return [{"id": 7, "name": "Calm Pad", "username": "artistC",
+                     "previews": {"preview-hq-mp3": "https://cdn.example/7.mp3"}}]
+        return []  # the specific mood finds nothing
+
+    monkeypatch.setattr(ms, "_search_cc0", fake_search)
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "freesound_7.mp3").write_bytes(b"mp3")  # pre-cached → no network download
+
+    path, credit = ms.pick_music("nhạc buồn miền Tây", "fs-key", str(cache))
+    assert searches == ["nhạc buồn miền Tây", ms.FALLBACK_MOOD]
+    assert path.endswith("freesound_7.mp3") and credit["id"] == 7
+
+    # Nothing at all (even generic) → None, and no third search.
+    monkeypatch.setattr(ms, "_search_cc0", lambda q, k: [])
+    assert ms.pick_music("anything", "fs-key", str(cache)) is None
+
+
+def test_verify_freesound(monkeypatch):
+    import requests
+
+    from services import verification
+
+    class Resp:
+        def __init__(self, code):
+            self.status_code = code
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: Resp(200))
+    ok, detail = verification.verify_freesound("good-key")
+    assert ok and "Auto background music" in detail
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: Resp(401))
+    ok, detail = verification.verify_freesound("bad-key")
+    assert not ok and "401" in detail
+
+
 def test_telegram_send(monkeypatch):
     import requests
 

@@ -270,6 +270,24 @@ measured at TTS time (audio remains ground truth). Proposed by the AI designer.
   music balance — zero extra API calls, falls back to frames-only if extraction fails.
 - Verified: 126 tests passing (8 new), ruff clean, docs guard green.
 
+## Usability & reliability batch — voice picker, continuity hardening, music truth `DONE`
+- **Per-language voice picker**: the free-text voice field became a dropdown that follows the
+  Target language, fed by ONE curated catalog (`core/tts.py VOICE_CHOICES`, 2 vi / 10 en / 6 es
+  voices with human labels); the AI designer's `PROPOSABLE_VOICES` derives from the same catalog
+  (DRY), a hand-typed legacy voice stays selectable as "(custom)", and switching language resets
+  the voice to that language's default.
+- **Continuity hardening**: `synopsis` is now REQUIRED in the script schema (an omitted synopsis
+  used to leave the episode invisible to later no-repeat/serial prompts — continuity silently
+  degraded); the worker additionally falls back to the variant-A title so episode memory is never
+  empty. Preview button + RUNBOOK now state that previews are memory-less one-offs, and a RUNBOOK
+  section explains how to verify continuity on the Performance page.
+- **Background music truth**: Auto music without `FREESOUND_API_KEY` now FAILS the episode with a
+  clear error (config truth — it used to silently publish music-less videos); the campaign form
+  shows a red warning when the server key is missing; the AI designer downgrades auto→none on a
+  keyless box; a niche/non-English mood retries once with a generic query (generic music beats no
+  music); the Credentials page gained a live Freesound **Test**.
+- Verified: 133 tests passing (7 new), ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download
