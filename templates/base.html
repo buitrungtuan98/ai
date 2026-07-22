@@ -7,17 +7,27 @@
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="topbar">
+    <button class="nav-toggle" id="nav-toggle" aria-label="Open navigation"
+            aria-controls="sidebar" aria-expanded="false">☰</button>
+    <div class="brand"><span class="dot"></span> AI Video Factory</div>
+  </header>
   <div class="layout">
-    <aside class="sidebar">
+    <div class="nav-backdrop" id="nav-backdrop"></div>
+    <aside class="sidebar" id="sidebar">
       <div class="brand"><span class="dot"></span> AI Video Factory</div>
-      <nav class="nav">
+      <nav class="nav" aria-label="Primary">
+        <p class="nav-group">Monitor</p>
         <a href="/" class="{{ 'active' if nav=='dashboard' else '' }}"><span class="ico">▚</span> Dashboard</a>
-        <a href="/channels" class="{{ 'active' if nav=='channels' else '' }}"><span class="ico">◉</span> Channels</a>
+        <a href="/tasks" class="{{ 'active' if nav=='tasks' else '' }}"><span class="ico">≣</span> Task Logs</a>
+        <a href="/calendar" class="{{ 'active' if nav=='calendar' else '' }}"><span class="ico">▧</span> Calendar</a>
+        <p class="nav-group">Content</p>
         <a href="/campaigns" class="{{ 'active' if nav=='campaigns' else '' }}"><span class="ico">▤</span> Campaigns</a>
         <a href="/assets" class="{{ 'active' if nav=='assets' else '' }}"><span class="ico">▦</span> Asset Pool</a>
-        <a href="/calendar" class="{{ 'active' if nav=='calendar' else '' }}"><span class="ico">▧</span> Calendar</a>
+        <a href="/channels" class="{{ 'active' if nav=='channels' else '' }}"><span class="ico">◉</span> Channels</a>
+        <p class="nav-group">Setup</p>
         <a href="/credentials" class="{{ 'active' if nav=='credentials' else '' }}"><span class="ico">⚿</span> Credentials</a>
-        <a href="/tasks" class="{{ 'active' if nav=='tasks' else '' }}"><span class="ico">≣</span> Task Logs</a>
       </nav>
       {% if settings.MULTI_TENANT_MODE %}
       <div class="sidebar-foot">
@@ -26,10 +36,11 @@
       </div>
       {% endif %}
     </aside>
-    <main class="main">
+    <main class="main" id="main">
       {% block content %}{% endblock %}
     </main>
   </div>
+  <script src="/static/ui.js" defer></script>
   {% block scripts %}{% endblock %}
 </body>
 </html>
