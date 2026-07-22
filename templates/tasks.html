@@ -4,6 +4,11 @@
 {% block content %}
 {% call ui.page_head('Task Logs', 'Live render pipeline · refreshes every few seconds. Pending → AI Generation → Audio Synced → Rendering → Publishing → Completed. Retry a failed episode in one tap.') %}{% endcall %}
 
+{% if scope_campaign %}
+{{ ui.breadcrumb([{'label': 'Campaigns', 'href': '/campaigns'}, {'label': scope_campaign.topic_name, 'href': '/campaigns/' ~ scope_campaign.id ~ '/performance'}, {'label': 'Tasks'}]) }}
+<p class="scope-note">Render jobs for <b>{{ scope_campaign.topic_name }}</b>. <a href="/tasks">Show all →</a></p>
+{% endif %}
+
 <input class="search" id="task-filter" placeholder="🔎 Filter by topic, channel, status or #id…" aria-label="Filter tasks">
 <div class="card">
   <div class="table-wrap">
@@ -11,7 +16,7 @@
       <thead>
         <tr><th>Task</th><th>Episode</th><th>Status</th><th>Progress</th><th>Time</th><th>Result</th><th></th></tr>
       </thead>
-      <tbody id="task-rows">
+      <tbody id="task-rows"{% if scope_campaign %} data-scope-campaign="{{ scope_campaign.id }}"{% endif %}>
         <tr><td colspan="7">
           <div class="skeleton sk-line" style="width:80%"></div>
           <div class="skeleton sk-line"></div>

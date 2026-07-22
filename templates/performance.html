@@ -2,9 +2,18 @@
 {% import "macros.html" as ui %}
 {% block title %}Performance · {{ campaign.topic_name }} · AI Video Factory{% endblock %}
 {% block content %}
+{% if channel %}{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': channel.channel_name, 'href': '/campaigns?channel=' ~ channel.id}, {'label': campaign.topic_name}]) }}{% endif %}
 {% call ui.page_head('Performance — ' ~ campaign.topic_name, 'What this channel has learned from its own results. Retention (avg % viewed) is the metric that matters most for Shorts.') %}
   <a class="btn ghost" href="/campaigns">← Campaigns</a>
 {% endcall %}
+
+{# Campaign hub — jump to this campaign's scoped Assets / Tasks / settings. #}
+<div class="hub-tabs">
+  <span class="hub-tab active">📊 Overview</span>
+  <a class="hub-tab" href="/assets?campaign={{ campaign.id }}">▦ Assets{% if asset_count.ready + asset_count.awaiting_review %} ({{ asset_count.ready + asset_count.awaiting_review }}){% endif %}</a>
+  <a class="hub-tab" href="/tasks?campaign={{ campaign.id }}">≣ Tasks</a>
+  <a class="hub-tab" href="/campaigns/{{ campaign.id }}/edit">✎ Edit</a>
+</div>
 
 <div class="card">
   <div class="card-head">

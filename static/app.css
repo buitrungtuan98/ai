@@ -425,6 +425,23 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 .reason-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: var(--sp-2); }
 .kbd-active { outline: 2px solid var(--primary); outline-offset: 2px; }
 
+/* Breadcrumbs + scope note (drill-down orientation) */
+.crumbs { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: var(--fs-sm);
+  color: var(--muted); margin: calc(-1 * var(--sp-3)) 0 var(--sp-3); }
+.crumbs .sep { color: var(--text-subtle); }
+.crumbs .current { color: var(--text); font-weight: var(--fw-semibold); }
+.scope-note { font-size: var(--fs-sm); color: var(--muted); background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: var(--radius-sm); padding: var(--sp-2) var(--sp-3);
+  margin-bottom: var(--sp-5); }
+
+/* Campaign-hub tab row (links to the campaign's scoped Assets / Tasks / Edit) */
+.hub-tabs { display: flex; gap: var(--sp-1); flex-wrap: wrap; border-bottom: 1px solid var(--border);
+  margin-bottom: var(--sp-5); }
+.hub-tab { padding: 8px var(--sp-4); color: var(--muted); font-weight: var(--fw-semibold);
+  font-size: var(--fs-sm); border-bottom: 2px solid transparent; white-space: nowrap; }
+.hub-tab:hover { color: var(--text); }
+.hub-tab.active { color: var(--text); border-bottom-color: var(--primary); }
+
 /* Search box */
 .search { max-width: 360px; margin-bottom: var(--sp-5); }
 

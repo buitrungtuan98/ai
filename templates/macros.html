@@ -67,6 +67,14 @@
 </div>
 {%- endmacro %}
 
+{# Breadcrumb trail. Pass a list of {label, href}; the last item renders as the current (no link).
+   e.g. ui.breadcrumb([{'label':'Channels','href':'/channels'}, {'label':camp.topic_name}]) #}
+{% macro breadcrumb(trail) -%}
+<nav class="crumbs" aria-label="Breadcrumb">
+  {% for c in trail %}{% if c.href and not loop.last %}<a href="{{ c.href }}">{{ c.label }}</a><span class="sep" aria-hidden="true">›</span>{% else %}<span class="current" aria-current="page">{{ c.label }}</span>{% endif %}{% endfor %}
+</nav>
+{%- endmacro %}
+
 {# Labelled form field wrapper: {% call ui.field('Topic', hint='…') %}<input …>{% endcall %} #}
 {% macro field(label_text, hint='', for_id='') -%}
 <div class="form-row">

@@ -19,6 +19,15 @@
   Use <b>Discard &amp; re-render</b> on the card to produce it again.{% endcall %}
 {% endif %}
 
+{% if scope_campaign %}
+{% set sc = chan_by_id.get(scope_campaign.channel_id) %}
+{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': sc.channel_name if sc else 'Channel', 'href': '/campaigns?channel=' ~ scope_campaign.channel_id}, {'label': scope_campaign.topic_name, 'href': '/campaigns/' ~ scope_campaign.id ~ '/performance'}, {'label': 'Assets'}]) }}
+<p class="scope-note">Assets for <b>{{ scope_campaign.topic_name }}</b>. <a href="/assets">Show all →</a></p>
+{% elif scope_channel %}
+{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': scope_channel.channel_name}, {'label': 'Assets'}]) }}
+<p class="scope-note">Assets for channel <b>{{ scope_channel.channel_name }}</b>. <a href="/assets">Show all →</a></p>
+{% endif %}
+
 {% if items %}
 <div class="filter-bar" id="asset-filter">
   <button type="button" class="chip active" data-filter="all">All ({{ items|length }})</button>
@@ -41,12 +50,13 @@
     {% endif %}
 
     <div class="card-head mt">
-      <h3>{{ camp.topic_name if camp else 'C' ~ i.campaign_id }} · Ep {{ i.episode_number }}</h3>
+      <h3><a href="/campaigns/{{ i.campaign_id }}/performance">{{ camp.topic_name if camp else 'C' ~ i.campaign_id }}</a> · Ep {{ i.episode_number }}</h3>
       {{ ui.pill(pill_cls, i.status.value.replace('_',' ')|title) }}
     </div>
+    {% set ch = chan_by_id.get(i.channel_id) %}
     <p class="meta">{{ i.metadata_json.get('title','—') }}
       {% if i.metadata_json.get('variant') %} · Variant {{ i.metadata_json.get('variant') }}{% endif %}<br>
-      <span {% if i.created_at %}data-reltime="{{ i.created_at.isoformat() }}Z"{% endif %}>{{ i.created_at.strftime('%Y-%m-%d %H:%M') if i.created_at else '' }} UTC</span></p>
+      {% if ch %}<a href="/assets?channel={{ i.channel_id }}">{{ ch.channel_name }}</a> · {% endif %}<span {% if i.created_at %}data-reltime="{{ i.created_at.isoformat() }}Z"{% endif %}>{{ i.created_at.strftime('%Y-%m-%d %H:%M') if i.created_at else '' }} UTC</span></p>
     {% set qc = i.metadata_json.get('qc') %}
     {% if qc %}
     <p class="hint">{% if qc.get('passed') %}🟢 Auto-QC passed{% else %}🔴 Auto-QC FAILED{% endif %}{% if qc.get('score') is not none %} · score {{ qc.get('score') }}/10{% endif %}{% if qc.get('attempts', 1) > 1 %} · {{ qc.get('attempts') }} attempts{% endif %}{% if qc.get('issues') %} · {{ qc.get('issues')|join('; ') }}{% endif %}</p>

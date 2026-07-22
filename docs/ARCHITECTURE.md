@@ -381,3 +381,22 @@ belong on the client — the data is already on the page, and a round-trip would
 backend surface for what is pure presentation. "Create & Start" removes a two-step create-then-start
 dance without duplicating logic; and requiring the channel name to be typed makes the one irreversible
 cascading delete deliberate rather than a stray click.
+
+### ADR-022 — Master–detail "object hub" navigation for Channel → Campaign → Assets/Tasks
+**Decision:** the four flat lists (Channels, Campaigns, Asset Pool, Task Logs) are wired into the real
+hierarchy without adding route paths. Every entity name is a link to its home; related collections
+appear as counts that link to a SCOPED list view (`/campaigns?channel=`, `/assets?campaign=` or
+`?channel=`, `/tasks?campaign=`); each scoped view narrows its query SERVER-SIDE from the URL param
+and renders a breadcrumb + a "show all" clear, so the URL is the single source of truth (back-button,
+bookmarking, sharing all work). Rollup counts (campaigns-per-channel, buffer-per-campaign) are small
+read-only `group by` queries added to the relevant page contexts. The existing
+`/campaigns/{id}/performance` route is promoted to the campaign HUB with an Overview · Assets · Tasks ·
+Edit tab row — a real detail page reusing a route that already existed. Task Logs is JS-rendered, so
+its scope filters `/api/tasks` client-side over the campaign id the page embeds; every other scope is
+server-side.
+**Why:** a management console's whole job is to let you travel the relationships between objects, not
+eyeball parallel lists. The master–detail + scoped-list + breadcrumb pattern is the industry norm
+(GitHub, Stripe, YouTube Studio) and maps 1:1 to the `User → Channel → Campaign → {Task,
+BufferPoolItem}` model. Doing the scoping server-side from the URL (rather than client-side over a
+fully-loaded list) keeps it correct at any size and makes views shareable; reusing Performance as the
+hub delivers a true detail page without new top-level routes or a heavier backend.

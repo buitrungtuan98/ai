@@ -6,6 +6,11 @@
   <a class="btn" href="/campaigns/new">+ New Campaign</a>
 {% endcall %}
 
+{% if scope_channel %}
+{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': scope_channel.channel_name}]) }}
+<p class="scope-note">Campaigns for <b>{{ scope_channel.channel_name }}</b>. <a href="/campaigns">Show all campaigns →</a></p>
+{% endif %}
+
 {% if campaigns %}
 {% if campaigns|length > 3 %}<input class="search" id="campaign-search" placeholder="🔎 Search campaigns…" aria-label="Search campaigns">{% endif %}
 <div class="grid cols-3" id="campaign-grid">
@@ -17,7 +22,7 @@
       {{ ui.pill(c.status.value) }}
     </div>
     <p class="meta">
-      {{ channels[c.channel_id].channel_name if c.channel_id in channels else '—' }} ·
+      <a href="/campaigns?channel={{ c.channel_id }}">{{ channels[c.channel_id].channel_name if c.channel_id in channels else '—' }}</a> ·
       {{ c.config_json.get('language','en')|upper }}
     </p>
     <div class="flex between mt">
@@ -32,6 +37,9 @@
       <a class="btn ghost sm" href="/campaigns/{{ c.id }}/edit">Edit</a>
       <a class="btn ghost sm" href="/campaigns/new?from_id={{ c.id }}" title="Copy this campaign (e.g. another language/channel)">⧉ Duplicate</a>
       <a class="btn ghost sm" href="/campaigns/{{ c.id }}/performance" title="Stats + learned playbook">📊 Performance</a>
+      {% set ac = asset_counts.get(c.id, {'ready': 0, 'awaiting_review': 0}) %}
+      <a class="btn ghost sm" href="/assets?campaign={{ c.id }}" title="This campaign's pre-rendered videos">▦ Assets{% if ac.ready + ac.awaiting_review %} ({{ ac.ready + ac.awaiting_review }}){% endif %}</a>
+      <a class="btn ghost sm" href="/tasks?campaign={{ c.id }}" title="This campaign's render jobs">≣ Tasks</a>
       <form method="post" action="/campaigns/{{ c.id }}/delete" data-confirm="Delete “{{ c.topic_name }}” and all its episodes? This can't be undone.">
         <button class="btn danger sm" type="submit">Delete</button>
       </form>

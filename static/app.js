@@ -3,6 +3,7 @@
   var tbody = document.getElementById("task-rows");
   if (!tbody) return;
   var filterEl = document.getElementById("task-filter");
+  var scopeCampaign = tbody.dataset.scopeCampaign ? Number(tbody.dataset.scopeCampaign) : null;
   var lastTasks = [];
 
   var STATUS_LABELS = {
@@ -56,8 +57,9 @@
   }
 
   function render(allTasks) {
+    var scoped = scopeCampaign ? allTasks.filter(function (t) { return t.campaign_id === scopeCampaign; }) : allTasks;
     var q = (filterEl && filterEl.value.trim().toLowerCase()) || "";
-    var tasks = q ? allTasks.filter(function (t) { return matches(t, q); }) : allTasks;
+    var tasks = q ? scoped.filter(function (t) { return matches(t, q); }) : scoped;
     if (!tasks.length) {
       tbody.innerHTML = '<tr><td colspan="7"><div class="empty">' +
         (q

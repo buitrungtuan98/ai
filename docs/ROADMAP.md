@@ -349,6 +349,19 @@ measured at TTS time (audio remains ground truth). Proposed by the AI designer.
   (tab bar, light theme, filter/reason chips, keyboard review, search, sparkline, typed-confirm,
   live indicator) screenshotted at 375px & 1280px. ADR-021 records the theme + client-filtering stance.
 
+## Channel → Campaign → Asset linkage (master-detail navigation) `DONE`
+- The four flat lists are now a navigable hierarchy: every entity name links to its home, related
+  collections show as counts that open a **scoped list** (`/campaigns?channel=`, `/assets?campaign=` /
+  `?channel=`, `/tasks?campaign=`), and each scoped view renders a **breadcrumb + "show all"** with the
+  URL as the source of truth (server-side scoping; Task Logs filters the live feed client-side).
+- **Channels** cards show a campaign rollup ("3 campaigns · 2 active") + Campaigns/Assets drill-downs;
+  **Campaign** cards link the channel and add Assets(N)/Tasks; **Asset** cards link campaign + channel;
+  **Performance** is promoted to the campaign **hub** (Overview · Assets · Tasks · Edit tab row).
+- Additive read-only backend only: optional `?channel=`/`?campaign=` params + rollup `group by` counts;
+  no route paths added, no business logic touched. ADR-022 records the pattern.
+- Verified: 139 tests passing, ruff clean, docs guard green; the full drill-down flow (channel → its
+  campaigns → a campaign's assets/tasks/performance, with breadcrumbs) screenshotted at 1280px.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

@@ -224,6 +224,24 @@ def _task_counts(db, user_id: int) -> dict:
     }
 
 
+def _buffer_counts(db, user_id: int) -> dict:
+    """Per-campaign buffer tallies for the rollup links: {campaign_id: {ready, awaiting_review}}."""
+    rows = db.execute(
+        select(BufferPoolItem.campaign_id, BufferPoolItem.status, func.count())
+        .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
+        .where(Campaign.user_id == user_id)
+        .group_by(BufferPoolItem.campaign_id, BufferPoolItem.status)
+    ).all()
+    out: dict = {}
+    for cid, status, n in rows:
+        d = out.setdefault(cid, {"ready": 0, "awaiting_review": 0})
+        if status == BufferStatus.ready:
+            d["ready"] += n
+        elif status == BufferStatus.awaiting_review:
+            d["awaiting_review"] += n
+    return out
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request, user: CurrentUser, db: DbDep):
     channels = db.scalars(select(Channel).where(Channel.user_id == user.id)).all()
@@ -249,8 +267,20 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
 @app.get("/channels", response_class=HTMLResponse)
 def channels_page(request: Request, user: CurrentUser, db: DbDep):
     channels = db.scalars(select(Channel).where(Channel.user_id == user.id)).all()
+    # Rollup: campaigns per channel (total + active) for the drill-down links.
+    camp_counts: dict = {}
+    for chid, status, n in db.execute(
+        select(Campaign.channel_id, Campaign.status, func.count())
+        .where(Campaign.user_id == user.id).group_by(Campaign.channel_id, Campaign.status)
+    ).all():
+        d = camp_counts.setdefault(chid, {"total": 0, "active": 0})
+        d["total"] += n
+        if status == CampaignStatus.active:
+            d["active"] += n
     return templates.TemplateResponse(
-        request, "channels.html", {"request": request, "user": user, "channels": channels, "nav": "channels"}
+        request, "channels.html",
+        {"request": request, "user": user, "channels": channels, "nav": "channels",
+         "camp_counts": camp_counts},
     )
 
 
@@ -351,13 +381,18 @@ def _google_flow(scopes: list[str], redirect_path: str):
 
 # ── Campaigns Manager ────────────────────────────────────────────────────────
 @app.get("/campaigns", response_class=HTMLResponse)
-def campaigns_page(request: Request, user: CurrentUser, db: DbDep):
-    campaigns = db.scalars(select(Campaign).where(Campaign.user_id == user.id)).all()
+def campaigns_page(request: Request, user: CurrentUser, db: DbDep, channel: int | None = None):
+    q = select(Campaign).where(Campaign.user_id == user.id)
+    if channel:  # scoped to one channel (drill-down from Channels)
+        q = q.where(Campaign.channel_id == channel)
+    campaigns = db.scalars(q).all()
     channels = {c.id: c for c in db.scalars(select(Channel).where(Channel.user_id == user.id)).all()}
     return templates.TemplateResponse(
         request,
         "campaigns.html",
-        {"request": request, "user": user, "campaigns": campaigns, "channels": channels, "nav": "campaigns"},
+        {"request": request, "user": user, "campaigns": campaigns, "channels": channels, "nav": "campaigns",
+         "asset_counts": _buffer_counts(db, user.id),
+         "scope_channel": channels.get(channel) if channel else None},
     )
 
 
@@ -756,19 +791,26 @@ def save_credentials(
 # ── Asset Pool Cache (+ preview & review) ────────────────────────────────────
 @app.get("/assets", response_class=HTMLResponse)
 def assets_page(request: Request, user: CurrentUser, db: DbDep,
-                flash: str = "", flash_reason: str = ""):
-    items = db.scalars(
-        select(BufferPoolItem)
-        .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
-        .where(Campaign.user_id == user.id)
-        .order_by(BufferPoolItem.id.desc())
-    ).all()
+                flash: str = "", flash_reason: str = "",
+                campaign: int | None = None, channel: int | None = None):
+    q = (select(BufferPoolItem)
+         .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
+         .where(Campaign.user_id == user.id))
+    if campaign:  # drill-down scope from a campaign
+        q = q.where(BufferPoolItem.campaign_id == campaign)
+    if channel:   # drill-down scope from a channel
+        q = q.where(BufferPoolItem.channel_id == channel)
+    items = db.scalars(q.order_by(BufferPoolItem.id.desc())).all()
     campaigns = db.scalars(select(Campaign).where(Campaign.user_id == user.id)).all()
+    chan_by_id = {c.id: c for c in db.scalars(select(Channel).where(Channel.user_id == user.id)).all()}
+    camp_by_id = {c.id: c for c in campaigns}
     previewable = {i.id for i in items if i.video_path and os.path.exists(i.video_path)}
     return templates.TemplateResponse(
         request, "assets.html",
         {"request": request, "user": user, "items": items, "nav": "assets",
-         "camp_by_id": {c.id: c for c in campaigns}, "previewable": previewable,
+         "camp_by_id": camp_by_id, "chan_by_id": chan_by_id, "previewable": previewable,
+         "scope_campaign": camp_by_id.get(campaign) if campaign else None,
+         "scope_channel": chan_by_id.get(channel) if channel else None,
          # Post-action feedback (whitelisted — never echo arbitrary input back into the page).
          "flash": flash if flash in ("publish", "rerender", "rejected", "missing") else "",
          "flash_reason": flash_reason[:200]},
@@ -965,7 +1007,10 @@ def campaign_performance(request: Request, user: CurrentUser, db: DbDep,
         request, "performance.html",
         {"request": request, "user": user, "nav": "campaigns", "campaign": campaign,
          "episodes": episodes, "learning": campaign.learning_json or {},
-         "best_id": best.id if best else None, "variants": ab_variant_summary(episodes)},
+         "best_id": best.id if best else None, "variants": ab_variant_summary(episodes),
+         # Campaign-hub context: parent channel + its buffer tally for the drill-down links.
+         "channel": db.get(Channel, campaign.channel_id),
+         "asset_count": _buffer_counts(db, user.id).get(campaign.id, {"ready": 0, "awaiting_review": 0})},
     )
 
 
@@ -1033,8 +1078,15 @@ def calendar_page(request: Request, user: CurrentUser, db: DbDep):
 
 # ── Real-Time Task Logs ──────────────────────────────────────────────────────
 @app.get("/tasks", response_class=HTMLResponse)
-def tasks_page(request: Request, user: CurrentUser):
-    return templates.TemplateResponse(request, "tasks.html", {"request": request, "user": user, "nav": "tasks"})
+def tasks_page(request: Request, user: CurrentUser, db: DbDep, campaign: int | None = None):
+    scope = None
+    if campaign:  # drill-down scope from a campaign (client-side filter over the live feed)
+        scope = db.get(Campaign, campaign)
+        if scope is not None and scope.user_id != user.id:
+            scope = None
+    return templates.TemplateResponse(
+        request, "tasks.html",
+        {"request": request, "user": user, "nav": "tasks", "scope_campaign": scope})
 
 
 @app.get("/api/tasks")
