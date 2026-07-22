@@ -74,7 +74,7 @@
   --topbar-h: 56px;
 
   /* z-index scale */
-  --z-savebar: 20; --z-backdrop: 30; --z-drawer: 40; --z-topbar: 50;
+  --z-savebar: 20; --z-backdrop: 30; --z-drawer: 40; --z-topbar: 50; --z-modal: 60; --z-toast: 70;
 }
 
 /* ── 2. Reset / base ───────────────────────────────────────────────────────── */
@@ -357,6 +357,31 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
   gap: var(--sp-2); border-top: 1px solid var(--border); padding-top: var(--sp-3); }
 .sidebar-foot .who { color: var(--muted); font-size: var(--fs-xs); overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── 17b. Attention badge · modal · toasts ─────────────────────────────────── */
+.nav-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 18px;
+  height: 18px; padding: 0 5px; border-radius: var(--radius-pill); background: var(--st-failed);
+  color: #fff; font-size: 11px; font-weight: var(--fw-bold); line-height: 1; margin-left: auto; }
+.nav-badge.review { background: var(--st-review); color: var(--primary-ink); }
+.nav-toggle { position: relative; }
+.nav-toggle .nav-badge { position: absolute; top: 5px; right: 3px; margin: 0; }
+
+.modal-backdrop { position: fixed; inset: 0; z-index: var(--z-modal); background: rgba(0, 0, 0, .6);
+  display: flex; align-items: center; justify-content: center; padding: var(--sp-4); }
+.modal-backdrop[hidden] { display: none; }
+.modal { background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-3); padding: var(--sp-6); max-width: 420px; width: 100%; }
+.modal p { margin: 0 0 var(--sp-5); font-size: var(--fs-md); }
+
+.toasts { position: fixed; right: var(--sp-4); bottom: var(--sp-4); z-index: var(--z-toast);
+  display: flex; flex-direction: column; gap: var(--sp-2); max-width: calc(100vw - 2 * var(--sp-4)); }
+.toast { background: var(--surface-3); border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--primary); border-radius: var(--radius-sm); padding: var(--sp-3) var(--sp-4);
+  box-shadow: var(--shadow-2); font-size: var(--fs-sm); opacity: 0; transform: translateY(8px);
+  transition: opacity .2s ease, transform .2s ease; }
+.toast.show { opacity: 1; transform: none; }
+.toast.success { border-left-color: var(--st-success); }
+.toast.danger { border-left-color: var(--st-failed); }
 
 /* ── 18. Responsive ────────────────────────────────────────────────────────── */
 @media (max-width: 900px) {

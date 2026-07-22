@@ -27,7 +27,7 @@
   {% endif %}
   {% if learning %}
   <form method="post" action="/campaigns/{{ campaign.id }}/learning/reset" class="mt"
-        onsubmit="return confirm('Clear everything this channel has learned?')">
+        data-confirm="Clear everything this channel has learned? The playbook and avoid-notes are lost.">
     <button class="btn danger sm" type="submit">Reset learning</button>
   </form>
   {% endif %}

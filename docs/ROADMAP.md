@@ -320,6 +320,20 @@ measured at TTS time (audio remains ground truth). Proposed by the AI designer.
 - Verified: 137 tests passing, ruff clean, docs guard green; every page screenshotted at 375px & 1280px
   (seeded + fresh-install empty state) via the pre-installed Playwright Chromium.
 
+## Dashboard ease-of-use follow-ups `DONE`
+- **Live status everywhere**: read-only `GET /api/summary` (reuses the dashboard helpers) drives a
+  cross-page attention badge (failures on Task Logs, awaiting-review on Asset Pool, combined on the
+  mobile hamburger) and auto-refreshes the dashboard health strip / tiles / banners every 6s — the
+  Operator no longer has to reload or even be on the dashboard to notice work.
+- **Accessible confirm + toasts**: native `confirm()` on every destructive action replaced by an
+  in-page dialog (`data-confirm`); transient aria-live toasts for client feedback.
+- **Campaign form is `novalidate` + JS-validated**: fixes a latent trap where a required field on a
+  hidden tab silently blocked submit; validation now jumps to the offending field's tab, explains the
+  problem, and puts the submit button in a busy state on a valid save. Asset timestamps show relative
+  time ("4m ago") with the full UTC time on hover.
+- Verified: 138 tests passing (1 new — `/api/summary`), ruff clean, docs guard green; interactions
+  (badge, confirm modal, toast, form validation, tab-jump) screenshotted at 375px & 1280px.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

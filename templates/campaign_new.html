@@ -13,7 +13,7 @@
 {% if not channels %}
 {% call ui.empty('◉', 'Connect a channel first', 'Every campaign publishes to a channel — add one to get started.', '/channels', 'Add a channel') %}{% endcall %}
 {% else %}
-<form method="post" action="{{ '/campaigns/' ~ campaign.id ~ '/edit' if editing else '/campaigns' }}">
+<form method="post" action="{{ '/campaigns/' ~ campaign.id ~ '/edit' if editing else '/campaigns' }}" novalidate>
   <div class="tabs">
     <button type="button" class="tab-btn active" data-tab="core">Core &amp; AI Strategy</button>
     <button type="button" class="tab-btn" data-tab="audio">Aesthetics &amp; Audio</button>
@@ -254,10 +254,10 @@
   </div>
 
   <div class="savebar">
-    <button class="btn" type="submit">{{ 'Save changes' if editing else 'Create Campaign' }}</button>
+    <button class="btn" type="submit" id="save-campaign">{{ 'Save changes' if editing else 'Create Campaign' }}</button>
     <a class="btn ghost" href="/campaigns">Cancel</a>
     <span class="grow"></span>
-    <span class="hint">Tune anything, then save. You can edit or duplicate later.</span>
+    <span class="hint" id="save-hint">Tune anything, then save. You can edit or duplicate later.</span>
   </div>
 </form>
 {% endif %}
@@ -393,6 +393,45 @@
           alert(e.message || "AI proposal failed — please try again.");
         }
       });
+    });
+  }
+
+  // ✅ Inline validation + submit busy state. Native POST navigates on success, so the busy
+  // label persists until the new page loads — clear feedback that the save is in flight.
+  const campaignForm = document.querySelector('form[action$="/campaigns"], form[action*="/edit"]');
+  if (campaignForm) {
+    const saveBtn = document.getElementById("save-campaign");
+    const hint = document.getElementById("save-hint");
+    const showTab = (name) => { const b = document.querySelector('.tab-btn[data-tab="' + name + '"]'); if (b) b.click(); };
+    const openDetails = (el) => { const d = el && el.closest("details"); if (d) d.open = true; };
+    const fail = (msg, tab, el) => {
+      if (tab) showTab(tab);
+      openDetails(el);
+      if (hint) { hint.textContent = "⚠ " + msg; hint.style.color = "var(--st-failed)"; }
+      if (el) { el.focus(); el.scrollIntoView({ block: "center", behavior: "smooth" }); }
+      if (window.ui) window.ui.toast(msg, "danger");
+    };
+    // The form is `novalidate` so we control validation entirely — otherwise a required field on
+    // a hidden tab would block submit with an un-focusable bubble (silent failure).
+    campaignForm.addEventListener("submit", function (e) {
+      const el = (n) => campaignForm.elements[n];
+      const val = (n) => (el(n) && el(n).value || "").trim();
+      // Required (Core tab)
+      if (!val("topic_name")) { e.preventDefault(); return fail("Give the campaign a topic name.", "core", el("topic_name")); }
+      if (!val("channel_id")) { e.preventDefault(); return fail("Pick a target channel.", "core", el("channel_id")); }
+      const eps = Number(val("total_episodes"));
+      if (!val("total_episodes") || isNaN(eps) || eps < 1) { e.preventDefault(); return fail("Total episodes must be at least 1.", "core", el("total_episodes")); }
+      // Video-length pair (Core → advanced)
+      const dmin = val("duration_min_s"), dmax = val("duration_max_s");
+      if ((dmin && !dmax) || (dmax && !dmin)) { e.preventDefault(); return fail("Set BOTH video-length fields or leave both blank.", "core", el(dmin ? "duration_max_s" : "duration_min_s")); }
+      if (dmin && dmax && Number(dmin) > Number(dmax)) { e.preventDefault(); return fail("Minimum video length can't exceed the maximum.", "core", el("duration_min_s")); }
+      // Posting-slot format (Distribution tab)
+      const slots = val("posting_slots");
+      if (slots && !slots.split(",").map(s => s.trim()).filter(Boolean).every(s => /^([01]?\d|2[0-3]):[0-5]\d$/.test(s))) {
+        e.preventDefault(); return fail("Posting slots must be HH:MM, comma-separated (e.g. 07:30, 21:00).", "dist", el("posting_slots"));
+      }
+      // Valid → busy state (persists through the navigation).
+      if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = {{ ('Saving…' if editing else 'Creating…') | tojson }}; }
     });
   }
 </script>

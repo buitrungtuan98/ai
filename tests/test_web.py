@@ -673,3 +673,26 @@ def test_api_tasks_returns_names_and_transparency_fields(client):
     assert data["topic"] == "Space" and data["channel"] == "P"
     assert data["published_url"].endswith("/x1")
     assert data["duration_s"] == 750 and data["can_retry"] is False
+
+
+def test_api_summary_snapshot(client):
+    """The live snapshot feeding the header attention badge + dashboard auto-refresh reuses the
+    dashboard helpers, so its counts match a full reload."""
+    from database.db_session import SessionLocal
+    from database.models import Task
+    from database.types import TaskStatus
+
+    cam = _seed_campaign(client)
+    db = SessionLocal()
+    db.add(Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=1,
+                status=TaskStatus.FAILED, progress_pct=40))
+    db.add(Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=2,
+                status=TaskStatus.AWAITING_REVIEW, progress_pct=100))
+    db.commit()
+    db.close()
+
+    d = client.get("/api/summary").json()
+    assert set(d) == {"health", "counts", "channels", "active_campaigns"}
+    assert d["counts"]["failed"] == 1 and d["counts"]["awaiting_review"] == 1
+    assert d["channels"] == 1  # _seed_campaign creates one channel
+    assert set(d["health"]) >= {"redis", "worker", "buffer_ready", "ai_budget"}

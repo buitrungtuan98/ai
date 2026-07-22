@@ -20,7 +20,7 @@
     </div>
     <div class="flex between mt-sm">
       {% if c.status.value == 'active' %}{{ ui.pill('active', 'Active') }}{% else %}{{ ui.pill('failed', 'Expired token') }}{% endif %}
-      <form method="post" action="/channels/{{ c.id }}/delete" onsubmit="return confirm('Remove this channel?')">
+      <form method="post" action="/channels/{{ c.id }}/delete" data-confirm="Remove this channel? Its campaigns and renders go with it.">
         <button class="btn danger sm" type="submit">Remove</button>
       </form>
     </div>

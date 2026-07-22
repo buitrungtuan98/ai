@@ -345,3 +345,21 @@ primary Operator persona, who checks in from a phone. One token vocabulary + a c
 copy-paste drift (a status colour or spacing change is now one edit, not eleven), makes the three usage
 modes (Operator/Reviewer/Strategist) first-class at both 375px and 1280px, and keeps the whole thing
 inside the box's no-egress, single-stylesheet, hand-written-JS constraints.
+
+### ADR-020 — Live status via one read-only /api/summary poll; client-owned form validation
+**Decision:** ease-of-use features that need fresh server state read from a single read-only
+`GET /api/summary` endpoint that returns `{health, counts, channels, active_campaigns}` by reusing
+the exact helpers the dashboard renders from (`_system_health`, `_task_counts`) — so a polled value
+can never diverge from a full reload. `ui.js` polls it every 6s on every page and drives (a) a
+cross-page attention badge on the Task Logs / Asset Pool nav items + mobile hamburger, and (b) the
+dashboard's live health strip / tiles / banners. Destructive actions use an accessible in-page
+confirm dialog (`data-confirm` on the form; graceful fallback to native `confirm()`), and transient
+feedback uses aria-live toasts. The campaign form carries `novalidate` and validates entirely in JS,
+because a native `required` field on a hidden tab panel blocks submit with an un-focusable bubble
+(a silent failure); JS validation instead jumps to the offending field's tab and shows the reason.
+**Why:** the primary Operator persona checks in from a phone and must never miss a failure or a
+video awaiting review — a badge that follows them across pages beats a static dashboard they have to
+reload. Deriving counts client-side from the 50-row `/api/tasks` feed would drift from the real
+totals, so a purpose-built snapshot that shares the dashboard's own code is the honest choice. The
+endpoint is read-only and tenant-scoped (`CurrentUser`), adds no business logic, and touches no other
+package — the only backend change in the UI work, and squarely a "template needs live data" one.

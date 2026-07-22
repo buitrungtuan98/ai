@@ -29,10 +29,11 @@
 </div>
 {%- endmacro %}
 
-{# Stat tile. tone ∈ '', ok, warn, bad, work. Optional href makes it a link. #}
-{% macro stat(n, label, tone='', href='') -%}
+{# Stat tile. tone ∈ '', ok, warn, bad, work. Optional href makes it a link; `live` adds a
+   data-live key so ui.js can refresh the number in place from /api/summary. #}
+{% macro stat(n, label, tone='', href='', live='') -%}
 {% if href %}<a class="stat attn" href="{{ href }}">{% else %}<div class="stat">{% endif %}
-  <div class="n {{ tone }}">{{ n }}</div><div class="l">{{ label }}</div>
+  <div class="n {{ tone }}"{% if live %} data-live="{{ live }}"{% endif %}>{{ n }}</div><div class="l">{{ label }}</div>
 {% if href %}</a>{% else %}</div>{% endif %}
 {%- endmacro %}
 

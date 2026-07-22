@@ -6,17 +6,17 @@
   <a class="btn" href="/campaigns/new">+ New Campaign</a>
 {% endcall %}
 
-{# ── System health strip (degraded = red when worker/redis down) ───────────── #}
+{# ── System health strip (degraded = red when worker/redis down; auto-refreshes) ── #}
 {% set degraded = not health.worker or not health.redis %}
-<div class="health{{ ' degraded' if degraded }}" role="status" aria-live="polite">
-  <span class="hitem {{ 'bad' if not health.worker }}"><span class="dot2 {{ 'ok' if health.worker else 'bad' }}"></span>
-    Worker <b>{{ 'running' if health.worker else 'stopped' }}</b></span>
-  <span class="hitem {{ 'bad' if not health.redis }}"><span class="dot2 {{ 'ok' if health.redis else 'bad' }}"></span>
-    Redis <b>{{ 'connected' if health.redis else 'down' }}</b></span>
-  <span class="hitem">Queue <b>{{ health.queue_depth if health.queue_depth is not none else '—' }}</b> waiting</span>
-  <span class="hitem">Buffer <b>{{ health.buffer_ready }}</b> pre-rendered</span>
+<div class="health{{ ' degraded' if degraded }}" id="health-strip" role="status" aria-live="polite">
+  <span class="hitem"><span class="dot2 {{ 'ok' if health.worker else 'bad' }}" id="hd-worker"></span>
+    Worker <b id="hl-worker">{{ 'running' if health.worker else 'stopped' }}</b></span>
+  <span class="hitem"><span class="dot2 {{ 'ok' if health.redis else 'bad' }}" id="hd-redis"></span>
+    Redis <b id="hl-redis">{{ 'connected' if health.redis else 'down' }}</b></span>
+  <span class="hitem">Queue <b id="hv-queue">{{ health.queue_depth if health.queue_depth is not none else '—' }}</b> waiting</span>
+  <span class="hitem">Buffer <b id="hv-buffer">{{ health.buffer_ready }}</b> pre-rendered</span>
   <span class="hitem {{ 'warn' if health.disk_pct and health.disk_pct >= 85 }}">
-    Disk <b>{{ health.disk_pct ~ '%' if health.disk_pct is not none else '—' }}</b></span>
+    Disk <b id="hv-disk">{{ health.disk_pct ~ '%' if health.disk_pct is not none else '—' }}</b></span>
   <span class="hitem {{ 'warn' if health.ai_budget and health.ai_calls >= health.ai_budget * 0.8 }}">
     AI today <b>{{ health.ai_calls }}{{ ' / ' ~ health.ai_budget if health.ai_budget }}</b>
     {% if health.ai_budget %}
@@ -26,26 +26,23 @@
     {% endif %}
   </span>
 </div>
-{% if degraded %}
-<p class="hint" style="margin:-12px 0 16px; color:var(--st-failed)">⚠ The factory is degraded — rendering and publishing are paused until the worker and Redis are back.</p>
-{% endif %}
+<p class="hint" id="degraded-note" style="margin:-12px 0 16px; color:var(--st-failed)"
+   {{ '' if degraded else 'hidden' }}>⚠ The factory is degraded — rendering and publishing are paused until the worker and Redis are back.</p>
 
-{% if counts.failed > 0 %}
-{% call ui.banner('danger') %}⚠ {{ counts.failed }} task{{ 's' if counts.failed > 1 }} failed and need{{ '' if counts.failed > 1 else 's' }} attention.
-  <a href="/tasks">Review &amp; retry →</a>{% endcall %}
-{% endif %}
-{% if counts.awaiting_review > 0 %}
-{% call ui.banner('info') %}🎬 {{ counts.awaiting_review }} video{{ 's' if counts.awaiting_review > 1 }} waiting for your review.
-  <a href="/assets">Preview &amp; approve →</a>{% endcall %}
-{% endif %}
+<div class="banner danger" id="banner-failed" role="status" aria-live="polite" {{ '' if counts.failed > 0 else 'hidden' }}>
+  ⚠ <b data-live="failed">{{ counts.failed }}</b> failed and need attention.
+  <a href="/tasks">Review &amp; retry →</a></div>
+<div class="banner info" id="banner-review" role="status" aria-live="polite" {{ '' if counts.awaiting_review > 0 else 'hidden' }}>
+  🎬 <b data-live="awaiting_review">{{ counts.awaiting_review }}</b> awaiting your review.
+  <a href="/assets">Preview &amp; approve →</a></div>
 
 <div class="stats">
-  {{ ui.stat(channels|length, 'Connected channels', href='/channels') }}
-  {{ ui.stat(campaigns|selectattr('status.value','equalto','active')|list|length, 'Active campaigns', tone='work', href='/campaigns') }}
-  {{ ui.stat(counts.published, 'Videos published', tone='ok') }}
-  {{ ui.stat(counts.working, 'In pipeline', tone='work', href='/tasks') }}
-  {{ ui.stat(counts.awaiting_review, 'Awaiting review', tone='warn' if counts.awaiting_review else '', href='/assets') }}
-  {{ ui.stat(counts.failed, 'Failed', tone='bad' if counts.failed else '', href='/tasks') }}
+  {{ ui.stat(channels|length, 'Connected channels', href='/channels', live='channels') }}
+  {{ ui.stat(campaigns|selectattr('status.value','equalto','active')|list|length, 'Active campaigns', tone='work', href='/campaigns', live='active_campaigns') }}
+  {{ ui.stat(counts.published, 'Videos published', tone='ok', live='published') }}
+  {{ ui.stat(counts.working, 'In pipeline', tone='work', href='/tasks', live='working') }}
+  {{ ui.stat(counts.awaiting_review, 'Awaiting review', tone='warn' if counts.awaiting_review else '', href='/assets', live='awaiting_review') }}
+  {{ ui.stat(counts.failed, 'Failed', tone='bad' if counts.failed else '', href='/tasks', live='failed') }}
 </div>
 
 <div class="card">

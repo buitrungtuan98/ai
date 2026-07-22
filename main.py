@@ -1066,6 +1066,19 @@ def api_tasks(user: CurrentUser, db: DbDep):
     return {"tasks": out}
 
 
+@app.get("/api/summary")
+def api_summary(user: CurrentUser, db: DbDep):
+    """Read-only live snapshot for the header attention badge + dashboard auto-refresh. Reuses the
+    same helpers the dashboard renders from, so polled values never diverge from a full reload."""
+    channels = db.scalar(
+        select(func.count()).select_from(Channel).where(Channel.user_id == user.id)) or 0
+    active = db.scalar(
+        select(func.count()).select_from(Campaign).where(
+            Campaign.user_id == user.id, Campaign.status == CampaignStatus.active)) or 0
+    return {"health": _system_health(db), "counts": _task_counts(db, user.id),
+            "channels": channels, "active_campaigns": active}
+
+
 @app.post("/api/tasks/{task_id}/retry")
 def retry_task(task_id: int, user: CurrentUser, db: DbDep):
     """Retry a failed episode. If the rendered file still exists (e.g. the upload failed or the

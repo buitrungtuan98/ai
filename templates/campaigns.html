@@ -31,7 +31,7 @@
       <a class="btn ghost sm" href="/campaigns/{{ c.id }}/edit">Edit</a>
       <a class="btn ghost sm" href="/campaigns/new?from_id={{ c.id }}" title="Copy this campaign (e.g. another language/channel)">⧉ Duplicate</a>
       <a class="btn ghost sm" href="/campaigns/{{ c.id }}/performance" title="Stats + learned playbook">📊 Performance</a>
-      <form method="post" action="/campaigns/{{ c.id }}/delete" onsubmit="return confirm('Delete campaign?')">
+      <form method="post" action="/campaigns/{{ c.id }}/delete" data-confirm="Delete “{{ c.topic_name }}” and all its episodes? This can't be undone.">
         <button class="btn danger sm" type="submit">Delete</button>
       </form>
     </div>
