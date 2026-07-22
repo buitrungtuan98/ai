@@ -241,6 +241,30 @@ def test_episode_memory_flows_into_prompt(session, user, channel, monkeypatch):
     assert t3.synopsis == "Căn nhà cuối xóm có tiếng ru"
 
 
+def test_user_model_chain_flows_into_generation_and_qc(session, user, channel, monkeypatch):
+    """The Credentials-page model chain (users.gemini_model) reaches BOTH the scriptwriter and the
+    final-QC judge; .env GEMINI_MODEL is only the fallback for users who never picked one."""
+    from core import qc
+    from workers import video_worker
+
+    user.gemini_model = "my-model-a,my-model-b"
+    session.commit()
+    cam, t = _qc_campaign(session, user, channel)
+
+    captured = {}
+    monkeypatch.setattr(video_worker, "generate_script",
+                        lambda **k: captured.update(gen=k) or _script())
+    monkeypatch.setattr(video_worker.video_factory, "produce", lambda **k: _result())
+    monkeypatch.setattr(qc, "run_final_qc",
+                        lambda path, *, api_key, context="", model=None, **kw:
+                        captured.update(qc_model=model) or qc.QCResult(passed=True, score=9))
+    monkeypatch.setattr(video_worker, "_publish", lambda *a, **k: "vid-mc")
+
+    video_worker.render_task(t.id)
+    assert captured["gen"]["model"] == "my-model-a,my-model-b"
+    assert captured["qc_model"] == "my-model-a,my-model-b"
+
+
 def test_resolve_music_config_truth(monkeypatch):
     """music_mode=auto without a FREESOUND_API_KEY is a deterministic misconfiguration → the
     episode fails LOUDLY (like a missing music file) instead of silently publishing without
@@ -361,7 +385,7 @@ def test_auto_qc_pass_publishes_with_verdict(session, user, channel, monkeypatch
     monkeypatch.setattr(video_worker.video_factory, "produce",
                         lambda **k: produce_calls.append(k) or _result())
     monkeypatch.setattr(qc, "run_final_qc",
-                        lambda path, *, api_key, context="": qc.QCResult(passed=True, score=9))
+                        lambda path, *, api_key, context="", **kw: qc.QCResult(passed=True, score=9))
     monkeypatch.setattr(video_worker, "_publish", lambda *a, **k: "vid-qc")
 
     video_worker.render_task(t.id)
@@ -385,7 +409,7 @@ def test_auto_qc_double_failure_parks_for_review(session, user, channel, monkeyp
     monkeypatch.setattr(video_worker.video_factory, "produce",
                         lambda **k: produce_calls.append(k) or _result())
     monkeypatch.setattr(qc, "run_final_qc",
-                        lambda path, *, api_key, context="": qc.QCResult(
+                        lambda path, *, api_key, context="", **kw: qc.QCResult(
                             passed=False, score=3, issues=["captions clipped"]))
     monkeypatch.setattr(video_worker, "_publish",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not publish")))

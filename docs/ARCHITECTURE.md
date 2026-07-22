@@ -305,3 +305,19 @@ config-truth rule already applied to missing music files: a deterministic miscon
 (missing key) fails loudly and visibly, while transient provider failures still degrade to a
 music-less render — an enhancement outage must never fail a video, but a permanent misconfig
 must never be silent.
+
+### ADR-018 — Gemini model selection moves into the UI; .env is only the default
+**Decision:** the Gemini model fallback chain becomes a per-user setting chosen on the
+Credentials page (`users.gemini_model`, plaintext — a model id is not a secret), resolved
+everywhere as `user.gemini_model or settings.GEMINI_MODEL`. The picker fetches the LIVE model
+list from the REST `models` endpoint with the user's key (one cheap, un-metered call) and
+overlays `GEMINI_MODEL_CATALOG` — a curated, dated, ADVISORY table of free-tier RPM/TPM/RPD
+numbers with a link to Google's authoritative rate-limits page. Rate limits are deliberately NOT
+scraped or fetched: Google exposes no API for per-account quota numbers, they differ per tier,
+and a stale hardcoded number presented as live truth is worse than a labeled estimate.
+**Why:** the model choice is an operational decision that changes with Google's quota policy
+(observed: flagship flash at 20 RPD free while flash-lite had 500), and editing `.env` + restart
+for it violated the "manage in the dashboard" principle every other credential already follows.
+Per-user (not per-campaign) matches the quota's blast radius — the daily cap is per API key, and
+keys are per user. The chain keeps the ADR-quoted fallback semantics (404/daily-quota fail over)
+unchanged; it now just originates from the DB instead of the environment.

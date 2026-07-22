@@ -300,6 +300,16 @@ def _critique_json(verdict="rewrite"):
                        "issues": ["hook too slow", "sentence 2 reads like an essay"]})
 
 
+def test_model_catalog_covers_server_default():
+    """Every model in the shipped default chain has curated limit info in the picker catalog —
+    the UI must never show the recommended defaults as unknown-quota rows."""
+    from core.ai_engine import GEMINI_MODEL_CATALOG, model_chain
+    from core.config import settings
+
+    for m in model_chain(settings.GEMINI_MODEL):
+        assert m in GEMINI_MODEL_CATALOG
+
+
 def test_critic_covers_grammar():
     """The critic pass is also the grammar/spelling gate (zero extra API calls): the schema
     scores it and the system prompt demands a rewrite on any language error — subtitles are the

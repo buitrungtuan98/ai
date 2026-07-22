@@ -38,6 +38,62 @@ def model_chain(model: str) -> list[str]:
     return [m.strip() for m in model.split(",") if m.strip()] or [model]
 
 
+# Curated free-tier rate-limit annotations for the Credentials model picker. ADVISORY numbers:
+# Google moves them and paid tiers differ — the authoritative table is
+# https://ai.google.dev/gemini-api/docs/rate-limits (the picker links there).
+CATALOG_AS_OF = "2026-07, free tier"
+GEMINI_MODEL_CATALOG: dict[str, dict] = {
+    "gemini-flash-lite-latest": {
+        "rpm": 15, "tpm": "250K", "rpd": 500,
+        "note": "Alias — always the newest Flash-Lite. Cheapest, biggest daily quota: the "
+                "factory workhorse (recommended primary).",
+    },
+    "gemini-3.1-flash-lite": {
+        "rpm": 15, "tpm": "250K", "rpd": 500,
+        "note": "Current Flash-Lite generation, pinned. Same quota as the alias but never "
+                "silently changes under you.",
+    },
+    "gemini-flash-latest": {
+        "rpm": 10, "tpm": "250K", "rpd": 250,
+        "note": "Alias — always the newest Flash. Smarter than Lite, smaller daily quota: good "
+                "fallback entry.",
+    },
+    "gemini-3.5-flash": {
+        "rpm": 10, "tpm": "250K", "rpd": 20,
+        "note": "Newest Flash, pinned — observed free-tier RPD is VERY low (20); poor fit as a "
+                "primary for a factory.",
+    },
+    "gemini-2.0-flash": {
+        "rpm": None, "tpm": None, "rpd": 0,
+        "note": "Retired from the free tier (observed daily limit 0) — do not use.",
+    },
+}
+
+
+def list_gemini_models(*, api_key: str) -> list[dict]:
+    """Live model list from the REST models endpoint — one cheap call, NOT metered like
+    generation. Returns only models that can generateContent, as
+    {id, display_name, description} dicts (the 'models/' prefix stripped)."""
+    import requests
+
+    resp = requests.get(
+        "https://generativelanguage.googleapis.com/v1beta/models",
+        params={"key": api_key, "pageSize": 200},
+        timeout=20,
+    )
+    resp.raise_for_status()  # NOTE: the error text embeds ?key=… — callers must not expose it
+    models = []
+    for m in resp.json().get("models", []):
+        if "generateContent" not in (m.get("supportedGenerationMethods") or []):
+            continue
+        models.append({
+            "id": (m.get("name") or "").removeprefix("models/"),
+            "display_name": m.get("displayName") or "",
+            "description": (m.get("description") or "")[:300],
+        })
+    return models
+
+
 def _is_daily_quota_error(message: str) -> bool:
     """A 429 whose quota_id is the per-DAY free-tier cap. Retrying cannot succeed until the daily
     reset — and every retry burns another request against that same cap."""
