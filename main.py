@@ -414,6 +414,7 @@ def preview_script(
             duration_min_s=lo if lo and hi else None,
             duration_max_s=hi if lo and hi else None,
             rate_pct=rate_pct,
+            model=user.gemini_model or settings.GEMINI_MODEL,
         )
     except Exception as exc:  # noqa: BLE001 — clean retry message, never a stack trace
         logger.warning("Script preview failed: %s", type(exc).__name__)
@@ -444,6 +445,7 @@ def propose_campaign_route(user: CurrentUser, topic: str = Form(""), language: s
     try:
         proposal = ai_engine.propose_campaign(
             topic=topic.strip() or None, language=lang, api_key=key,
+            model=user.gemini_model or settings.GEMINI_MODEL,
             nonce=random.randint(1, 1_000_000),
         )
     except Exception as exc:  # noqa: BLE001 — return a clean retry message, not a stack trace
@@ -665,6 +667,34 @@ def credentials_page(request: Request, user: CurrentUser):
     )
 
 
+@app.get("/credentials/gemini-models")
+def gemini_models(user: CurrentUser):
+    """Live Gemini model list (one un-metered REST call with the user's key), annotated with the
+    curated free-tier RPM/TPM/RPD table — so the model chain is chosen with real information in
+    the UI instead of by editing .env blind."""
+    from core import ai_engine
+
+    key = user.gemini_api_key or settings.GEMINI_API_KEY
+    if not key:
+        return JSONResponse({"error": "Add a Gemini API key first (save it above, then retry)."},
+                            status_code=400)
+    try:
+        live = ai_engine.list_gemini_models(api_key=key)
+    except Exception as exc:  # noqa: BLE001 — the error text can embed ?key=…; never expose it
+        logger.warning("Gemini model listing failed: %s", type(exc).__name__)
+        return JSONResponse({"error": "Could not list models — check the key/network and retry."},
+                            status_code=502)
+    rows = []
+    for m in live:
+        limits = ai_engine.GEMINI_MODEL_CATALOG.get(m["id"], {})
+        rows.append({**m, "rpm": limits.get("rpm"), "tpm": limits.get("tpm"),
+                     "rpd": limits.get("rpd"), "note": limits.get("note")})
+    # Models with known quota numbers first (they're the sensible picks), then alphabetical.
+    rows.sort(key=lambda r: (r["rpd"] is None, r["id"]))
+    return {"models": rows, "limits_as_of": ai_engine.CATALOG_AS_OF,
+            "current": user.gemini_model or "", "server_default": settings.GEMINI_MODEL}
+
+
 @app.post("/credentials/test/{provider}")
 def test_credential(provider: str, user: CurrentUser):
     """One cheap live call to verify a saved key (PRD: 'save and verify')."""
@@ -697,6 +727,7 @@ def save_credentials(
     pexels_api_key: str = Form(""),
     telegram_token: str = Form(""),
     telegram_chat_id: str = Form(""),
+    gemini_model: str | None = Form(None),
 ):
     # Only overwrite fields that were provided (blank keeps the existing stored value).
     if gemini_api_key:
@@ -707,6 +738,11 @@ def save_credentials(
         user.telegram_token = telegram_token
     if telegram_chat_id:
         user.telegram_chat_id = telegram_chat_id
+    # Model chain is NOT a secret and has its own form: when the field is present, the submitted
+    # value replaces the stored one — an EMPTY submission means "back to the server default".
+    if gemini_model is not None:
+        cleaned = ",".join(m.strip() for m in gemini_model.split(",") if m.strip())[:200]
+        user.gemini_model = cleaned or None
     db.add(user)
     db.commit()
     return RedirectResponse("/credentials", status_code=303)

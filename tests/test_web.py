@@ -107,6 +107,50 @@ def test_campaign_form_voice_dropdown(client):
     assert 'data-current="vi-VN-NamMinhNeural"' in edit.text
 
 
+def test_gemini_model_chain_save_semantics(client):
+    """The model chain is NOT a secret: submitted value replaces, blank resets to the server
+    default, an absent field (the keys-only form) keeps the stored value."""
+    from database.db_session import SessionLocal
+    from database.models import User
+
+    def stored():
+        db = SessionLocal()
+        v = db.query(User).first().gemini_model
+        db.close()
+        return v
+
+    client.post("/credentials", data={"gemini_model": " gemini-3.1-flash-lite ,  gemini-flash-latest "},
+                follow_redirects=False)
+    assert stored() == "gemini-3.1-flash-lite,gemini-flash-latest"  # normalized
+
+    client.post("/credentials", data={"pexels_api_key": "p"}, follow_redirects=False)  # no field
+    assert stored() == "gemini-3.1-flash-lite,gemini-flash-latest"  # kept
+
+    client.post("/credentials", data={"gemini_model": ""}, follow_redirects=False)  # blank
+    assert stored() is None  # back to the server default
+
+
+def test_gemini_models_endpoint(client, monkeypatch):
+    """Live model list annotated with curated free-tier limits; known-quota models sort first;
+    no key anywhere → 400 with a actionable message."""
+    from core import ai_engine
+    from core.config import settings
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "k")
+    monkeypatch.setattr(ai_engine, "list_gemini_models", lambda *, api_key: [
+        {"id": "weird-experimental", "display_name": "Weird", "description": "no known limits"},
+        {"id": "gemini-3.1-flash-lite", "display_name": "Flash-Lite", "description": "fast"},
+    ])
+    j = client.get("/credentials/gemini-models").json()
+    assert [m["id"] for m in j["models"]] == ["gemini-3.1-flash-lite", "weird-experimental"]
+    assert j["models"][0]["rpd"] == 500 and j["models"][0]["rpm"] == 15  # curated limits attached
+    assert j["models"][1]["rpd"] is None                                 # unknown stays unknown
+    assert j["server_default"] == settings.GEMINI_MODEL
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", None)
+    assert client.get("/credentials/gemini-models").status_code == 400
+
+
 def test_credentials_test_freesound(client, monkeypatch):
     """The Credentials page can live-test the server's Freesound key; a missing key explains
     itself instead of failing at render time."""

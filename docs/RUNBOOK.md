@@ -81,7 +81,8 @@ Every campaign improves automatically on two levels (see ADR-012):
    rewards, injected into every future script. Inspect/reset it on the campaign's
    **📊 Performance** page. YouTube channels connected before this feature need a one-click
    reconnect (adds the read-only `yt-analytics.readonly` scope).
-Model upgrades: set `GEMINI_MODEL` in `.env` when Google ships a better free-tier model.
+Model upgrades: pick the new model on **Credentials → Gemini model chain** (no redeploy needed);
+`GEMINI_MODEL` in `.env` remains the server default for users who never chose one.
 
 ## Automatic background music (zero manual work)
 Set a campaign's **Background music** to *Auto* and give a mood in English (e.g. "dark ambient
@@ -313,14 +314,18 @@ repo's GHCR package (Packages tab) or the commit history. (A manual run needs a 
 ## Gemini API quota & cost (free tier vs billing)
 Generation runs on the Gemini API, and the **free tier is the real throughput ceiling** — not the
 box. How to pick a model and stay within quota:
+- **Pick the model in the UI:** **Credentials → Gemini model chain → 🔍 Load available models**
+  lists every model your key can call, annotated with curated free-tier RPM/TPM/RPD numbers, and
+  one click builds the fallback chain (first = primary). A chain saved there takes effect on the
+  next render — no `.env` edit, no redeploy. `GEMINI_MODEL` in `.env` stays as the server default.
 - **Look up YOUR account's real limits** — AI Studio → the **Rate limits** page (ai.dev/rate-limit)
   lists RPM / TPM / **RPD per model** for your account. Limits differ per model and per account and
-  change over time — never assume a number.
+  change over time — the picker's numbers are orientation, that page is the truth.
 - **Pick the model with the largest RPD.** Observed on a live account (2026-07): the flagship
   flash models each had **20 req/day** (and some older ones **0**), while **`gemini-3.1-flash-lite`
   had 500 req/day** — 25× more. Flash-lite quality is fine for short spoken scripts + structured
   JSON, it barely "thinks" (fewer tokens, no truncation risk), and 500/day supports **~60 fully
-  Auto-QC'd episodes/day free**. Set it in `.env`: `GEMINI_MODEL=gemini-3.1-flash-lite`.
+  Auto-QC'd episodes/day free**.
 - **Calls per episode.** Roughly: 1 (script) + 1 (self-critique, if on) + 1-2 (BATCHED footage
   vetting for the whole episode) + 1 (final Auto-QC) — a fully QC'd episode is **~4-5 calls**;
   with QC and critique off it's **~1 call**. A duration-range miss or a parse repair can add one.

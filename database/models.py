@@ -58,6 +58,9 @@ class User(Base):
     pexels_api_key: Mapped[str | None] = mapped_column(EncryptedString)
     telegram_token: Mapped[str | None] = mapped_column(EncryptedString)
     telegram_chat_id: Mapped[str | None] = mapped_column(String(64))  # identifier, not a secret
+    # Gemini model chain chosen in the UI (comma-separated, first = primary, rest = fallbacks).
+    # NULL = use the server default (GEMINI_MODEL in .env). A model id is not a secret.
+    gemini_model: Mapped[str | None] = mapped_column(String(200))
 
     channels: Mapped[list["Channel"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"

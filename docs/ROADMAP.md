@@ -288,6 +288,18 @@ measured at TTS time (audio remains ground truth). Proposed by the AI designer.
   music); the Credentials page gained a live Freesound **Test**.
 - Verified: 133 tests passing (7 new), ruff clean, docs guard green.
 
+## Gemini model picker in the UI `DONE`
+- **Credentials → Gemini model chain**: the model is chosen in the dashboard instead of by editing
+  `.env`. "🔍 Load available models" lists every model the saved key can call (one un-metered REST
+  call), annotated with a curated free-tier RPM/TPM/RPD table (`GEMINI_MODEL_CATALOG`, advisory —
+  links to Google's authoritative rate-limits page); one click appends a model to the
+  comma-separated fallback chain.
+- Stored per user (`users.gemini_model`, additive column); blank = server default (`GEMINI_MODEL`
+  in `.env` is now only the default). The chain flows everywhere generation happens: script +
+  critic, batched footage vetting, final QC, script preview, AI campaign designer, and the weekly
+  playbook distiller.
+- Verified: 137 tests passing (4 new), ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

@@ -241,6 +241,7 @@ def maybe_distill_campaign(db, campaign: Campaign, now: datetime | None = None) 
     try:
         update = distill_playbook(
             api_key=api_key,
+            model=(user.gemini_model if user else None) or settings.GEMINI_MODEL,
             performance_summary="\n".join(summary_lines),
             current_playbook=learning.get("playbook"),
             reject_reasons=learning.get("reject_reasons"),

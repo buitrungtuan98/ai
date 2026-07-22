@@ -369,6 +369,8 @@ def render_task(task_id: int) -> None:
         auto_qc = cfg.get("auto_qc", "on") != "off"
 
         gemini_key, pexels_key = _resolve_keys(user)
+        # Model chain: the user's Credentials choice wins; .env GEMINI_MODEL is the server default.
+        gemini_model = user.gemini_model or settings.GEMINI_MODEL
         task.started_at = datetime.utcnow()
 
         _set_status(db, task, TaskStatus.AI_GENERATION, 5)
@@ -402,6 +404,7 @@ def render_task(task_id: int) -> None:
             duration_min_s=cfg.get("duration_min_s"),
             duration_max_s=cfg.get("duration_max_s"),
             rate_pct=int(cfg.get("rate_pct", 0)),
+            model=gemini_model,
         )
         # Episode memory must NEVER be empty after a successful generation — an episode without a
         # synopsis is invisible to every later episode's no-repeat/serial prompt (continuity
@@ -417,7 +420,7 @@ def render_task(task_id: int) -> None:
         if auto_qc:
             from core import qc  # lazy, like the publishing services
 
-            vet_batch = qc.make_batch_vetter(gemini_key)
+            vet_batch = qc.make_batch_vetter(gemini_key, model=gemini_model)
 
         # Render, then let the machine review its own output. A failing verdict triggers exactly
         # one re-render; if it still fails, the episode is parked for human review (the backup).
@@ -448,7 +451,7 @@ def render_task(task_id: int) -> None:
             if not auto_qc:
                 break
             verdict = qc.run_final_qc(
-                result.master_path, api_key=gemini_key,
+                result.master_path, api_key=gemini_key, model=gemini_model,
                 context=f"The narration language is '{cfg.get('language', 'en')}'.",
             )
             qc_report = {**verdict.as_dict(), "attempts": attempt}
