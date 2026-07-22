@@ -458,6 +458,17 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
   background: var(--surface); color: var(--st-success); border: 1px solid var(--st-success-bd);
   display: inline-flex; align-items: center; justify-content: center; font-weight: var(--fw-bold); }
 
+/* Factory scorecard (dashboard trajectory) */
+.scorecard { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-5); }
+.sc-cell .l { color: var(--muted); font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .4px; }
+.sc-cell .n { font-size: var(--fs-xl); font-weight: var(--fw-bold); margin-top: 4px; }
+.sc-cell .n.muted { color: var(--muted); }
+.sc-cell .n .u { font-size: var(--fs-sm); font-weight: var(--fw-normal); color: var(--muted); }
+.sc-cell .delta { font-size: var(--fs-sm); font-weight: var(--fw-semibold); margin-left: 4px; }
+.delta.up { color: var(--st-success); } .delta.down { color: var(--st-failed); }
+.spark-bars { display: flex; align-items: flex-end; gap: 3px; height: 34px; margin-top: 8px; }
+.spark-bars .sb { flex: 1; min-height: 3px; background: var(--st-working); border-radius: 2px; }
+
 /* Activity feed (dashboard) */
 .feed { list-style: none; margin: 0; padding: 0; }
 .feed-item { display: flex; align-items: center; gap: var(--sp-3); padding: 10px 0;
@@ -522,6 +533,7 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
   body.nav-open { overflow: hidden; }
   .main { padding: var(--sp-5) var(--sp-4) 84px; max-width: none; }  /* bottom pad clears the tab bar */
   .page-head h1 { font-size: var(--fs-xl); }
+  .scorecard { grid-template-columns: repeat(2, 1fr); }
 
   /* Bottom tab bar — one-thumb access to the busiest destinations */
   .tabbar { display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: var(--z-topbar);

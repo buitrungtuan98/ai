@@ -242,6 +242,89 @@ def _buffer_counts(db, user_id: int) -> dict:
     return out
 
 
+def _scorecard(db, user_id: int) -> dict:
+    """Trajectory signals for the dashboard: 7-day publish throughput, buffer runway, and
+    week-over-week retention. Read-only; answers 'is the factory winning?'."""
+    from datetime import datetime, timedelta
+
+    now = datetime.utcnow()
+    today = now.date()
+    recent = db.scalars(
+        select(Task).where(Task.user_id == user_id, Task.status == TaskStatus.COMPLETED,
+                           Task.updated_at >= now - timedelta(days=14))
+    ).all()
+    days = [today - timedelta(days=i) for i in range(6, -1, -1)]
+    per_day = {d: 0 for d in days}
+    ret_this, ret_prev = [], []
+    for t in recent:
+        when = t.finished_at or t.updated_at
+        if not when:
+            continue
+        if when.date() in per_day:
+            per_day[when.date()] += 1
+        r = (t.stats_json or {}).get("avg_pct_viewed") if t.stats_json else None
+        if r is not None:
+            (ret_this if (now - when).days < 7 else ret_prev).append(r)
+    thr = [per_day[d] for d in days]
+    active = db.scalars(select(Campaign).where(
+        Campaign.user_id == user_id, Campaign.status == CampaignStatus.active)).all()
+    demand = sum(len((c.config_json or {}).get("posting_slots") or []) or 1 for c in active)
+    ready = db.scalar(
+        select(func.count()).select_from(BufferPoolItem)
+        .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
+        .where(Campaign.user_id == user_id, BufferPoolItem.status == BufferStatus.ready)) or 0
+    return {
+        "throughput": thr, "throughput_days": [d.strftime("%a") for d in days],
+        "throughput_max": max(thr) if thr else 0, "published_7d": sum(thr),
+        "ready": ready, "runway_days": round(ready / demand, 1) if demand else None,
+        "retention_this": round(sum(ret_this) / len(ret_this), 1) if ret_this else None,
+        "retention_prev": round(sum(ret_prev) / len(ret_prev), 1) if ret_prev else None,
+    }
+
+
+def _next_publish(db, user_id: int):
+    """Soonest upcoming posting slot across active auto-publish campaigns (each in its own tz)."""
+    from datetime import timedelta
+
+    from workers.scheduler import WEEKDAY_KEYS, local_now
+
+    active = db.scalars(select(Campaign).where(
+        Campaign.user_id == user_id, Campaign.status == CampaignStatus.active)).all()
+    best = None
+    for c in active:
+        cfg = c.config_json or {}
+        if not cfg.get("auto_publish", True):
+            continue
+        slots = sorted(cfg.get("posting_slots") or [])
+        if not slots:
+            continue
+        allowed = cfg.get("posting_days") or []
+        now_local = local_now(cfg.get("timezone"))
+        found = None
+        for dd in range(0, 8):
+            day = now_local + timedelta(days=dd)
+            if allowed and WEEKDAY_KEYS[day.weekday()] not in allowed:
+                continue
+            for s in slots:
+                try:
+                    hh, mm = (int(x) for x in s.split(":"))
+                except ValueError:
+                    continue
+                cand = day.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                if cand > now_local:
+                    found = (cand, s)
+                    break
+            if found:
+                break
+        if not found:
+            continue
+        hours = (found[0] - now_local).total_seconds() / 3600
+        if best is None or hours < best["in_hours"]:
+            best = {"in_hours": round(hours, 1), "slot": found[1],
+                    "campaign": c.topic_name, "when": found[0].strftime("%a %H:%M")}
+    return best
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request, user: CurrentUser, db: DbDep):
     channels = db.scalars(select(Channel).where(Channel.user_id == user.id)).all()
@@ -269,6 +352,7 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
             "health": _system_health(db),
             "counts": _task_counts(db, user.id),
             "attention_failed": attention_failed, "attention_review": attention_review,
+            "scorecard": _scorecard(db, user.id), "next_publish": _next_publish(db, user.id),
             "camp_by_id": {c.id: c for c in campaigns},
             "chan_by_id": {c.id: c for c in channels},
         },

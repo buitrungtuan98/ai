@@ -74,6 +74,45 @@
   {{ ui.stat(counts.failed, 'Failed', tone='bad' if counts.failed else '', href='/tasks', live='failed') }}
 </div>
 
+{# ── Factory scorecard: trajectory, not just current counts ─────────────────── #}
+<div class="card">
+  <div class="card-head"><h3>Factory scorecard</h3><span class="meta">is the factory winning?</span></div>
+  <div class="scorecard mt">
+    <div class="sc-cell">
+      <div class="l">Published · 7 days</div>
+      <div class="n">{{ scorecard.published_7d }}</div>
+      <div class="spark-bars">
+        {% for v in scorecard.throughput %}
+        <span class="sb" style="height:{{ (100 * v / scorecard.throughput_max)|round|int if scorecard.throughput_max else 3 }}%"
+              title="{{ scorecard.throughput_days[loop.index0] }}: {{ v }}"></span>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="sc-cell">
+      <div class="l">Buffer runway</div>
+      <div class="n">{{ scorecard.ready }}<span class="u"> ready</span></div>
+      <div class="meta">{% if scorecard.runway_days is not none %}≈ {{ scorecard.runway_days }} day{{ 's' if scorecard.runway_days != 1 }} at current cadence{% else %}no active posting slots{% endif %}</div>
+    </div>
+    <div class="sc-cell">
+      <div class="l">Retention · this week</div>
+      {% if scorecard.retention_this is not none %}
+      {% set delta = scorecard.retention_this - (scorecard.retention_prev or scorecard.retention_this) %}
+      <div class="n">{{ scorecard.retention_this }}%
+        {% if scorecard.retention_prev is not none %}<span class="delta {{ 'up' if delta >= 0 else 'down' }}">{{ '▲' if delta >= 0 else '▼' }} {{ (delta if delta >= 0 else -delta)|round(1) }}</span>{% endif %}
+      </div>
+      <div class="meta">{% if scorecard.retention_prev is not none %}vs {{ scorecard.retention_prev }}% last week{% else %}avg % viewed{% endif %}</div>
+      {% else %}<div class="n muted">—</div><div class="meta">no published stats yet</div>{% endif %}
+    </div>
+    <div class="sc-cell">
+      <div class="l">Next publish</div>
+      {% if next_publish %}
+      <div class="n">~{{ next_publish.in_hours }}h</div>
+      <div class="meta">{{ next_publish.when }} · {{ next_publish.campaign }}</div>
+      {% else %}<div class="n muted">—</div><div class="meta">no upcoming slots</div>{% endif %}
+    </div>
+  </div>
+</div>
+
 <div class="card">
   <div class="flex between">
     <h3>Activity <span class="meta" id="since-note"></span></h3>

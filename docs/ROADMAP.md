@@ -375,6 +375,11 @@ measured at TTS time (audio remains ground truth). Proposed by the AI designer.
   hide reliably. Backend: two read-only triage queries reusing existing helpers. ADR-023 records it.
 - Verified: 139 tests passing, ruff clean, docs guard green; triage/all-clear, activity feed,
   review-criteria, identity card and loop-note screenshotted (seeded + empty states).
+- **Factory scorecard + next-publish** (trajectory layer): adds "is the factory winning?" beside
+  "what needs me / what happened" — 7-day publish throughput sparkbars, buffer runway (≈ days at
+  current cadence), week-over-week retention trend, and the soonest upcoming posting slot across
+  active campaigns (each in its own tz). Read-only helpers (`_scorecard`, `_next_publish`) reusing
+  scheduler primitives; screenshotted.
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
