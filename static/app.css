@@ -171,6 +171,9 @@ code { font-family: var(--font-mono); font-size: .92em; background: var(--surfac
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
   padding: var(--sp-5); box-shadow: var(--shadow-1); }
 .card h3 { margin: 0 0 var(--sp-1); font-size: var(--fs-md); }
+/* Subsection heading inside a card (e.g. the merged Learning & results sections). */
+.sub-h { font-size: var(--fs-base); font-weight: var(--fw-semibold); margin: 0 0 var(--sp-1); }
+.sub-h .meta { font-weight: 400; }
 .card .meta, .meta { color: var(--muted); font-size: var(--fs-sm); }
 .card-head { display: flex; align-items: baseline; justify-content: space-between;
   gap: var(--sp-3); margin-bottom: var(--sp-2); flex-wrap: wrap; }
@@ -487,6 +490,9 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 /* Campaign cards: equal-height with the action row pinned to the bottom so buttons align. */
 .campaign-card { display: flex; flex-direction: column; }
 .campaign-card .row-actions { margin-top: auto; padding-top: var(--sp-3); }
+/* Now & next strip: reuse .stats tiles but with a smaller number (values are short text, not big
+   counts) so "Ep 6 · 62%" / "Thu 21:00" fit on one line. */
+.nn-strip .n { font-size: var(--fs-lg); }
 
 /* Campaign-hub tab row (links to the campaign's scoped Assets / Tasks / Edit) */
 .hub-tabs { display: flex; gap: var(--sp-1); flex-wrap: wrap; border-bottom: 1px solid var(--border);

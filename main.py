@@ -1603,6 +1603,7 @@ def campaign_overview(request: Request, user: CurrentUser, db: DbDep,
          "best_id": best.id if best else None,
          "best_ret": best.stats_json.get("avg_pct_viewed") if best else None,
          "measured_count": len(measured), "variants": ab_variant_summary(episodes),
+         "op": _campaign_ops(db, user.id, [campaign])[campaign.id],  # Now & next strip
          "hub_active": "overview", **_hub_context(db, user, campaign)},
     )
 

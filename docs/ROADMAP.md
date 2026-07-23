@@ -692,6 +692,12 @@ and macros `sched_facts` / `now_next` feed all four surfaces. ADR-043.
   missed" / "Not started" line; the list is sorted active→pending→failed→completed (was creation
   order) and action buttons are pinned to the card bottom so they align. Verified: 176 tests, ruff
   clean; cards checked in a browser.
+- **Batch F — hub Overview is status-first**: leads with a "Now & next" strip (Rendering now ·
+  Queued · Ready buffer · Next post + the schedule facts + a "Change schedule →" link), a
+  plain-language explainer for pending/failed campaigns, and folds the two often-empty cards
+  (playbook, A/B) plus the retention trend into ONE "Learning & results" card with a single empty
+  state — so opening a young campaign no longer shows two empty cards above the fold. Verified: 176
+  tests, ruff clean; active + pending hubs checked in a browser.
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
