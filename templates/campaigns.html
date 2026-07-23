@@ -32,16 +32,19 @@
     </div>
     {{ ui.progress(pct, 'done' if c.status.value == 'completed' else ('work' if c.status.value == 'active' else '')) }}
     <div class="row-actions mt">
+      {% set sc = scope_channel.id if scope_channel else '' %}
       {% if c.status.value in ['pending','failed'] %}
-      <form method="post" action="/campaigns/{{ c.id }}/start"><button class="btn sm" type="submit">▶ Start</button></form>
+      <form method="post" action="/campaigns/{{ c.id }}/start">
+        <input type="hidden" name="scope_channel" value="{{ sc }}">
+        <button class="btn sm" type="submit">▶ Start</button></form>
       {% endif %}
       <a class="btn ghost sm" href="/campaigns/{{ c.id }}/edit">Edit</a>
       <a class="btn ghost sm" href="/campaigns/new?from_id={{ c.id }}" title="Copy this campaign (e.g. another language/channel)">⧉ Duplicate</a>
       <a class="btn ghost sm" href="/campaigns/{{ c.id }}/performance" title="Stats + learned playbook">📊 Performance</a>
       {% set ac = asset_counts.get(c.id, {'ready': 0, 'awaiting_review': 0}) %}
-      <a class="btn ghost sm" href="/assets?campaign={{ c.id }}" title="This campaign's pre-rendered videos">▦ Assets{% if ac.ready + ac.awaiting_review %} ({{ ac.ready + ac.awaiting_review }}){% endif %}</a>
-      <a class="btn ghost sm" href="/tasks?campaign={{ c.id }}" title="This campaign's render jobs">≣ Tasks</a>
+      <a class="btn ghost sm" href="/episodes?campaign={{ c.id }}" title="This campaign's episodes">🎬 Episodes{% if ac.ready + ac.awaiting_review %} ({{ ac.ready + ac.awaiting_review }}){% endif %}</a>
       <form method="post" action="/campaigns/{{ c.id }}/delete" data-confirm="Delete “{{ c.topic_name }}” and all its episodes? This can't be undone.">
+        <input type="hidden" name="scope_channel" value="{{ sc }}">
         <button class="btn danger sm" type="submit">Delete</button>
       </form>
     </div>

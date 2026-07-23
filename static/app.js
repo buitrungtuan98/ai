@@ -45,7 +45,7 @@
       return '<a href="' + esc(t.published_url) + '" target="_blank" rel="noopener">View ↗</a>';
     }
     if (t.status === "AWAITING_REVIEW") {
-      return '<a href="/assets">Preview in Asset Pool →</a>';
+      return '<a href="/episodes/' + t.id + '">Open episode →</a>';
     }
     if (t.status === "SCHEDULED") {
       return '<span class="meta">Rendered — publishing at the next posting slot</span>';

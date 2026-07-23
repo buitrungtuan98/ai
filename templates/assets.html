@@ -2,7 +2,7 @@
 {% import "macros.html" as ui %}
 {% block title %}Asset Pool · AI Video Factory{% endblock %}
 {% block content %}
-{% call ui.page_head('Asset Pool', 'Pre-rendered episodes. Review-mode videos wait here for your approval — watch them before anything is published.') %}{% endcall %}
+{% call ui.page_head('Review', 'Pre-rendered episodes waiting for approval — watch each one before it publishes. (This is the video-review workbench; browse all episodes by stage under Episodes.)') %}{% endcall %}
 
 {% if flash == 'publish' %}
 {% call ui.banner('success') %}⏳ <b>Publish queued.</b> The episode uploads as soon as the worker is free (one job at a
@@ -45,8 +45,9 @@
     <div class="empty" style="padding:var(--sp-6)">Published — local file cleaned up.</div>
     {% endif %}
 
+    {% set ep_tid = task_by_ep.get((i.campaign_id, i.episode_number)) %}
     <div class="card-head mt">
-      <h3><a href="/campaigns/{{ i.campaign_id }}/performance">{{ camp.topic_name if camp else 'C' ~ i.campaign_id }}</a> · Ep {{ i.episode_number }}</h3>
+      <h3>{% if ep_tid %}<a href="/episodes/{{ ep_tid }}">{{ camp.topic_name if camp else 'C' ~ i.campaign_id }} · Ep {{ i.episode_number }}</a>{% else %}<a href="/campaigns/{{ i.campaign_id }}/performance">{{ camp.topic_name if camp else 'C' ~ i.campaign_id }}</a> · Ep {{ i.episode_number }}{% endif %}</h3>
       {{ ui.pill(pill_cls, i.status.value.replace('_',' ')|title) }}
     </div>
     {% set ch = chan_by_id.get(i.channel_id) %}
