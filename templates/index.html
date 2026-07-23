@@ -30,10 +30,18 @@
    {{ '' if degraded else 'hidden' }}>⚠ The factory is degraded — rendering and publishing are paused until the worker and Redis are back.</p>
 
 {# ── Triage inbox: what needs a human, in order ─────────────────────────────── #}
-{% set need = (attention_failed|length) + (attention_review|length) %}
+{% set need = (attention_failed|length) + (attention_review|length) + (autopilot_proposed or 0) %}
 <div class="card triage" id="triage-card" {{ '' if need else 'hidden' }}>
   <div class="card-head"><h3>Needs your attention</h3><span class="pill failed">{{ need }}</span></div>
   <ul class="triage-list" id="triage-list">
+    {% if autopilot_proposed %}
+    <li>
+      <span class="tri-dot review"></span>
+      <div class="grow"><b>🤖 {{ autopilot_proposed }} autopilot proposal{{ 's' if autopilot_proposed != 1 }}</b> awaiting your decision
+        <div class="meta">The AI suggests changes based on your channels' data — extend a winner, plan a successor, wind down a laggard.</div></div>
+      <a class="btn sm" href="/autopilot">Review →</a>
+    </li>
+    {% endif %}
     {% for t in attention_failed %}
     {% set camp = camp_by_id.get(t.campaign_id) %}
     <li>

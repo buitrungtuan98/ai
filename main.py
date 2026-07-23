@@ -39,10 +39,11 @@ from auth.dependencies import (
     get_owned_campaign,
     get_owned_channel,
 )
+from core import autopilot
 from core.config import settings
 from core.tts import VOICE_CHOICES
 from database.db_session import get_db, init_db
-from database.models import BufferPoolItem, Campaign, Channel, Task
+from database.models import AutopilotAction, BufferPoolItem, Campaign, Channel, Task
 from database.types import BufferStatus, CampaignStatus, ChannelStatus, Platform, TaskStatus
 from workers import task_queue, video_worker
 
@@ -466,6 +467,8 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
                 review_ids[(t.campaign_id, t.episode_number)] = t.id
     # "Running now" panel: one row per active campaign (what each is doing + when it posts next).
     active_campaigns = [c for c in campaigns if c.status == CampaignStatus.active]
+    autopilot_proposed = db.scalar(select(func.count()).select_from(AutopilotAction).where(
+        AutopilotAction.user_id == user.id, AutopilotAction.status == "proposed")) or 0
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -478,6 +481,7 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
             "review_ids": review_ids,
             "scorecard": _scorecard(db, user.id), "next_publish": _next_publish(db, user.id),
             "active_running": active_campaigns,
+            "autopilot_proposed": autopilot_proposed,
             "ops": _campaign_ops(db, user.id, active_campaigns),
             "camp_by_id": {c.id: c for c in campaigns},
             "chan_by_id": {c.id: c for c in channels},
@@ -519,7 +523,8 @@ def channels_page(request: Request, user: CurrentUser, db: DbDep, status: str = 
     return templates.TemplateResponse(
         request, "channels.html",
         {"request": request, "user": user, "channels": channels, "nav": "channels",
-         "camp_counts": camp_counts, "chips": chips, "status": status, "q": q, "total_all": total_all},
+         "camp_counts": camp_counts, "chips": chips, "status": status, "q": q, "total_all": total_all,
+         "ap": {c.id: (c.autopilot_json or {}) for c in channels}},
     )
 
 
@@ -545,6 +550,70 @@ def add_facebook_channel(
 @app.post("/channels/{channel_id}/delete")
 def delete_channel(channel=Depends(get_owned_channel), db=Depends(get_db)):
     db.delete(channel)
+    db.commit()
+    return RedirectResponse("/channels", status_code=303)
+
+
+@app.get("/autopilot", response_class=HTMLResponse)
+def autopilot_page(request: Request, user: CurrentUser, db: DbDep):
+    """The autopilot decisions inbox + audit log: strategy proposals to approve/dismiss, and the
+    history of what autopilot has done (each with the data evidence that triggered it). ADR-044."""
+    actions = db.scalars(select(AutopilotAction).where(AutopilotAction.user_id == user.id)
+                         .order_by(AutopilotAction.id.desc()).limit(120)).all()
+    proposed = [a for a in actions if a.status == "proposed"]
+    history = [a for a in actions if a.status != "proposed"][:40]
+    return templates.TemplateResponse(
+        request, "autopilot.html",
+        {"request": request, "user": user, "nav": "autopilot", "proposed": proposed,
+         "history": history,
+         "chan_by_id": {c.id: c for c in db.scalars(select(Channel).where(Channel.user_id == user.id))}},
+    )
+
+
+@app.post("/autopilot/{action_id}/approve")
+def approve_autopilot_action(action_id: int, user: CurrentUser, db: DbDep):
+    action = db.get(AutopilotAction, action_id)
+    if action is None or action.user_id != user.id:
+        raise HTTPException(404, "Action not found")
+    if action.status == "proposed":
+        from workers import scheduler
+
+        scheduler.apply_autopilot_action(db, action)
+    return RedirectResponse("/autopilot", status_code=303)
+
+
+@app.post("/autopilot/{action_id}/dismiss")
+def dismiss_autopilot_action(action_id: int, user: CurrentUser, db: DbDep):
+    from datetime import datetime
+
+    action = db.get(AutopilotAction, action_id)
+    if action is None or action.user_id != user.id:
+        raise HTTPException(404, "Action not found")
+    if action.status == "proposed":
+        action.status = "dismissed"
+        action.resolved_at = datetime.utcnow()
+        db.commit()
+    return RedirectResponse("/autopilot", status_code=303)
+
+
+@app.post("/channels/{channel_id}/autopilot")
+def set_channel_autopilot(channel=Depends(get_owned_channel), db=Depends(get_db),
+                          mode: str = Form("off"), interval_hours: str = Form(""),
+                          approve_min: str = Form(""), reject_max: str = Form("")):
+    """Set a channel's autopilot mode + cadence + review strictness (per-channel, ADR-044).
+    Off = the operator drives everything (default). Values are validated/clamped like every form."""
+    cfg = dict(channel.autopilot_json or {})
+    cfg["mode"] = mode if mode in autopilot.MODES else "off"
+    if interval_hours.strip().isdigit():
+        cfg["interval_hours"] = max(1, min(int(interval_hours), 24))
+    review = dict(cfg.get("review") or {})
+    if approve_min.strip().isdigit():
+        review["approve_min"] = max(1, min(int(approve_min), 10))
+    if reject_max.strip().isdigit():
+        review["reject_max"] = max(0, min(int(reject_max), 9))
+    if review:
+        cfg["review"] = review
+    channel.autopilot_json = cfg
     db.commit()
     return RedirectResponse("/channels", status_code=303)
 
@@ -653,6 +722,7 @@ def campaigns_page(request: Request, user: CurrentUser, db: DbDep, channel: int 
         "campaigns.html",
         {"request": request, "user": user, "campaigns": campaigns, "channels": channels, "nav": "campaigns",
          "ops": _campaign_ops(db, user.id, campaigns),
+         "cls": autopilot.classify_campaigns(db, campaigns),  # data-driven performance verdict
          "scope_channel": channels.get(channel) if channel else None,
          "chips": chips, "status": status, "q": q, "total_all": total_all,
          "scope_hidden": {"channel": channel} if channel else {}},
@@ -1348,13 +1418,7 @@ def approve_asset(db: DbDep, item=Depends(get_owned_buffer_item), return_to: str
         raise HTTPException(400, "Only items awaiting review can be approved")
     if not (item.video_path and os.path.exists(item.video_path)):
         return _action_redirect(return_to, "missing", "/assets?flash=missing")
-    task = db.scalar(select(Task).where(
-        Task.campaign_id == item.campaign_id, Task.episode_number == item.episode_number))
-    if task is not None:
-        task.status = TaskStatus.PENDING_QUEUE  # publish job will drive it to PUBLISHING
-        task.error_message = None
-        db.commit()
-    task_queue.enqueue_publish(item.id)
+    video_worker.apply_approve(db, item)
     return _action_redirect(return_to, "publish", "/assets")
 
 
@@ -1402,29 +1466,9 @@ def reject_asset(db: DbDep, item=Depends(get_owned_buffer_item), reason: str = F
                  return_to: str = Form("")):
     if item.status != BufferStatus.awaiting_review:
         raise HTTPException(400, "Only items awaiting review can be rejected")
-    for path in (item.video_path, item.thumbnail_path):
-        try:
-            if path and os.path.exists(path):
-                os.remove(path)
-        except OSError:
-            logger.warning("Could not remove %s", path)
-    item.status = BufferStatus.rejected
     reason = reason.strip()[:200]
-    task = db.scalar(select(Task).where(
-        Task.campaign_id == item.campaign_id, Task.episode_number == item.episode_number))
-    if task is not None:
-        task.status = TaskStatus.FAILED
-        task.error_message = ("Rejected in review: " + reason) if reason else \
-            "Rejected in review by the operator. Use Retry to re-render."
-    # Feed the operator's reason into the campaign's avoid-list (Loop 1 learning signal).
-    if reason:
-        campaign = db.get(Campaign, item.campaign_id)
-        if campaign is not None:
-            learning = dict(campaign.learning_json or {})
-            reasons = (learning.get("reject_reasons") or [])[-9:]
-            learning["reject_reasons"] = reasons + [reason]
-            campaign.learning_json = learning
-    db.commit()
+    # Manual reject leaves the episode FAILED for an explicit Retry (rerender=False, unchanged).
+    video_worker.apply_reject(db, item, reason, rerender=False)
     ep = _episode_return(return_to)
     if ep is not None:
         return _action_redirect(return_to, "rejected", "/assets", flash_reason=reason)
@@ -1608,6 +1652,8 @@ def campaign_overview(request: Request, user: CurrentUser, db: DbDep,
          "best_ret": best.stats_json.get("avg_pct_viewed") if best else None,
          "measured_count": len(measured), "variants": ab_variant_summary(episodes),
          "op": _campaign_ops(db, user.id, [campaign])[campaign.id],  # Now & next strip
+         "cls": autopilot.classify_campaigns(db, [campaign]).get(campaign.id),  # performance verdict
+         "autopilot_min": autopilot.MIN_MEASURED,
          "hub_active": "overview", **_hub_context(db, user, campaign)},
     )
 

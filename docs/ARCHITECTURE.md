@@ -817,3 +817,34 @@ badly. The operator's real questions are operational and time-ordered; surfacing
 state from data the system already has (tasks, buffer, slots) turns four "how did it go" screens into
 four "what's it doing" screens without new dependencies, models, or a single extra render. The
 helpers are read-only and reuse existing queries, honoring the single-box KISS constraint.
+
+### ADR-044 — Channel autopilot: deterministic triggers, AI judgment, an autonomy ladder
+**Decision:** add an opt-in, per-channel autopilot that runs the channel like a human manager would —
+reviewing renders, publishing, retrying, and (later) creating/adjusting/retiring campaigns — while
+staying zero-cost and platform-safe. The design principle is a strict separation of concerns:
+**deterministic data rules decide WHEN to act; the AI decides only WHAT creative content to make; the
+operator chooses HOW MUCH autonomy** via a three-rung ladder per channel — **Off** (default; nothing
+changes), **Copilot** (autopilot files concrete proposals + auto-rejects clearly-bad renders, the
+operator confirms the rest with one click), **Autopilot** (applies actions itself, logs every decision
+with its data evidence, notifies on Telegram, everything reversible). Judgments are made against each
+channel's OWN retention baseline (`core/autopilot.py`), not absolute numbers, so "good" adapts per
+niche. Delivered in phases: **I** classification (this ADR's shipped surface — read-only), **II** the
+"hands" (AI video review reusing the render pipeline's existing QC verdict — approve on high score,
+auto-reject on low score with a written reason that feeds the learning loop, escalate the unsure
+middle band; auto-retry with quota-aware backoff; catch-up publishing of missed slots), **III** the
+"brain" as a Copilot proposals inbox (create successor / extend winner / wind down laggard / trim
+cadence / adopt A/B winner — each a bounded, reversible config change with recorded evidence), **IV**
+full-auto + a once-weekly Gemini strategist call (structured output mapped ONLY onto the whitelisted
+action space, same pattern as `propose_campaign`). The loop runs inside the existing scheduler daemon
+(no new process/container) on a per-channel cadence (default 3h, operator-configurable), throttled by a
+Redis NX guard keyed per channel. **Guardrails (coded, non-negotiable):** never deletes anything
+(wind-down only stops new work — content stays); autopilot-created campaigns start review-first for
+their first episodes ("training wheels"); a budget reserve skips all AI calls above 80% of the daily
+Gemini budget (renders always outrank strategy); posting cadence is never increased automatically and
+`max_per_day` is always respected (ADR-006 / platform ToS); one click back to Off freezes everything.
+**Why:** the operator's ask is "manage my channels like a person would, on the data, for free." The
+machinery to do it mostly already exists — QC verdicts, the learning loop, stats collection, the
+scheduler tick, the campaign designer — so autopilot is chiefly a decision layer wiring those into a
+sense→classify→decide→act→learn loop. Making the triggers deterministic (free, from DB stats) and
+confining the AI to bounded creative choices keeps it cheap, auditable, and reversible, while the
+autonomy ladder lets trust be earned rather than demanded on day one.

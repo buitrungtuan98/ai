@@ -714,6 +714,52 @@ and macros `sched_facts` / `now_next` feed all four surfaces. ADR-043.
   planner checked in a browser.
 - Verified overall: 176 tests, ruff clean, docs guard green.
 
+## Channel autopilot — manage each channel on the data, zero-cost `DONE`
+Opt-in, per-channel. Deterministic rules decide WHEN, AI decides WHAT, the operator picks HOW MUCH
+autonomy (Off / Copilot / Autopilot). Judged against each channel's own retention baseline. Runs in
+the existing scheduler daemon on a per-channel cadence (default 3h, configurable). ADR-044.
+- **Phase I — classification engine** `DONE`: `core/autopilot.py` labels each campaign
+  winner / healthy / underperforming / too-early vs its channel baseline (`channel_baseline`,
+  `classify_campaigns`) — pure, read-only, no AI calls. Surfaced as a verdict chip on the campaign
+  cards and the hub Overview scorecard. Verified: 178 tests (2 new — classification vs baseline,
+  and the no-baseline guard), ruff clean, docs guard green; chip checked in a browser.
+- **Phase II — the hands** `DONE`: enabled channels manage their own daily work. The scheduler's
+  `autopilot_pass` (per-channel cadence via a Redis NX guard, default 3h) does — from the render
+  pipeline's already-stored QC verdict, 0 extra AI calls — AI **review** (auto-reject weak/failed
+  renders with a reason that feeds the learning loop + re-render; auto-approve & publish strong ones
+  in Full-auto, or recommend them for one-click confirm in Copilot; escalate the middle band),
+  quota-aware **retry** of genuine render failures (skips operator rejects + quota exhaustion), and
+  **catch-up publish** of missed slots (bounded, never bursts). Per-channel control on the Channels
+  page (Off/Copilot/Full-auto + cadence + QC thresholds); "🤖 AI recommends" hint on Review cards;
+  Telegram summary each cycle. Shared `apply_approve`/`apply_reject` keep the manual + auto paths DRY.
+  Verified: 184 tests (6 new — decision thresholds, full-auto approve/reject/escalate, copilot
+  recommend-don't-publish, retry skip-rules, catch-up, per-channel cadence guard), ruff clean, docs
+  guard green; the Channels autopilot control checked in a browser.
+- **Phase III — the brain (Copilot proposals inbox)** `DONE`: `autopilot_propose_channel` files
+  deterministic, reversible, evidence-backed strategy suggestions into a new `AutopilotAction` table
+  — **extend** a winner near its cap (+25% episodes), plan a **successor** for a healthy one (a
+  pending clone of its winning config to review), **wind down** a laggard with ≥5 straight below-avg
+  episodes (stops new work; nothing deleted). Idempotent (no duplicate live proposal; won't re-file a
+  dismissed one for 30 days). New `/autopilot` inbox page shows each proposal with the numbers behind
+  it + Approve/Dismiss; approve applies via `apply_autopilot_action`; the pending count surfaces in
+  the dashboard triage. Verified: 188 tests (5 new — proposals by class, idempotency + apply extend,
+  wind-down + successor apply, HTTP approve/dismiss + ownership + no-crash on legacy rows), ruff
+  clean, docs guard green; inbox checked in a browser.
+- **Phase IV — full-auto + weekly strategist + guardrails** `DONE`: in Full-auto mode the pass now
+  auto-applies its structural proposals (`autopilot_autoapply_channel`) — extend/wind-down
+  immediately, successor with guardrails (respects the `max_active` cap, ≤1 per pass, and the new
+  campaign starts **review-first "training wheels"** so its first videos wait for review even in
+  full-auto). Creative changes stay operator-confirmed: a once-weekly strategist
+  (`autopilot_strategist_channel`) makes ONE Gemini call (`ai_engine.suggest_channel_tune`) —
+  guarded by weekly cadence, a Gemini key, AND a daily-budget reserve (skips above 80% so rendering
+  is never starved) — and files a suggest-only "tune" (caption/music/rate). Never deletes; one click
+  back to Off freezes everything. Verified: 191 tests (3 new — full-auto apply + training wheels,
+  max-active cap, strategist files/guards/applies), ruff clean, docs guard green; all pages 200 after
+  the changes.
+- Verified overall: 191 tests, ruff clean, docs guard green. Zero-cost holds — review reuses the
+  render pipeline's QC verdict (0 AI calls), proposals/apply are deterministic, and the strategist is
+  ~1 budget-guarded call/week per channel.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

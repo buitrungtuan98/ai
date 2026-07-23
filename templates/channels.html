@@ -35,6 +35,31 @@
     {% if c.status.value != 'active' %}
     <p class="hint mt-sm">Re-authorise this channel to resume publishing — reconnect it via OAuth above.</p>
     {% endif %}
+    {% set a = ap.get(c.id, {}) %}
+    {% set amode = a.get('mode', 'off') if a.get('mode', 'off') in ['off','copilot','autopilot'] else 'off' %}
+    {% set alabels = {'off': 'Off', 'copilot': '🧭 Copilot', 'autopilot': '✈️ Full auto'} %}
+    <details class="disclosure mt-sm ap-box" {% if amode != 'off' %}open{% endif %}>
+      <summary>🤖 Autopilot: <b>{{ alabels[amode] }}</b></summary>
+      <div class="disclosure-body">
+        <p class="hint">Let the AI run this channel from its data — review &amp; publish videos, auto-reject weak renders (with a reason that teaches the scriptwriter), retry failures, and recover missed slots. Reversible anytime.</p>
+        {% set rv = a.get('review') or {} %}
+        <form method="post" action="/channels/{{ c.id }}/autopilot">
+          {% call ui.field('Mode') %}
+          <select name="mode">
+            <option value="off" {{ 'selected' if amode=='off' }}>Off — I manage everything</option>
+            <option value="copilot" {{ 'selected' if amode=='copilot' }}>Copilot — auto-reject weak renders + recommend; I confirm publishes</option>
+            <option value="autopilot" {{ 'selected' if amode=='autopilot' }}>Full auto — approve, publish, retry &amp; catch up on its own</option>
+          </select>
+          {% endcall %}
+          <div class="grid cols-2">
+            {% call ui.field('Run every (hours)', hint='1–24') %}<input name="interval_hours" type="number" min="1" max="24" value="{{ a.get('interval_hours', 3) }}">{% endcall %}
+            {% call ui.field('Approve at QC ≥', hint='auto-publish score (/10)') %}<input name="approve_min" type="number" min="1" max="10" value="{{ rv.get('approve_min', 7) }}">{% endcall %}
+            {% call ui.field('Reject at QC ≤', hint='auto-reject score (/10)') %}<input name="reject_max" type="number" min="0" max="9" value="{{ rv.get('reject_max', 4) }}">{% endcall %}
+          </div>
+          <button class="btn sm" type="submit">Save autopilot</button>
+        </form>
+      </div>
+    </details>
   </div>
   {% endfor %}
 </div>

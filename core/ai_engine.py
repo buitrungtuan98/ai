@@ -340,6 +340,31 @@ def _strip_code_fence(text: str) -> str:
 
 
 # ── AI campaign designer (propose a whole campaign from a title, or from scratch) ─
+class ChannelTune(BaseModel):
+    """A small, bounded creative tweak the weekly autopilot strategist may suggest for a campaign —
+    only fields that are safe to change on a running series. All optional; empty = leave as-is."""
+    caption_theme: Literal["classic", "highlight", "boxed", "neon"] | None = None
+    music_mood: str = Field(default="", max_length=60)
+    rate_pct: int | None = Field(default=None, ge=-20, le=20)
+    rationale: str = Field(default="", max_length=300, description="One sentence, from the data.")
+
+
+def suggest_channel_tune(*, scorecard: dict, api_key: str, model: str = DEFAULT_MODEL) -> ChannelTune:
+    """One Gemini call: read a channel's performance scorecard (retention by campaign + variant, the
+    playbook, current look/sound) and suggest ONE small creative tweak to try. Bounded output only
+    (caption theme / music mood / TTS rate) — never structural. The caller decides whether to apply."""
+    import json as _json
+
+    prompt = (
+        "You are a short-form channel strategist. Given this channel's performance data (JSON), "
+        "suggest ONE small creative tweak likely to lift retention — a caption theme, a music mood, "
+        "or a TTS rate nudge. Change only what the data justifies; leave a field empty to keep it. "
+        "Include a one-sentence rationale grounded in the numbers.\n\n" + _json.dumps(scorecard)[:4000]
+    )
+    return generate_structured(prompt=prompt, schema=ChannelTune, api_key=api_key, model=model,
+                               temperature=0.6)
+
+
 class CampaignProposal(BaseModel):
     """A complete, ready-to-review campaign configuration proposed by Gemini."""
     topic_name: str = Field(min_length=1, max_length=120)

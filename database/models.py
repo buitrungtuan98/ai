@@ -89,6 +89,9 @@ class Channel(Base):
         _enum(ChannelStatus), default=ChannelStatus.active
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    # Autopilot config (NOT secrets): {mode, interval_hours, review thresholds, brief, …}. NULL/off
+    # = the operator drives everything by hand (default). See core/autopilot.py + ADR-044.
+    autopilot_json: Mapped[dict | None] = mapped_column(JSON)
 
     user: Mapped["User"] = relationship(back_populates="channels")
     campaigns: Mapped[list["Campaign"]] = relationship(
@@ -205,6 +208,33 @@ class BufferPoolItem(Base):
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     campaign: Mapped["Campaign"] = relationship(back_populates="buffer_items")
+
+
+class AutopilotAction(Base):
+    """A decision the channel autopilot proposed (Copilot) or took (Full-auto) — the proposals inbox,
+    the audit log, and the idempotency guard in one table. `evidence` records the numbers that
+    triggered it so every action is explainable and reversible. A brand-new table, so `create_all`
+    adds it to existing DBs with no column migration needed. See core/autopilot.py + ADR-044."""
+
+    __tablename__ = "autopilot_actions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    channel_id: Mapped[int] = mapped_column(
+        ForeignKey("channels.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    campaign_id: Mapped[int | None] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)   # extend | wind_down | successor
+    summary: Mapped[str] = mapped_column(String(300), nullable=False)
+    evidence: Mapped[dict] = mapped_column(JSON, default=dict)      # the numbers that triggered it
+    params: Mapped[dict] = mapped_column(JSON, default=dict)        # what applying it will change
+    status: Mapped[str] = mapped_column(String(16), default="proposed", index=True)  # proposed|applied|dismissed|failed
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
 class ChannelClipUsage(Base):
