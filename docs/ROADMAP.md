@@ -683,6 +683,16 @@ see. All additive — no route renamed/removed, Task Logs & Asset Pool kept as s
   clamps durations + prompt designed for long), ruff clean, docs guard green; the format-aware inputs
   and the `video_format=long` propose request verified in a browser.
 
+## Operational visibility — show "now / next", not just "how it went" `WIP`
+Reorder the operator-facing surfaces to answer ① what needs me → ② what's happening now →
+③ what happens next → ④ how it's going. Shared read-only helpers `_next_slot` / `_campaign_ops`
+and macros `sched_facts` / `now_next` feed all four surfaces. ADR-043.
+- **Batch E — campaign cards are status boards**: each card shows format+language+schedule chips and
+  a live "▶ Rendering Ep N · %" / "⏭ Next post <when> · N ready" / "⚠ Buffer empty — slot will be
+  missed" / "Not started" line; the list is sorted active→pending→failed→completed (was creation
+  order) and action buttons are pinned to the card bottom so they align. Verified: 176 tests, ruff
+  clean; cards checked in a browser.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

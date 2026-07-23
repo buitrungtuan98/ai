@@ -17,22 +17,21 @@
 <div class="grid cols-3">
   {% for c in campaigns %}
   {% set pct = (100 * c.current_episode / c.total_episodes)|round(0, 'floor')|int if c.total_episodes else 0 %}
-  <div class="card">
+  {% set op = ops.get(c.id) %}
+  <div class="card campaign-card">
     <div class="card-head">
-      <h3>{{ c.topic_name }}</h3>
+      <h3><a href="/campaigns/{{ c.id }}">{{ c.topic_name }}</a></h3>
       {{ ui.pill(c.status.value) }}
     </div>
-    <p class="meta">
-      <a href="/campaigns?channel={{ c.channel_id }}">{{ channels[c.channel_id].channel_name if c.channel_id in channels else '—' }}</a> ·
-      {{ c.config_json.get('language','en')|upper }}
-    </p>
-    <div class="flex between mt">
+    <p class="meta"><a href="/campaigns?channel={{ c.channel_id }}">{{ channels[c.channel_id].channel_name if c.channel_id in channels else '—' }}</a></p>
+    {{ ui.sched_facts(c.config_json) }}
+    <div class="flex between mt-sm">
       <span class="meta">Episode {{ c.current_episode }} / {{ c.total_episodes }}</span>
       <span class="meta mono">{{ pct }}%</span>
     </div>
     {{ ui.progress(pct, 'done' if c.status.value == 'completed' else ('work' if c.status.value == 'active' else '')) }}
-    {% set ac = asset_counts.get(c.id, {'ready': 0, 'awaiting_review': 0}) %}
-    {% if ac.awaiting_review %}<p class="hint mt-sm">🔴 {{ ac.awaiting_review }} awaiting review</p>{% endif %}
+    {{ ui.now_next(op, c.status.value, c.config_json) }}
+    {% if op and op.awaiting_review %}<p class="hint">🔴 {{ op.awaiting_review }} awaiting your review</p>{% endif %}
     <div class="row-actions mt">
       {% set sc = scope_channel.id if scope_channel else '' %}
       <a class="btn sm" href="/campaigns/{{ c.id }}">Open →</a>

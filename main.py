@@ -355,47 +355,84 @@ def _scorecard(db, user_id: int) -> dict:
     }
 
 
-def _next_publish(db, user_id: int):
-    """Soonest upcoming posting slot across active auto-publish campaigns (each in its own tz)."""
+def _next_slot(campaign) -> dict | None:
+    """The soonest upcoming posting slot for ONE active auto-publish campaign, in its own timezone.
+    Returns {in_hours, slot, when} or None (continuous / review / no slots / no upcoming day)."""
     from datetime import timedelta
 
     from workers.scheduler import WEEKDAY_KEYS, local_now
 
+    cfg = campaign.config_json or {}
+    if not cfg.get("auto_publish", True):
+        return None
+    slots = sorted(cfg.get("posting_slots") or [])
+    if not slots:
+        return None
+    allowed = cfg.get("posting_days") or []
+    now_local = local_now(cfg.get("timezone"))
+    for dd in range(0, 8):
+        day = now_local + timedelta(days=dd)
+        if allowed and WEEKDAY_KEYS[day.weekday()] not in allowed:
+            continue
+        for s in slots:
+            try:
+                hh, mm = (int(x) for x in s.split(":"))
+            except ValueError:
+                continue
+            cand = day.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if cand > now_local:
+                return {"in_hours": round((cand - now_local).total_seconds() / 3600, 1),
+                        "slot": s, "when": cand.strftime("%a %H:%M")}
+    return None
+
+
+def _next_publish(db, user_id: int):
+    """Soonest upcoming posting slot across active campaigns (each in its own tz) — the earliest of
+    the per-campaign `_next_slot`s, tagged with the campaign name."""
     active = db.scalars(select(Campaign).where(
         Campaign.user_id == user_id, Campaign.status == CampaignStatus.active)).all()
     best = None
     for c in active:
-        cfg = c.config_json or {}
-        if not cfg.get("auto_publish", True):
-            continue
-        slots = sorted(cfg.get("posting_slots") or [])
-        if not slots:
-            continue
-        allowed = cfg.get("posting_days") or []
-        now_local = local_now(cfg.get("timezone"))
-        found = None
-        for dd in range(0, 8):
-            day = now_local + timedelta(days=dd)
-            if allowed and WEEKDAY_KEYS[day.weekday()] not in allowed:
-                continue
-            for s in slots:
-                try:
-                    hh, mm = (int(x) for x in s.split(":"))
-                except ValueError:
-                    continue
-                cand = day.replace(hour=hh, minute=mm, second=0, microsecond=0)
-                if cand > now_local:
-                    found = (cand, s)
-                    break
-            if found:
-                break
-        if not found:
-            continue
-        hours = (found[0] - now_local).total_seconds() / 3600
-        if best is None or hours < best["in_hours"]:
-            best = {"in_hours": round(hours, 1), "slot": found[1],
-                    "campaign": c.topic_name, "when": found[0].strftime("%a %H:%M")}
+        ns = _next_slot(c)
+        if ns is not None and (best is None or ns["in_hours"] < best["in_hours"]):
+            best = {**ns, "campaign": c.topic_name}
     return best
+
+
+# Task statuses that mean "an episode is actively rendering right now" (one machine-wide at a time).
+_RENDERING_STATUSES = (TaskStatus.AI_GENERATION, TaskStatus.AUDIO_SYNCED, TaskStatus.RENDERING)
+
+
+def _campaign_ops(db, user_id: int, campaigns) -> dict:
+    """Per-campaign operational snapshot — the "what's it doing now / next" facts the cards, the hub
+    strip and the dashboard "Running now" panel all render: the in-flight render task (with its
+    progress), queued count, ready-buffer + awaiting-review tallies, and the next posting slot."""
+    ops = {c.id: {"rendering": None, "queued": 0, "ready": 0, "awaiting_review": 0, "next_slot": None}
+           for c in campaigns}
+    ids = list(ops)
+    if not ids:
+        return ops
+    for t in db.scalars(select(Task).where(
+            Task.user_id == user_id, Task.campaign_id.in_(ids),
+            Task.status.in_(_RENDERING_STATUSES)).order_by(Task.id.desc())):
+        if ops[t.campaign_id]["rendering"] is None:  # newest in-flight render wins
+            ops[t.campaign_id]["rendering"] = t
+    for cid, n in db.execute(select(Task.campaign_id, func.count()).where(
+            Task.user_id == user_id, Task.campaign_id.in_(ids),
+            Task.status == TaskStatus.PENDING_QUEUE).group_by(Task.campaign_id)).all():
+        ops[cid]["queued"] = n
+    for cid, st, n in db.execute(select(
+            BufferPoolItem.campaign_id, BufferPoolItem.status, func.count())
+            .where(BufferPoolItem.campaign_id.in_(ids))
+            .group_by(BufferPoolItem.campaign_id, BufferPoolItem.status)).all():
+        if st == BufferStatus.ready:
+            ops[cid]["ready"] = n
+        elif st == BufferStatus.awaiting_review:
+            ops[cid]["awaiting_review"] = n
+    for c in campaigns:
+        if c.status == CampaignStatus.active:
+            ops[c.id]["next_slot"] = _next_slot(c)
+    return ops
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -599,6 +636,10 @@ def campaigns_page(request: Request, user: CurrentUser, db: DbDep, channel: int 
     if q:
         stmt = stmt.where(Campaign.topic_name.ilike(f"%{q}%"))
     campaigns = db.scalars(stmt.order_by(Campaign.id.desc())).all()
+    # Operational sort: the ones that are running (or need starting) first, finished ones last —
+    # newest-first within each group. So "what's live" is at the top, not buried by creation order.
+    _rank = {"active": 0, "pending": 1, "failed": 2, "completed": 3}
+    campaigns = sorted(campaigns, key=lambda c: (_rank.get(c.status.value, 9), -c.id))
     channels = {c.id: c for c in db.scalars(select(Channel).where(Channel.user_id == user.id)).all()}
     chips = [{"label": "All", "value": "", "count": total_all}] + [
         {"label": s.title(), "value": s, "count": status_counts.get(s, 0)}
@@ -607,7 +648,7 @@ def campaigns_page(request: Request, user: CurrentUser, db: DbDep, channel: int 
         request,
         "campaigns.html",
         {"request": request, "user": user, "campaigns": campaigns, "channels": channels, "nav": "campaigns",
-         "asset_counts": _buffer_counts(db, user.id),
+         "ops": _campaign_ops(db, user.id, campaigns),
          "scope_channel": channels.get(channel) if channel else None,
          "chips": chips, "status": status, "q": q, "total_all": total_all,
          "scope_hidden": {"channel": channel} if channel else {}},

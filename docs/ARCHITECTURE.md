@@ -794,3 +794,26 @@ response's `video_format` overwrote the form. Treating the operator's format as 
 must honor (like the language line) — forced, not suggested — makes "propose a long-form channel" a
 real, single-click capability while the clamp keeps a stray model value from ever producing an
 out-of-range duration.
+
+### ADR-043 — Operations-first surfaces: show "now / next", not just "how it went"
+**Decision:** the dashboard, campaign list, campaign hub and calendar all answered "how did it go?"
+(analytics, history) but hid "what's happening now and what happens next?" — so an operator couldn't
+tell, at a glance, what a campaign was rendering, when it posts next, or whether its slots would
+actually be filled. Reorder every operator-facing surface to answer, in priority: ① what needs me →
+② what's happening now → ③ what happens next → ④ how it's going. Two shared read-only helpers feed
+all of it: `_next_slot(campaign)` (the soonest upcoming posting slot for one campaign, in its own
+timezone — `_next_publish` is now the earliest of these across campaigns) and `_campaign_ops(db,
+user, campaigns)` (per-campaign snapshot: the in-flight render task + progress, queued count, ready
+& awaiting-review buffer tallies, next slot). Two shared Jinja macros render the facts consistently:
+`sched_facts(cfg)` (format / language / schedule chips) and `now_next(op, status, cfg)` (the
+▶ Rendering / ⏭ Next post / ⚠ Buffer-empty / 👁 Review line). Applied to four surfaces: campaign
+**cards** become mini status boards (facts + now/next + operational sort active→pending→failed→
+completed, action row pinned to the card bottom); the campaign **hub Overview** leads with a Now &
+next strip + schedule facts and merges the two often-empty learning cards into one; the **dashboard**
+gains a "Running now" per-campaign panel and de-duplicates its three numeric bands; the **calendar**
+shows per-slot fill state (will-publish vs will-be-missed) with a today marker. **Why:** the app was
+an analytics dashboard bolted onto an operations tool — it reported the past well and the present
+badly. The operator's real questions are operational and time-ordered; surfacing render/next-post
+state from data the system already has (tasks, buffer, slots) turns four "how did it go" screens into
+four "what's it doing" screens without new dependencies, models, or a single extra render. The
+helpers are read-only and reuse existing queries, honoring the single-box KISS constraint.
