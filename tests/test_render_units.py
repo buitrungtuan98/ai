@@ -2,12 +2,29 @@
 from __future__ import annotations
 
 
-def test_select_clips_cycles_to_cover():
-    from core.video_factory import select_clips
+def test_plan_shots_covers_and_caps_and_cycles():
+    from core.video_factory import SHOT_MAX_S, plan_shots
 
-    assert select_clips([2.0, 3.0], 4.0) == [0, 1]
-    assert select_clips([10.0], 4.0) == [0]
-    assert select_clips([1.0, 1.0], 3.5) == [0, 1, 0, 1]
+    # One long clip, no word gaps: a 10s scene is sliced into several shots (never one 10s shot),
+    # each capped near the target, cycling the single clip; durations sum to the scene length.
+    shots = plan_shots([30.0], [], 10.0)
+    idxs = [i for i, _ in shots]
+    durs = [d for _, d in shots]
+    assert all(i == 0 for i in idxs) and len(shots) >= 3
+    assert all(d <= SHOT_MAX_S + 0.01 for d in durs)
+    assert abs(sum(durs) - 10.0) < 0.05                 # full coverage, no gap
+
+    # Multiple clips → consecutive shots use different clips (variety).
+    shots2 = plan_shots([5.0, 5.0, 5.0], [], 9.0)
+    assert [i for i, _ in shots2][:3] == [0, 1, 2]
+
+    # A short clip caps its own shot (never outruns its footage → no black gap).
+    shots3 = plan_shots([1.0], [], 3.0)
+    assert all(d <= 1.0 + 0.01 for _, d in shots3) and abs(sum(d for _, d in shots3) - 3.0) < 0.05
+
+    # A cut snaps to a nearby word boundary when one falls in the shot window.
+    snapped = plan_shots([30.0], [2.8, 5.9], 6.0)
+    assert abs(snapped[0][1] - 2.8) < 0.01               # first cut lands on the 2.8s word gap
 
 
 def test_build_scene_args_single_and_branding():
@@ -24,6 +41,82 @@ def test_build_scene_args_single_and_branding():
     # order: mirror -> tint -> overlay -> captions
     assert fc2.index("hflip") < fc2.index("drawbox") < fc2.index("overlay") < fc2.index("ass=")
     assert a2.count("-i") == 4  # 2 clips + audio + watermark
+
+
+def test_build_scene_args_trims_shots():
+    from core.video_factory import build_scene_args
+
+    # With shot durations, each clip is trimmed to its shot length (the edited cut rhythm).
+    a = build_scene_args(["c0.mp4", "c1.mp4"], "a.mp3", "s.ass", "o.mp4", 6.0, None,
+                         shot_durations=[3.0, 3.0])
+    fc = a[a.index("-filter_complex") + 1]
+    assert fc.count("trim=0:3.000") == 2
+    # Without shot durations, the legacy (no-trim) filter is emitted unchanged.
+    b = build_scene_args(["c0.mp4"], "a.mp3", "s.ass", "o.mp4", 6.0, None)
+    assert "trim=" not in b[b.index("-filter_complex") + 1]
+
+
+def test_prefer_unused_reorders_footage():
+    from core.video_factory import prefer_unused
+
+    class C:
+        def __init__(self, cid):
+            self.id = cid
+
+    pool = [C(1), C(2), C(3)]
+    # Clip 1 already used → it drops behind the unused ones, order otherwise stable.
+    assert [c.id for c in prefer_unused(pool, {1})] == [2, 3, 1]
+    # Nothing to avoid → unchanged (fail-open).
+    assert [c.id for c in prefer_unused(pool, None)] == [1, 2, 3]
+    assert [c.id for c in prefer_unused(pool, set())] == [1, 2, 3]
+
+
+def test_render_profiles_and_long_geometry():
+    from core.video_factory import (LONG_PROFILE, SHORT_PROFILE, build_scene_args, resolve_profile)
+
+    assert resolve_profile("short") is SHORT_PROFILE and resolve_profile(None) is SHORT_PROFILE
+    assert resolve_profile("long") is LONG_PROFILE
+    assert (SHORT_PROFILE.width, SHORT_PROFILE.height) == (1080, 1920)
+    assert (LONG_PROFILE.width, LONG_PROFILE.height) == (1920, 1080)
+
+    # Long profile → landscape scale/crop and a landscape zoompan size.
+    a = build_scene_args(["c.mp4"], "a.mp3", "s.ass", "o.mp4", 5.0, None,
+                         motion_effect="zoom_in", profile=LONG_PROFILE)
+    fc = a[a.index("-filter_complex") + 1]
+    assert "scale=1920:1080" in fc and "crop=1920:1080" in fc and "1920x1080" in fc
+    # Default (no profile) is unchanged vertical geometry.
+    b = build_scene_args(["c.mp4"], "a.mp3", "s.ass", "o.mp4", 5.0, None)
+    assert "scale=1080:1920" in b[b.index("-filter_complex") + 1]
+
+
+def test_build_ass_dimensions(tmp_path):
+    from core.captions import build_ass
+    from core.tts import WordTiming
+
+    out = str(tmp_path / "s.ass")
+    build_ass([WordTiming("Hi", 0.0, 0.5)], out, width=1920, height=1080)
+    txt = open(out, encoding="utf-8").read()
+    assert "PlayResX: 1920" in txt and "PlayResY: 1080" in txt
+    # Default stays vertical (and the historical MarginV 280 is preserved).
+    out2 = str(tmp_path / "s2.ass")
+    build_ass([WordTiming("Hi", 0.0, 0.5)], out2)
+    txt2 = open(out2, encoding="utf-8").read()
+    assert "PlayResX: 1080" in txt2 and "PlayResY: 1920" in txt2 and ",280,1" in txt2
+
+
+def test_chapter_lines_for_long():
+    from core.video_factory import chapter_lines
+
+    class S:
+        def __init__(self, hook):
+            self.caption_hook = hook
+
+    scenes = [S(f"Chapter {i}") for i in range(5)]
+    lines = chapter_lines(scenes, [30.0] * 5)
+    assert len(lines) == 5
+    assert lines[0].startswith("0:00 ") and lines[1].startswith("0:30 ")
+    # Cuts closer than 10s can't all qualify → too few chapters returns [] (never a broken half-list).
+    assert chapter_lines([S("a"), S("b"), S("c")], [3.0, 3.0, 3.0]) == []
 
 
 def test_voice_check_flags_broken_tts(monkeypatch):
@@ -79,6 +172,8 @@ def test_build_concat_args_with_music_keeps_video_copy():
     args = build_concat_args("l.txt", "m.mp4", music_path="bg.mp3", music_volume=0.2)
     fc = args[args.index("-filter_complex") + 1]
     assert "volume=0.20" in fc and "amix=inputs=2:duration=first" in fc
+    assert "sidechaincompress" in fc         # music is ducked UNDER the narration, not flat-mixed
+    assert fc.index("sidechaincompress") < fc.index("amix")  # duck first, then mix
     assert fc.index("amix") < fc.index("loudnorm")  # normalize the final mix, not the parts
     assert "-stream_loop" in args            # music loops to cover the video
     i = args.index("-c:v")
@@ -298,18 +393,25 @@ def test_search_footage_fallback_chain(monkeypatch):
 
     calls = []
 
-    def fake_search(query, key, per_page=10):
-        calls.append(query)
+    def fake_search(query, key, per_page=10, orientation="portrait"):
+        calls.append((query, orientation))
         # Joined query and first keyword fail; second keyword succeeds.
         return ["clip"] if query == "fog" else []
 
     monkeypatch.setattr(vf.pexels, "search_videos", fake_search)
     assert vf.search_footage(["dòng sông", "fog"], "k") == ["clip"]
-    assert calls == ["dòng sông fog", "dòng sông", "fog"]
+    assert [q for q, _ in calls] == ["dòng sông fog", "dòng sông", "fog"]
+    assert all(o == "portrait" for _, o in calls)  # default orientation
+
+    # Landscape orientation flows through for long-form.
+    calls.clear()
+    vf.search_footage(["fog"], "k", "landscape")
+    assert calls[0] == ("fog", "landscape")
 
     # Everything fails → generic fallback is tried last; empty means truly nothing.
     calls.clear()
-    monkeypatch.setattr(vf.pexels, "search_videos", lambda q, k, per_page=10: (calls.append(q), [])[1])
+    monkeypatch.setattr(vf.pexels, "search_videos",
+                        lambda q, k, per_page=10, orientation="portrait": (calls.append(q), [])[1])
     assert vf.search_footage(["xyz"], "k") == []
     assert calls[-1] == vf.FALLBACK_FOOTAGE_QUERY
 
@@ -425,6 +527,52 @@ def test_tts_requests_word_boundaries(monkeypatch, tmp_path):
     timings = tts.synthesize("hello", str(tmp_path / "o.mp3"))
     assert captured["boundary"] == "WordBoundary"          # explicit — the 7.x default is sentences
     assert [w.text for w in timings] == ["hello"]          # word events used, sentence events ignored
+
+
+def test_split_sentences_and_pause():
+    from core import tts
+
+    assert tts.split_sentences("A cat. A dog? Yes!") == ["A cat.", "A dog?", "Yes!"]
+    assert tts.split_sentences("no terminator here") == ["no terminator here"]
+    assert tts.split_sentences("") == []
+    # A question / cliffhanger earns a longer breath than a plain period.
+    assert tts.pause_after("Why?") > tts.pause_after("Because.")
+    assert tts.pause_after("Wait…") >= tts.pause_after("Now!")
+
+
+def test_build_paced_concat_args_shape():
+    from core import tts
+
+    args = tts.build_paced_concat_args(["p0.mp3", "p1.mp3", "p2.mp3"], [0.4, 0.6], "out.mp3")
+    fc = args[args.index("-filter_complex") + 1]
+    assert args[:2] == ["-i", "p0.mp3"] and args.count("-i") == 3
+    assert "aevalsrc=0:d=0.400" in fc and "aevalsrc=0:d=0.600" in fc  # two silence gaps
+    assert "concat=n=5:v=0:a=1[out]" in fc                            # 3 parts + 2 gaps = 5 segments
+    assert "libmp3lame" in args and args[-1] == "out.mp3"
+
+
+def test_synthesize_paced_merges_timings(monkeypatch, tmp_path):
+    """Per-sentence synthesis stitches with gaps and returns ONE timing list with absolute offsets;
+    a single sentence falls through to plain synthesize()."""
+    from core import tts
+
+    # Each sentence: one word 0.0-1.0s; each part probes to 1.0s. Gap after sentence 1 = 0.35 ('.').
+    def fake_synth(text, out, **k):
+        open(out, "w").close()
+        return [tts.WordTiming(text.split()[0], 0.0, 1.0)]
+
+    monkeypatch.setattr(tts, "synthesize", fake_synth)
+    monkeypatch.setattr("core.media.probe_duration", lambda p: 1.0)
+    monkeypatch.setattr("core.ffmpeg_runner.run_ffmpeg", lambda *a, **k: None)
+
+    merged = tts.synthesize_paced("Alpha here. Beta there.", str(tmp_path / "o.mp3"), language="en")
+    assert [w.text for w in merged] == ["Alpha", "Beta"]
+    assert merged[0].start == 0.0
+    assert abs(merged[1].start - (1.0 + 0.35)) < 1e-6   # second sentence offset by dur + gap
+
+    # Single sentence → straight delegation (no gaps, no concat).
+    single = tts.synthesize_paced("Only one sentence here", str(tmp_path / "s.mp3"), language="en")
+    assert [w.text for w in single] == ["Only"]
 
 
 def test_ffmpeg_runner_uses_nice_threads(monkeypatch):

@@ -632,6 +632,7 @@ def _build_campaign_config(
     persona: str, style_examples: str, catchphrase_open: str, catchphrase_close: str,
     continuity: str, timezone: str,
     motion: str = "on", caption_theme: str = "highlight", self_critique: str = "on",
+    script_depth: str = "standard", video_format: str = "short",
     music_mode: str = "none", music_mood: str = "",
     color_grade: str = "", auto_qc: str = "on",
     max_per_day: str = "", min_per_day: str = "",
@@ -666,6 +667,10 @@ def _build_campaign_config(
         "motion": "off" if motion == "off" else "on",
         "caption_theme": caption_theme if caption_theme in ("classic", "highlight", "boxed", "neon") else "highlight",
         "self_critique": "off" if self_critique == "off" else "on",
+        # Script depth: "deep" adds a research/brief Gemini pass for fact-rich storytelling.
+        "script_depth": "deep" if script_depth == "deep" else "standard",
+        # Output format: "short" = vertical 1080×1920 clips; "long" = horizontal 16:9 multi-minute.
+        "video_format": "long" if video_format == "long" else "short",
         # Music: none | auto (random CC0 by mood, per episode) | file (operator-supplied path).
         "music_mode": music_mode if music_mode in ("none", "auto", "file") else "none",
         "music_mood": music_mood.strip() or None,
@@ -686,10 +691,12 @@ def _build_campaign_config(
         "affiliate_label": affiliate_label.strip()[:30] or None,
     }
     # Target spoken length range (seconds). Stored only when BOTH bounds are valid; auto-ordered.
+    # Bounds depend on format: shorts cap at 180s; long-form allows up to 15 min.
     lo = int(duration_min_s) if duration_min_s.strip().isdigit() else None
     hi = int(duration_max_s) if duration_max_s.strip().isdigit() else None
     if lo and hi:
-        lo, hi = sorted((max(10, min(lo, 180)), max(10, min(hi, 180))))
+        floor, ceil = (60, 900) if config["video_format"] == "long" else (10, 180)
+        lo, hi = sorted((max(floor, min(lo, ceil)), max(floor, min(hi, ceil))))
         config["duration_min_s"], config["duration_max_s"] = lo, hi
     else:
         config["duration_min_s"] = config["duration_max_s"] = None
@@ -735,6 +742,8 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
     motion: str = Form("on"),
     caption_theme: str = Form("highlight"),
     self_critique: str = Form("on"),
+    script_depth: str = Form("standard"),
+    video_format: str = Form("short"),
     music_mode: str = Form("none"),
     music_mood: str = Form(""),
     color_grade: str = Form(""),
@@ -759,6 +768,7 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
             persona=persona, style_examples=style_examples, catchphrase_open=catchphrase_open,
             catchphrase_close=catchphrase_close, continuity=continuity, timezone=timezone,
             motion=motion, caption_theme=caption_theme, self_critique=self_critique,
+            script_depth=script_depth, video_format=video_format,
             music_mode=music_mode, music_mood=music_mood,
             color_grade=color_grade, auto_qc=auto_qc,
             max_per_day=max_per_day, min_per_day=min_per_day,

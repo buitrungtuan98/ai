@@ -67,6 +67,47 @@ def test_advance_campaign_and_autoactivate(session, user, channel):
     assert nxt.status == CampaignStatus.active
 
 
+def test_footage_dedupe_records_and_prefers(session, user, channel, monkeypatch):
+    """render_task hands produce() the channel's recent clip ids + an episode-seeded motion seed,
+    and records the clips the episode used so later episodes avoid them (footage variety)."""
+    from core.video_factory import RenderResult
+    from database.models import Campaign, ChannelClipUsage, Task
+    from database.types import CampaignStatus
+    from workers import video_worker
+
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="R", current_episode=0,
+                   total_episodes=3, status=CampaignStatus.active,
+                   config_json={"language": "en", "auto_qc": "off"})
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    session.add(ChannelClipUsage(channel_id=channel.id, clip_id=999))  # already-used clip
+    session.commit()
+    t = Task(campaign_id=cam.id, user_id=user.id, episode_number=1)
+    session.add(t)
+    session.commit()
+    session.refresh(t)
+
+    captured: dict = {}
+
+    def fake_produce(**k):
+        captured.update(k)
+        return RenderResult(master_path="/no/m.mp4", thumbnail_path="/no/t.jpg",
+                            metadata={"title": "T", "variant": "A"}, duration=10.0, scene_count=2,
+                            used_clip_ids=[100, 101])
+
+    monkeypatch.setattr(video_worker, "generate_script", lambda **k: _script())
+    monkeypatch.setattr(video_worker.video_factory, "produce", fake_produce)
+    monkeypatch.setattr(video_worker, "_publish", lambda *a, **k: "vid-x")
+
+    video_worker.render_task(t.id)
+    assert 999 in captured["recent_clip_ids"] and captured["motion_seed"] == 1
+    session.expire_all()
+    stored = {c for (c,) in session.query(ChannelClipUsage.clip_id)
+              .filter_by(channel_id=channel.id).all()}
+    assert {100, 101} <= stored
+
+
 def test_render_task_full_flow_and_failure(session, user, channel, monkeypatch):
     from database.models import BufferPoolItem, Campaign, Task
     from database.types import BufferStatus, CampaignStatus, TaskStatus

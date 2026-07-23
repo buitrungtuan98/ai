@@ -150,9 +150,12 @@ def build_ass(
     accent_hex: str | None = None,  # '#RRGGBB' (e.g. campaign brand tint) for accent themes
     font_px: int = DEFAULT_FONT_PX,
     font_name: str = "DejaVu Sans",
+    width: int = VIDEO_W,
+    height: int = VIDEO_H,
 ) -> str:
     """Write an ASS file with one Dialogue per word (or per phrase in "line" style), styled by a
-    caption theme (classic / highlight / boxed / neon)."""
+    caption theme (classic / highlight / boxed / neon). `width`/`height` set PlayRes so captions
+    position correctly for any output geometry (default vertical 1080×1920)."""
     if style == "line":
         timings = group_words_into_lines(timings)
     spec = CAPTION_THEMES.get(theme, CAPTION_THEMES["classic"])
@@ -163,17 +166,19 @@ def build_ass(
     if spec["pop"]:
         prefix += POP_TAG
 
-    usable = VIDEO_W - 2 * MARGIN_PX
+    usable = width - 2 * MARGIN_PX
+    # Keep captions clear of the frame's bottom edge proportionally to its height.
+    margin_v = round(height * 0.146)
     header = f"""[Script Info]
 ScriptType: v4.00+
-PlayResX: {VIDEO_W}
-PlayResY: {VIDEO_H}
+PlayResX: {width}
+PlayResY: {height}
 WrapStyle: 2
 ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Word,{font_name},{font_px},{primary},{spec['outline']},{spec['back']},1,0,{spec['border_style']},{spec['outline_w']},2,2,{MARGIN_PX},{MARGIN_PX},280,1
+Style: Word,{font_name},{font_px},{primary},{spec['outline']},{spec['back']},1,0,{spec['border_style']},{spec['outline_w']},2,2,{MARGIN_PX},{MARGIN_PX},{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

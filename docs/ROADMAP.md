@@ -433,6 +433,88 @@ measured at TTS time (audio remains ground truth). Proposed by the AI designer.
   FAILED task (which lives on page 2) from page 1, and the pager collapsed on single-page results;
   screenshotted at 375px & 1280px.
 
+# Pipeline v2 — realism & long-format (backend)
+
+Multi-batch upgrade to the video pipeline: better scripts, more human editing/sound, long-video
+support, stronger QC. Everything stays automation-first and zero-cost (free tiers only). Order: A → C
+→ B → D → E.
+
+## Batch A — Script depth & humanization `DONE`
+- **Research brief (deep mode)**: optional per-campaign `script_depth` (`standard` default | `deep`).
+  Deep mode runs `generate_brief` → `EpisodeBrief` (3-8 concrete facts + hook→build→payoff→cliffhanger
+  arc) and conditions the script prompt on it, so narration carries real substance not filler. One
+  extra Gemini call per episode (against the same daily budget meter); fail-open.
+- **AI-cliché gate**: per-language blacklist (`AI_CLICHES`) + pure `find_cliches()`; injected into the
+  script prompt and the critic prompt, and a free deterministic post-draft check forces one targeted
+  rewrite if any tell survives (e.g. "delve into", "hãy cùng tìm hiểu"). Clean drafts add no call.
+- Wired end-to-end: worker passes `script_depth`; campaign form has a standard/deep selector; the AI
+  designer proposes a depth. ADR-027 records it.
+- Verified: 144 tests (4 new — cliché detection, prompt injection, deep-mode brief call, one-rewrite
+  gate), ruff clean, docs guard green.
+
+## Batch C — Sound craft `DONE`
+- **Paced narration**: `tts.synthesize_paced` renders each sentence separately and stitches them with
+  deterministic breath gaps (`pause_after` — longer after `?`/`!`/`…`), returning one merged word-
+  timing list with absolute offsets so captions still align. Single-sentence scenes fall through to
+  the old `synthesize()`. One ffmpeg re-encode (`aevalsrc` silence + `concat`).
+- **Music ducking**: `build_concat_args` replaces the flat `volume`+`amix` bed with `sidechaincompress`
+  — narration `asplit` into a mix copy + sidechain key, music compressed against the voice, ducked
+  music mixed back. Video still stream-copied; loudnorm still normalizes the final mix.
+- ADR-028 records it. Two new CI-only integration tests push both audio graphs through real ffmpeg so
+  an invalid compressor/silence option can't ship silently.
+- Verified: 147 tests (3 new units — sentence split/pause, paced-concat arg shape, timing-merge; +2
+  ffmpeg-gated graph validators that skip without ffmpeg), ruff clean, docs guard green.
+
+## Batch B — Edit rhythm (the "human editor" feel) `DONE`
+- **Multi-shot scenes**: `plan_shots` slices each scene into ~3s shots (cap 4.5s) with cuts landing
+  on word boundaries, cycling the clip pool so consecutive shots differ. No clip sits a whole scene.
+- **Shot trim**: `build_scene_args` gained `shot_durations` — each clip is `trim`med to its shot in
+  the SAME single encode pass (concat-copy stitch untouched). Shot length is bounded by clip native
+  length (no black gap); a coverage step absorbs any sub-frame shortfall into the last shot.
+- **Cross-episode footage dedupe**: new `ChannelClipUsage` table; worker loads recent clip ids,
+  `prefer_unused` floats fresh footage first, and used ids are recorded after render. Fail-open.
+- **Per-episode motion seed**: motion effect indexed by `episode_number` so episodes don't share an
+  identical rhythm. `select_clips` removed (superseded by `plan_shots`). ADR-029 records it.
+- Deliberately omitted dip-to-black transitions — they'd force a re-encode at concat and break the
+  stream-copy stitch (the biggest CPU saver on the ARM box).
+- Verified: 150 tests (4 new — plan_shots coverage/cap/snap, shot-trim args, prefer_unused reorder,
+  worker dedupe round-trip; select_clips test replaced; +trim path added to the ffmpeg integration
+  render), ruff clean, docs guard green.
+
+## Batch D — Long-video support `DONE`
+- **RenderProfile**: per-campaign `video_format` (`short` default | `long`) selects geometry — short =
+  vertical 1080×1920 (unchanged), long = 16:9 1920×1080. `motion_filter`, `build_scene_args`,
+  `build_ass`, `generate_thumbnail` and Pexels orientation all read the profile; it defaults to
+  `short` so every existing call/test renders byte-identical vertical output (purely additive).
+- **Long-form script**: `VideoScript.scenes` cap raised to 40; prompt branches (12-30 scenes,
+  part-numbered titles welcome — inverse of the Shorts rule). `CampaignProposal` proposes a format.
+- **Chapters**: `chapter_lines` emits YouTube description timestamps from scene starts (≥10s-spaced,
+  ≥3 or none). Publishing unchanged — YouTube auto-classifies by aspect/duration.
+- **Bounds + UI**: duration clamps 60-900s for long (vs 10-180s short); campaign form gets a
+  short/long selector (+ propose-fill) with a CPU-cost hint. ADR-030 records it.
+- Deferred within D: multi-call chaptered *generation* (outline + per-chapter) — single-call with the
+  raised scene cap suffices for a first cut; the repair loop absorbs oversized drafts.
+- Verified: 155 tests (5 new — profiles/geometry, caption dims, chapter_lines, long prompt branch,
+  web format+duration bounds; +1 ffmpeg-gated 16:9 scene render), ruff clean, docs guard green.
+
+## Batch E — QC upgrades `DONE`
+- **Deterministic QC**: `run_deterministic_qc` adds free, no-API checks on the master —
+  `media.max_black_span` (ffmpeg blackdetect) and `media.max_silence_span` (silencedetect) — failing
+  the gate on a >2.5s black stretch or >3.5s silence.
+- Runs inside the Auto-QC gate beside the vision judge; the episode advances only if BOTH pass (issues
+  merged into the stored QC report). Fails CLOSED on catastrophic breakage, per-detector fail-OPEN so
+  a probe glitch never blocks a good render — and it still guards when the vision API fails open.
+- Considered and left out (YAGNI): caption-overflow (needs a render-and-measure pass, not deterministic)
+  and hook-present (already enforced by the script prompt + critic). ADR-031 records it.
+- Verified: 157 tests (2 new units — flags black/silence, per-detector fail-open; +1 ffmpeg-gated real
+  black+silent master), ruff clean, docs guard green.
+
+## Pipeline v2 — status
+All five batches (A script depth · C sound · B edit rhythm · D long-format · E QC) are DONE, each
+committed with tests green + docs. Still automation-first and zero-cost (free tiers only); the
+render-concurrency-1 lock and CPU-only constraints are untouched. Follow-ups noted inline: per-user
+Gemini budget setting (awaiting go), and multi-call chaptered generation for very long videos.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

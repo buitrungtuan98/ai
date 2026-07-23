@@ -94,6 +94,36 @@ class QCResult:
         return {"passed": self.passed, "score": self.score, "issues": self.issues}
 
 
+# Deterministic post-render checks — free, no API. They catch catastrophic breakage (a mostly-black
+# or long-silent master) that vision QC can miss, and they still guard when the vision API fails open.
+MAX_BLACK_SPAN_S = 2.5      # a continuous black stretch longer than this signals a broken render
+MAX_SILENCE_SPAN_S = 3.5    # a continuous silent stretch longer than this signals broken audio
+
+
+def run_deterministic_qc(master_path: str) -> QCResult:
+    """Free ffmpeg sanity checks on the finished master: no long black stretch, no long silence.
+
+    Fails CLOSED on clearly-broken output (like the render's own voice_check), but each detector
+    fails OPEN individually — a probe glitch on one check must never block an otherwise-good render.
+    Score is always None (this is a pass/fail gate, not a graded judgement)."""
+    issues: list[str] = []
+    try:
+        black = media.max_black_span(master_path)
+        if black > MAX_BLACK_SPAN_S:
+            issues.append(f"black screen for {black:.1f}s")
+    except Exception:  # noqa: BLE001 — a detector glitch must not block a good render
+        logger.warning("black-frame detection errored — skipping (fail-open)", exc_info=True)
+    try:
+        silence = media.max_silence_span(master_path)
+        if silence > MAX_SILENCE_SPAN_S:
+            issues.append(f"silence for {silence:.1f}s")
+    except Exception:  # noqa: BLE001
+        logger.warning("silence detection errored — skipping (fail-open)", exc_info=True)
+    if issues:
+        logger.info("Deterministic QC flagged: %s", "; ".join(issues))
+    return QCResult(passed=not issues, score=None, issues=issues)
+
+
 def run_final_qc(master_path: str, *, api_key: str, context: str = "",
                  threshold: int = FINAL_QC_THRESHOLD, model: str | None = None) -> QCResult:
     """Sample frames across the finished master — plus its audio track — and ask the judge for

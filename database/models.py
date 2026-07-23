@@ -202,3 +202,22 @@ class BufferPoolItem(Base):
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     campaign: Mapped["Campaign"] = relationship(back_populates="buffer_items")
+
+
+class ChannelClipUsage(Base):
+    """Per-channel footage history: which Pexels clip ids a channel has already used, so the factory
+    doesn't reuse the same stock clip episode after episode (a classic auto-channel tell). Advisory
+    and fail-open — the render prefers unused clips when it can, and never blocks on this table.
+    A brand-new table, so `create_all` adds it to existing DBs with no column migration needed."""
+
+    __tablename__ = "channel_clip_usage"
+    __table_args__ = (
+        UniqueConstraint("channel_id", "clip_id", name="uq_clip_usage_channel_clip"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[int] = mapped_column(
+        ForeignKey("channels.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    clip_id: Mapped[int] = mapped_column(Integer, nullable=False)  # Pexels video id
+    used_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

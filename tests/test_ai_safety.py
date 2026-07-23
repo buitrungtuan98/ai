@@ -160,6 +160,92 @@ def test_duration_range_prompt_and_length_fix(monkeypatch):
     assert len(script.scenes[0].narration.split()) == 20       # the fixed (short) draft won
 
 
+def test_find_cliches_detects_per_language():
+    from core.ai_engine import find_cliches
+
+    assert "delve into" in find_cliches("We will delve into this topic.", "en")
+    assert find_cliches("A clean, specific opening sentence.", "en") == []
+    assert "hãy cùng tìm hiểu" in find_cliches("Hãy cùng tìm hiểu lịch sử nhà Trần.", "vi")
+
+
+def test_script_prompt_carries_banned_list_and_brief():
+    from core.ai_engine import EpisodeBrief, build_script_prompt
+
+    p = build_script_prompt("t", "en", 10, 1)
+    assert "BANNED PHRASES" in p and "delve into" in p and "RESEARCH BRIEF" not in p
+    brief = EpisodeBrief(angle="A sharp angle", facts=["Nguyen Trai 1442", "fact2", "fact3"], arc="arc")
+    p2 = build_script_prompt("t", "en", 10, 1, brief=brief)
+    assert "RESEARCH BRIEF" in p2 and "Nguyen Trai 1442" in p2
+
+
+def _script_json(narration="A clean, specific line."):
+    scenes = [{"index": i, "narration": narration, "pexels_keywords": ["k"]} for i in range(3)]
+    meta = [{"variant": v, "title": "T", "description": "d", "tags": ["a", "b", "c"]} for v in "ABC"]
+    return json.dumps({"language": "en", "topic": "t", "synopsis": "s",
+                       "scenes": scenes, "metadata_variations": meta})
+
+
+def test_deep_mode_generates_brief_then_conditions_script(monkeypatch):
+    """script_depth='deep' makes a research call FIRST, and the brief's facts are injected into the
+    script-generation prompt. A clean draft adds no further calls."""
+    import core.ai_engine as ai
+    from core.ai_engine import generate_script
+
+    brief_json = json.dumps({"angle": "sharp", "facts": ["Bạch Đằng 1288", "f2", "f3"], "arc": "arc"})
+    responses = [brief_json, _script_json()]
+    calls = []
+
+    def fake(**k):
+        calls.append(k["prompt"])
+        return responses[len(calls) - 1]
+
+    monkeypatch.setattr(ai, "_call_gemini", fake)
+    script = generate_script(topic="t", language="en", total_episodes=10, episode=1, api_key="k",
+                             self_critique=False, script_depth="deep")
+    assert len(calls) == 2                          # brief call, then the script call
+    assert "Bạch Đằng 1288" in calls[1]             # the brief conditioned the script prompt
+    assert len(script.scenes) == 3
+
+
+def test_cliche_gate_forces_one_rewrite(monkeypatch):
+    """A draft containing a blacklisted phrase triggers exactly one targeted rewrite; a clean draft
+    triggers none (deterministic, free gate)."""
+    import core.ai_engine as ai
+    from core.ai_engine import generate_script
+
+    dirty = _script_json("Okay, let's dive in and see.")
+    clean = _script_json("Here is the specific story.")
+    responses = [dirty, clean]
+    calls = []
+
+    def fake(**k):
+        calls.append(k["prompt"])
+        return responses[min(len(calls) - 1, len(responses) - 1)]
+
+    monkeypatch.setattr(ai, "_call_gemini", fake)
+    script = generate_script(topic="t", language="en", total_episodes=10, episode=1, api_key="k",
+                             self_critique=False)
+    assert len(calls) == 2 and "banned AI-tell phrases" in calls[1]
+    assert "dive in" not in " ".join(s.narration for s in script.scenes)  # clean rewrite won
+
+    # A clean first draft → no rewrite call.
+    calls.clear()
+    responses[:] = [clean]
+    generate_script(topic="t", language="en", total_episodes=10, episode=1, api_key="k",
+                    self_critique=False)
+    assert len(calls) == 1
+
+
+def test_long_format_prompt_branch():
+    from core.ai_engine import build_script_prompt
+
+    p = build_script_prompt("t", "en", 10, 3, video_format="long")
+    assert "HORIZONTAL (16:9)" in p and "12-30 scenes" in p
+    assert "Part 3" in p and "welcome" in p            # long-form titles may carry part numbers
+    s = build_script_prompt("t", "en", 10, 3)          # short (default)
+    assert "vertical short-form" in s and "NEVER include episode numbering" in s
+
+
 def test_propose_campaign_drops_invalid_voice(monkeypatch):
     """The designer validates the voice against the curated list — an invented one falls back to
     the default ('') so TTS never gets an unusable voice name."""

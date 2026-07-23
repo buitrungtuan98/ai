@@ -492,3 +492,104 @@ searches everything, not the 25 rows currently loaded; doing it in SQL also hand
 topic text the operator actually types. The request-sequence guard is the one piece a static paginated
 page doesn't need — on a table that also refreshes itself every few seconds, without it a background
 poll racing a pager click would snap the user back to the wrong page.
+
+### ADR-027 — Script depth (research brief) + deterministic AI-cliché gate
+**Decision:** two additions attack the "a bot wrote this" quality of scripts at the source. (1) An
+optional per-campaign `script_depth` (`standard` default | `deep`): in deep mode, `generate_brief`
+runs one research pass producing an `EpisodeBrief` (3-8 concrete facts — real names/dates/numbers —
+plus a hook→build→payoff→cliffhanger arc), and the script-generation prompt is conditioned on it, so
+the narration carries specific substance instead of generic filler. (2) A per-language AI-cliché
+blacklist (`AI_CLICHES`) with a pure `find_cliches()` detector, wired three ways: injected into the
+script prompt (generator avoids the phrases), injected into the critic prompt (critic flags them),
+and a free deterministic post-draft gate that forces exactly one targeted rewrite naming the phrases
+if any survive. Both are fail-open and default to today's behavior (`standard`, no brief; a clean
+draft triggers no rewrite). **Why:** one-shot generation with no research tends to waffle, and models
+reliably reach for the same tells ("delve into", "hãy cùng tìm hiểu"). A brief gives the generator
+real material to work from — the single biggest lever on content quality — while deep mode stays opt-in
+because it costs one extra Gemini call per episode (counted against the same daily budget meter). The
+cliché gate follows the codebase's established "cheap deterministic gate before/after the expensive
+step" pattern (voice_check, the length-fit rewrite): free, testable, and it catches the tells the
+model ignores instructions about. Neither is detection evasion (ADR-006) — the goal is natural spoken
+language, and operators still follow platform synthetic-content disclosure rules.
+
+### ADR-028 — Sound craft: paced narration + sidechain-ducked music
+**Decision:** two audio changes make an episode sound edited by a person. (1) `tts.synthesize_paced`
+renders each *sentence* of a scene separately and stitches them with deterministic breath gaps
+(`pause_after`: 0.35s default, longer after `?`/`!`/`…`), returning ONE merged word-timing list with
+absolute offsets — so captions still align exactly with the assembled audio, and scene duration
+(the render's ground truth) naturally includes the pauses. A single-sentence scene falls straight
+through to the old `synthesize()` path. The stitch is one ffmpeg re-encode (`aevalsrc` silence +
+`concat`), and per-sentence durations come from `probe_duration` so offsets are exact. (2) In
+`build_concat_args`, the flat `volume`+`amix` music bed is replaced by `sidechaincompress`: the
+narration is `asplit` into a mix copy and a sidechain key, the music (at its `music_volume` floor) is
+compressed against that key, then the ducked music is mixed back — music dips under the voice and
+swells in the gaps. Video is still stream-copied; loudnorm still normalizes the final mix.
+**Why:** two dead giveaways of an auto-generated video are narration with no breathing room and a
+music bed that sits at one flat level over speech. Both are fixed in the audio graph without extra
+cost: pacing is just silence between existing TTS calls, and ducking is one compressor in the single
+audio re-encode that already happens at concat. Keeping the timing merge exact was the hard part —
+captions are built from word offsets, so per-sentence synthesis had to re-base every word onto the
+stitched timeline. New CI-only integration tests push both filter graphs through real ffmpeg (like
+the colour-grade guard) so an invalid `sidechaincompress`/`aevalsrc` option can never ship silently.
+
+### ADR-029 — Edit rhythm: multi-shot scenes, word-aligned cuts, cross-episode footage dedupe
+**Decision:** the encode stops letting one clip fill a whole scene. `plan_shots` slices each scene
+into shots of ~`SHOT_TARGET_S` (capped at `SHOT_MAX_S`), landing each cut on a word boundary when
+one falls in range (the edge-tts word timings we already have), and cycles the scene's clip pool so
+consecutive shots use different footage. `build_scene_args` gained an optional `shot_durations` that
+`trim`s each clip to its shot before the existing scale/crop/motion/grade/caption pass — so this is
+still ONE encode per scene and the concat-copy stitch is untouched. Each shot's length is bounded by
+its clip's native duration (never outruns its footage → no black gap), and a final coverage step
+absorbs any sub-frame shortfall into the last shot, preserving the "video always covers the audio"
+invariant the old overshoot-then-`-t`-trim gave. Motion effect is now seeded by `episode_number` so
+episodes don't share an identical rhythm. Footage variety across episodes is handled by a new
+`ChannelClipUsage` table: the worker loads a channel's recent clip ids, `prefer_unused` floats unused
+clips to the front of each scene's pool, and the ids an episode actually used are recorded afterward.
+`select_clips` is removed — `plan_shots` supersedes it. **Why:** the loudest "auto-generated" tell
+after the script is the visual pacing — a single stock clip drifting under 10 seconds of narration,
+and the *same* clips recurring across a channel's episodes. Cutting on word boundaries makes the edit
+feel intentional; seeding motion per episode kills the identical-rhythm feel; the dedupe table stops
+the recurring-footage tell. All of it is deterministic (seeded by episode/scene index, never random)
+so the render tests stay reproducible, and none of it adds a second encode or a paid service. A
+deliberate omission: dip-to-black transitions between scenes would force re-encoding at the concat
+stage, breaking the stream-copy stitch that is the biggest CPU saver on the ARM box (hard constraint
+1/4) — so transitions were left out rather than pay that cost.
+
+### ADR-030 — Long-video support via a RenderProfile (short stays the default)
+**Decision:** a per-campaign `video_format` (`short` default | `long`) selects a `RenderProfile`
+(name, width, height, fps). `short` is exactly the historical 1080×1920 constants; `long` is 16:9
+1920×1080. Everything geometric now reads the profile instead of module constants —
+`motion_filter`, `build_scene_args` (scale/crop/fps/motion), `build_ass` (PlayRes + proportional
+caption margin), `generate_thumbnail`, and Pexels search orientation (landscape for long). Because the
+profile defaults to `short`, every existing call and test renders byte-identical vertical output — the
+feature is purely additive. Long-form also: raises `VideoScript.scenes` to 40 and branches the script
+prompt (12-30 scenes, part-numbered titles welcome — the opposite of the Shorts rule); emits YouTube
+chapter markers into the description from scene start times (`chapter_lines`, ≥10s-spaced, ≥3 or none);
+and takes wider duration bounds (60-900s vs 10-180s), clamped in the campaign form. Publishing is
+unchanged — YouTube auto-classifies Short vs regular by aspect/duration, so no upload-API branch is
+needed. **Why:** the whole pipeline was hard-coded to one geometry, so "support long video" could have
+meant forking the renderer. A single `RenderProfile` threaded through the geometric functions adds the
+format without a second code path, and defaulting to `short` guarantees the existing behavior and test
+suite are untouched. Chapters and part-numbered titles are the cheap, high-signal "real long-form
+creator" cues. The hard render cost of a multi-minute 1080p encode on one CPU-only box is real, but it
+stays safe under the render-concurrency-1 lock (hard constraint 1); long campaigns are advised (in the
+form) to keep a small daily cap and buffer rather than the pipeline enforcing a new limit. Deferred:
+multi-call chaptered *generation* (outline + per-chapter) — single-call generation with a raised scene
+cap is enough for a first cut, and the repair loop absorbs the occasional oversized draft.
+
+### ADR-031 — Deterministic QC: free black/silence gates beside the vision judge
+**Decision:** `run_deterministic_qc` adds two free, no-API checks on the finished master —
+`media.max_black_span` (ffmpeg `blackdetect`) and `media.max_silence_span` (`silencedetect`) — and
+fails the gate when a continuous black stretch exceeds 2.5s or a continuous silence exceeds 3.5s. The
+worker runs it inside the Auto-QC gate alongside `run_final_qc`; the episode advances only if BOTH
+pass, and their issues are merged into the stored QC report. It fails CLOSED on clearly-broken output
+(like the render's own `voice_check`), but each detector fails OPEN individually so a probe glitch
+never blocks a good render. **Why:** the vision QC is graded and deliberately fails *open* (a Gemini
+outage must not halt the factory), which means a catastrophically broken master — all-black footage, a
+muted audio track — could sail through when the API is down or simply scores it leniently. A black or
+silent stretch is exactly the kind of failure that is cheap and unambiguous to detect deterministically
+from ffmpeg, so it belongs in a free gate that runs regardless of the vision API's health. Two precise
+detectors beat a handful of fuzzy ones: caption-overflow and "hook-present" were considered and left
+out — the former needs a render-and-measure pass (not deterministic from the master), and the latter is
+already enforced upstream by the script prompt + critic, so adding flaky versions here would only
+produce false rejects (YAGNI).

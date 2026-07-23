@@ -54,9 +54,9 @@ def test_scene_render_and_concat_copy(tmp_path):
     assert meta["width"] == 1080 and meta["height"] == 1920  # scaled to vertical
     assert progress and progress[-1] <= 99.0
 
-    # Second identical scene, then concat with -c copy (no re-encode).
+    # Second scene exercises the shot-trim path (edited cut rhythm), then concat with -c copy.
     scene1 = os.path.join(d, "scene1.mp4")
-    run_ffmpeg(build_scene_args([clip], audio, ass, scene1, dur, None))
+    run_ffmpeg(build_scene_args([clip], audio, ass, scene1, dur, None, shot_durations=[dur]))
     list_file = os.path.join(d, "list.txt")
     with open(list_file, "w") as f:
         f.write(f"file '{scene0}'\nfile '{scene1}'\n")
@@ -64,6 +64,28 @@ def test_scene_render_and_concat_copy(tmp_path):
     run_ffmpeg(build_concat_args(list_file, master))
     assert os.path.exists(master)
     assert media.probe_duration(master) > dur * 1.5  # two scenes stitched
+
+
+def test_long_profile_scene_renders_16x9(tmp_path):
+    """A scene rendered with the long profile is real 1920×1080 (landscape) — validates the
+    profile-driven scale/crop/motion geometry on actual ffmpeg."""
+    from core import media
+    from core.captions import build_ass
+    from core.ffmpeg_runner import run_ffmpeg
+    from core.tts import WordTiming
+    from core.video_factory import LONG_PROFILE, build_scene_args
+
+    d = str(tmp_path)
+    audio, clip = _make_inputs(d)
+    dur = media.probe_duration(audio)
+    ass = os.path.join(d, "s.ass")
+    build_ass([WordTiming("Hi", 0.0, dur)], ass, clip_duration=dur,
+              width=LONG_PROFILE.width, height=LONG_PROFILE.height)
+    scene = os.path.join(d, "long.mp4")
+    run_ffmpeg(build_scene_args([clip], audio, ass, scene, dur, None,
+                                motion_effect="zoom_in", shot_durations=[dur], profile=LONG_PROFILE))
+    meta = media.probe_video_meta(scene)
+    assert meta["width"] == 1920 and meta["height"] == 1080
 
 
 def _assert_filter_valid(graph: str) -> None:
@@ -99,6 +121,43 @@ def test_motion_filters_are_valid_ffmpeg_filters():
             raise AssertionError(f"motion {effect!r} rejected by ffmpeg: {exc.stderr.decode()[-300:]}")
 
 
+def _assert_audio_graph_valid(fc: str, n_inputs: int, out_label: str) -> None:
+    """Run a filter_complex audio graph through real ffmpeg with lavfi sine inputs — a bad option
+    name (e.g. a sidechaincompress typo) fails instantly instead of on every music render."""
+    inp: list[str] = []
+    for _ in range(n_inputs):
+        inp += ["-f", "lavfi", "-i", "sine=frequency=330:sample_rate=24000:duration=1"]
+    subprocess.run(
+        ["ffmpeg", "-v", "error", *inp, "-filter_complex", fc, "-map", out_label, "-f", "null", "-"],
+        check=True, capture_output=True,
+    )
+
+
+def test_music_ducking_graph_is_valid_ffmpeg():
+    """The sidechaincompress music-ducking graph must parse on real ffmpeg (unit tests only assert
+    the string, which would let an invalid compressor option ship and break every music render)."""
+    from core.video_factory import build_concat_args
+
+    args = build_concat_args("l.txt", "m.mp4", music_path="bg.mp3", music_volume=0.15)
+    fc = args[args.index("-filter_complex") + 1]
+    try:
+        _assert_audio_graph_valid(fc, n_inputs=2, out_label="[aout]")
+    except subprocess.CalledProcessError as exc:  # pragma: no cover - diagnostic
+        raise AssertionError(f"music-ducking graph rejected by ffmpeg: {exc.stderr.decode()[-300:]}")
+
+
+def test_paced_concat_graph_is_valid_ffmpeg():
+    """The per-sentence pacing concat (aevalsrc silence + concat) must parse on real ffmpeg."""
+    from core.tts import build_paced_concat_args
+
+    args = build_paced_concat_args(["a.mp3", "b.mp3"], [0.4], "out.mp3")
+    fc = args[args.index("-filter_complex") + 1]
+    try:
+        _assert_audio_graph_valid(fc, n_inputs=2, out_label="[out]")
+    except subprocess.CalledProcessError as exc:  # pragma: no cover - diagnostic
+        raise AssertionError(f"paced-concat graph rejected by ffmpeg: {exc.stderr.decode()[-300:]}")
+
+
 def test_probe_audio_stats_and_voice_check(tmp_path):
     """volumedetect parsing + the voice sanity thresholds against REAL audio: digital silence is
     flagged, an ordinary tone passes."""
@@ -117,6 +176,23 @@ def test_probe_audio_stats_and_voice_check(tmp_path):
     assert media.probe_audio_stats(tone)["mean_volume_db"] > -45.0
     assert "silent" in voice_check(silent, "some words to speak here")
     assert voice_check(tone, "some words to speak here") is None
+
+
+def test_deterministic_qc_catches_black_and_silence(tmp_path):
+    """The free ffmpeg detectors (blackdetect / silencedetect) + parsing must flag a fully black,
+    silent master on real ffmpeg — the class of catastrophic breakage vision QC can miss."""
+    from core import qc
+
+    d = str(tmp_path)
+    broken = os.path.join(d, "broken.mp4")
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=black:s=320x240:d=3",
+         "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+         "-t", "3", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", broken],
+        check=True, capture_output=True,
+    )
+    result = qc.run_deterministic_qc(broken)
+    assert not result.passed and result.issues  # black and/or silence flagged
 
 
 def test_extract_audio_stream_copy(tmp_path):
