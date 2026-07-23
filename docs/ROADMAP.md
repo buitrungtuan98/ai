@@ -381,6 +381,23 @@ measured at TTS time (audio remains ground truth). Proposed by the AI designer.
   active campaigns (each in its own tz). Read-only helpers (`_scorecard`, `_next_publish`) reusing
   scheduler primitives; screenshotted.
 
+## Post-merge fixes + adaptive-first responsive `DONE`
+- **Cache-busting (root-cause fix)**: `static_url()` appends a per-file content hash
+  (`/static/app.css?v=<sha1>`) so a deploy always invalidates the browser cache — the reported
+  "no responsive / unstyled" symptom was a stale cached `app.css` (and a stale `ui.js` would have
+  silently dropped the confirm-dialog guards).
+- **3 smaller audit fixes**: campaign identity card bound to the wrong form in multi-tenant mode
+  (stable `#campaign-form` id) · login page ignored the saved theme (added the no-FOUC head script) ·
+  skip-link revealed on mobile tap (now `:focus-visible`, keyboard-only).
+- **Adaptive-first responsive**: fluid `clamp()` type + page gutter; intrinsic `auto-fit` grids
+  (stats, scorecard); a main column that grows then centres (caps at 1400px — kills the dead space
+  on wide monitors); **container-query** table stacking (a table stacks when its wrapper is narrow,
+  not just the viewport); three shell tiers — full sidebar >1024 · icon rail 721–1024 · drawer +
+  bottom tab bar ≤720. ADR-024 records it.
+- Verified: 139 tests, ruff clean, docs guard green; width sweep {375, 768, 1024, 1440, 1920}
+  screenshotted, main-column centring measured (1400 cap, balanced gutters at 1920), container-query
+  stacking asserted, cache-bust hashes confirmed on all three static files.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

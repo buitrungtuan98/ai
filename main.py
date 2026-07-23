@@ -68,6 +68,29 @@ templates = Jinja2Templates(directory="templates")
 templates.env.globals["settings"] = settings  # e.g. MULTI_TENANT_MODE toggles the sign-out chip
 templates.env.globals["voice_choices"] = VOICE_CHOICES  # campaign form: per-language voice picker
 
+
+_asset_versions: dict[str, str] = {}
+
+
+def static_url(filename: str) -> str:
+    """Cache-busted URL for a bundled static file: /static/<name>?v=<content-hash>. The hash is
+    computed once per process (deploys restart the app), so a new build always invalidates the
+    browser cache — no more stale CSS/JS after an update."""
+    import hashlib
+
+    v = _asset_versions.get(filename)
+    if v is None:
+        try:
+            with open(os.path.join("static", filename), "rb") as fh:
+                v = hashlib.sha1(fh.read()).hexdigest()[:8]
+        except OSError:
+            v = "dev"
+        _asset_versions[filename] = v
+    return f"/static/{filename}?v={v}"
+
+
+templates.env.globals["static_url"] = static_url
+
 YOUTUBE_SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube.readonly",

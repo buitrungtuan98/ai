@@ -420,3 +420,27 @@ must know instantly whether to act. Counts are low-information; a prioritized ac
 history, and a "what's new" diff are what make an autonomous factory feel steerable. Showing the
 learning loop closing is what keeps a human bothering to give feedback that improves the AI. The
 backend additions are read-only (two focused queries for the triage lists) and reuse existing helpers.
+
+### ADR-024 — Adaptive-first responsive design + content-hashed static assets
+**Decision:** the UI moves from breakpoint-only to adaptive-first. Layout adapts *continuously* — a
+fluid type scale and page gutter via `clamp()`, intrinsic `auto-fit`/`minmax` grids (stats,
+scorecard, cards), and a main column that grows then centres (`max-width` + `margin-inline:auto`,
+capped at 1400px so wide monitors no longer strand content on the left). Media queries are reserved
+for genuine MODE changes only: table layout uses a **container query** (`.table-wrap` is an
+`inline-size` container; `.stack-table` collapses to cards when *its wrapper* is narrow — so a table
+stacks even in a narrow column on a wide screen, which viewport queries cannot express), and the
+navigation shell has exactly three tiers (full sidebar >1024px · compact icon rail 721–1024px ·
+off-canvas drawer + bottom tab bar ≤720px). Browsers without container-query support fall back to the
+existing horizontal-scroll wrapper. Separately, static assets are served through a `static_url()`
+template global that appends a per-file content hash (`/static/app.css?v=<sha1>`), so a deploy always
+busts the browser cache.
+**Why:** "correct at 375 and 1280, hope in between" is fragile — intrinsic sizing is correct at every
+width by construction and uses the room on large monitors instead of wasting it. Container queries put
+adaptation where it belongs (the component's own space), which is the only correct model once the same
+table can appear both full-width and in a narrow scoped column. The cache-busting fix closes a real
+production trap: the refactor's new HTML was being styled by a stale cached stylesheet (and, worse, a
+stale `ui.js` would drop the confirm-dialog guards) — a content hash makes every build self-invalidating
+with zero operator action. This also fixed four smaller bugs found in the audit: the campaign-form
+identity card bound to the wrong form in multi-tenant mode (now a stable id), the login page ignored the
+saved theme (added the no-FOUC head script), and the skip-link revealed on mobile taps (now
+`:focus-visible`, keyboard-only).

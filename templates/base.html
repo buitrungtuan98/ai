@@ -6,7 +6,7 @@
   {# Apply the saved theme before first paint to avoid a flash. #}
   <script>try { var t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}</script>
   <title>{% block title %}AI Video Factory{% endblock %}</title>
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="{{ static_url('app.css') }}">
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
@@ -22,15 +22,15 @@
       <div class="brand"><span class="dot"></span> AI Video Factory</div>
       <nav class="nav" aria-label="Primary">
         <p class="nav-group">Monitor</p>
-        <a href="/" class="{{ 'active' if nav=='dashboard' else '' }}"><span class="ico">▚</span> Dashboard</a>
-        <a href="/tasks" class="{{ 'active' if nav=='tasks' else '' }}"><span class="ico">≣</span> Task Logs <span class="nav-badge" data-badge="failed" hidden></span></a>
-        <a href="/calendar" class="{{ 'active' if nav=='calendar' else '' }}"><span class="ico">▧</span> Calendar</a>
+        <a href="/" title="Dashboard" class="{{ 'active' if nav=='dashboard' else '' }}"><span class="ico">▚</span> <span class="nav-text">Dashboard</span></a>
+        <a href="/tasks" title="Task Logs" class="{{ 'active' if nav=='tasks' else '' }}"><span class="ico">≣</span> <span class="nav-text">Task Logs</span> <span class="nav-badge" data-badge="failed" hidden></span></a>
+        <a href="/calendar" title="Calendar" class="{{ 'active' if nav=='calendar' else '' }}"><span class="ico">▧</span> <span class="nav-text">Calendar</span></a>
         <p class="nav-group">Content</p>
-        <a href="/campaigns" class="{{ 'active' if nav=='campaigns' else '' }}"><span class="ico">▤</span> Campaigns</a>
-        <a href="/assets" class="{{ 'active' if nav=='assets' else '' }}"><span class="ico">▦</span> Asset Pool <span class="nav-badge review" data-badge="awaiting_review" hidden></span></a>
-        <a href="/channels" class="{{ 'active' if nav=='channels' else '' }}"><span class="ico">◉</span> Channels</a>
+        <a href="/campaigns" title="Campaigns" class="{{ 'active' if nav=='campaigns' else '' }}"><span class="ico">▤</span> <span class="nav-text">Campaigns</span></a>
+        <a href="/assets" title="Asset Pool" class="{{ 'active' if nav=='assets' else '' }}"><span class="ico">▦</span> <span class="nav-text">Asset Pool</span> <span class="nav-badge review" data-badge="awaiting_review" hidden></span></a>
+        <a href="/channels" title="Channels" class="{{ 'active' if nav=='channels' else '' }}"><span class="ico">◉</span> <span class="nav-text">Channels</span></a>
         <p class="nav-group">Setup</p>
-        <a href="/credentials" class="{{ 'active' if nav=='credentials' else '' }}"><span class="ico">⚿</span> Credentials</a>
+        <a href="/credentials" title="Credentials" class="{{ 'active' if nav=='credentials' else '' }}"><span class="ico">⚿</span> <span class="nav-text">Credentials</span></a>
       </nav>
       <div class="sidebar-tools">
         <button class="btn ghost sm block" id="theme-toggle-side" type="button">◐ Toggle theme</button>
@@ -68,7 +68,7 @@
   </div>
   <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
 
-  <script src="/static/ui.js" defer></script>
+  <script src="{{ static_url('ui.js') }}" defer></script>
   {% block scripts %}{% endblock %}
 </body>
 </html>
