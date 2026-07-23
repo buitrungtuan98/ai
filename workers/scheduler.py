@@ -29,7 +29,7 @@ from sqlalchemy import select
 from core.cleanup import sweep_orphans
 from core.config import settings
 from database.db_session import SessionLocal
-from database.models import BufferPoolItem, Campaign, Channel, Task, User
+from database.models import AutopilotAction, BufferPoolItem, Campaign, Channel, Task, User
 from database.types import BufferStatus, CampaignStatus, TaskStatus
 from workers import task_queue, video_worker
 
@@ -485,6 +485,95 @@ def autopilot_catchup_channel(db, channel, now: datetime | None = None) -> int:
     return published
 
 
+REPROPOSE_AFTER_DAYS = 30  # don't re-file a proposal the operator dismissed until this long passes
+
+
+def autopilot_propose_channel(db, channel, now: datetime | None = None) -> int:
+    """File strategy proposals (extend / successor / wind-down) for a channel's campaigns into the
+    AutopilotAction inbox. Idempotent: never files a second live proposal of the same kind for the
+    same campaign, nor re-files one dismissed within REPROPOSE_AFTER_DAYS. Returns the number filed."""
+    from core import autopilot
+
+    now = now or datetime.utcnow()
+    campaigns = db.scalars(select(Campaign).where(
+        Campaign.channel_id == channel.id, Campaign.status == CampaignStatus.active)).all()
+    if not campaigns:
+        return 0
+    cls = autopilot.classify_campaigns(db, campaigns)
+    filed = 0
+    for c in campaigns:
+        tasks = db.scalars(select(Task).where(Task.campaign_id == c.id)).all()
+        for p in autopilot.propose_actions(c, tasks, cls[c.id]):
+            # Skip if the same (campaign, kind) is already live or was recently dismissed.
+            existing = db.scalars(select(AutopilotAction).where(
+                AutopilotAction.campaign_id == c.id, AutopilotAction.kind == p["kind"])
+                .order_by(AutopilotAction.id.desc())).first()
+            if existing is not None:
+                if existing.status in ("proposed", "applied"):
+                    continue
+                if (existing.status == "dismissed" and existing.resolved_at is not None
+                        and (now - existing.resolved_at) < timedelta(days=REPROPOSE_AFTER_DAYS)):
+                    continue
+            db.add(AutopilotAction(
+                user_id=channel.user_id, channel_id=channel.id, campaign_id=c.id,
+                kind=p["kind"], summary=p["summary"], evidence=p["evidence"], params=p["params"]))
+            filed += 1
+    if filed:
+        db.commit()
+    return filed
+
+
+def _create_successor(db, parent) -> int:
+    """A successor = a fresh PENDING clone of a proven campaign's config (same persona/voice/format/
+    schedule), titled "<parent> II", for the operator to review and start. Deterministic, 0-AI,
+    reversible. Returns the new campaign id."""
+    new = Campaign(user_id=parent.user_id, channel_id=parent.channel_id,
+                   topic_name=(parent.topic_name + " II")[:255],
+                   total_episodes=parent.total_episodes, status=CampaignStatus.pending,
+                   config_json=dict(parent.config_json or {}))
+    db.add(new)
+    db.commit()
+    db.refresh(new)
+    return new.id
+
+
+def apply_autopilot_action(db, action) -> bool:
+    """Apply a proposed action — reversible config changes only, never a delete. Marks the row
+    applied (or failed) and returns success. Shared by the Copilot approve route and (Phase IV)
+    full-auto."""
+    campaign = db.get(Campaign, action.campaign_id) if action.campaign_id else None
+    try:
+        if action.kind in ("extend", "wind_down"):
+            if campaign is None:
+                raise ValueError("campaign gone")
+            campaign.total_episodes = max(1, int(action.params.get("total_episodes")))
+            db.commit()
+            if action.kind == "extend":
+                try:
+                    video_worker.hydrate_campaign(db, campaign)  # render the newly-allowed episodes
+                except Exception:  # noqa: BLE001
+                    logger.warning("extend hydration failed for campaign %s", campaign.id, exc_info=True)
+        elif action.kind == "successor":
+            if campaign is None:
+                raise ValueError("campaign gone")
+            new_id = _create_successor(db, campaign)
+            action.params = {**(action.params or {}), "created_campaign_id": new_id}
+        else:
+            raise ValueError(f"unknown action kind {action.kind!r}")
+        action.status = "applied"
+        action.resolved_at = datetime.utcnow()
+        db.commit()
+        return True
+    except Exception as exc:  # noqa: BLE001 — a bad action must not crash the pass or the route
+        db.rollback()
+        action.status = "failed"
+        action.summary = (action.summary + f" — failed: {type(exc).__name__}")[:300]
+        action.resolved_at = datetime.utcnow()
+        db.commit()
+        logger.warning("Autopilot action %s failed", action.id, exc_info=True)
+        return False
+
+
 def autopilot_pass(db=None, now: datetime | None = None, respect_cadence: bool = True) -> dict:
     """One autopilot cycle across every channel that has it enabled. Per-channel cadence is enforced
     with a Redis NX guard (default 3h, operator-set) so a frequent scheduler tick doesn't over-run a
@@ -494,7 +583,7 @@ def autopilot_pass(db=None, now: datetime | None = None, respect_cadence: bool =
     own = db is None
     db = db or SessionLocal()
     summary: dict = {"channels": 0, "approved": 0, "rejected": 0, "recommended": 0,
-                     "escalated": 0, "retried": 0, "caught_up": 0}
+                     "escalated": 0, "retried": 0, "caught_up": 0, "proposed": 0}
     try:
         channels = db.scalars(select(Channel)).all()
         for ch in channels:
@@ -513,6 +602,7 @@ def autopilot_pass(db=None, now: datetime | None = None, respect_cadence: bool =
                 r = autopilot_review_channel(db, ch, mode, approve_min, reject_max)
                 caught = autopilot_catchup_channel(db, ch, now=now)
                 retried = autopilot_retry_channel(db, ch)
+                proposed = autopilot_propose_channel(db, ch, now=now)
             except Exception:  # noqa: BLE001 — one channel's fault must not stop the others
                 logger.warning("Autopilot failed for channel %s", ch.id, exc_info=True)
                 db.rollback()
@@ -522,16 +612,17 @@ def autopilot_pass(db=None, now: datetime | None = None, respect_cadence: bool =
                 summary[k] += r[k]
             summary["retried"] += retried
             summary["caught_up"] += caught
+            summary["proposed"] += proposed
             acted = r["approved"] + r["rejected"] + retried + caught
-            if acted:
-                _autopilot_notify(db, ch, r, retried, caught)
+            if acted or proposed:
+                _autopilot_notify(db, ch, r, retried, caught, proposed)
         return summary
     finally:
         if own:
             db.close()
 
 
-def _autopilot_notify(db, channel, review: dict, retried: int, caught: int) -> None:
+def _autopilot_notify(db, channel, review: dict, retried: int, caught: int, proposed: int = 0) -> None:
     """Tell the operator what their autopilot did this cycle (Telegram), if anything material did."""
     user = db.get(User, channel.user_id)
     if user is None:
@@ -547,6 +638,8 @@ def _autopilot_notify(db, channel, review: dict, retried: int, caught: int) -> N
         bits.append(f"caught up {caught} missed slot(s)")
     if retried:
         bits.append(f"retried {retried} failed render(s)")
+    if proposed:
+        bits.append(f"filed {proposed} proposal(s) — review under Autopilot")
     if bits:
         video_worker._notify(user, f"🤖 Autopilot · {channel.channel_name}: " + ", ".join(bits) + ".")
 

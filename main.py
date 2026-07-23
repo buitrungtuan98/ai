@@ -43,7 +43,7 @@ from core import autopilot
 from core.config import settings
 from core.tts import VOICE_CHOICES
 from database.db_session import get_db, init_db
-from database.models import BufferPoolItem, Campaign, Channel, Task
+from database.models import AutopilotAction, BufferPoolItem, Campaign, Channel, Task
 from database.types import BufferStatus, CampaignStatus, ChannelStatus, Platform, TaskStatus
 from workers import task_queue, video_worker
 
@@ -467,6 +467,8 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
                 review_ids[(t.campaign_id, t.episode_number)] = t.id
     # "Running now" panel: one row per active campaign (what each is doing + when it posts next).
     active_campaigns = [c for c in campaigns if c.status == CampaignStatus.active]
+    autopilot_proposed = db.scalar(select(func.count()).select_from(AutopilotAction).where(
+        AutopilotAction.user_id == user.id, AutopilotAction.status == "proposed")) or 0
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -479,6 +481,7 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
             "review_ids": review_ids,
             "scorecard": _scorecard(db, user.id), "next_publish": _next_publish(db, user.id),
             "active_running": active_campaigns,
+            "autopilot_proposed": autopilot_proposed,
             "ops": _campaign_ops(db, user.id, active_campaigns),
             "camp_by_id": {c.id: c for c in campaigns},
             "chan_by_id": {c.id: c for c in channels},
@@ -549,6 +552,48 @@ def delete_channel(channel=Depends(get_owned_channel), db=Depends(get_db)):
     db.delete(channel)
     db.commit()
     return RedirectResponse("/channels", status_code=303)
+
+
+@app.get("/autopilot", response_class=HTMLResponse)
+def autopilot_page(request: Request, user: CurrentUser, db: DbDep):
+    """The autopilot decisions inbox + audit log: strategy proposals to approve/dismiss, and the
+    history of what autopilot has done (each with the data evidence that triggered it). ADR-044."""
+    actions = db.scalars(select(AutopilotAction).where(AutopilotAction.user_id == user.id)
+                         .order_by(AutopilotAction.id.desc()).limit(120)).all()
+    proposed = [a for a in actions if a.status == "proposed"]
+    history = [a for a in actions if a.status != "proposed"][:40]
+    return templates.TemplateResponse(
+        request, "autopilot.html",
+        {"request": request, "user": user, "nav": "autopilot", "proposed": proposed,
+         "history": history,
+         "chan_by_id": {c.id: c for c in db.scalars(select(Channel).where(Channel.user_id == user.id))}},
+    )
+
+
+@app.post("/autopilot/{action_id}/approve")
+def approve_autopilot_action(action_id: int, user: CurrentUser, db: DbDep):
+    action = db.get(AutopilotAction, action_id)
+    if action is None or action.user_id != user.id:
+        raise HTTPException(404, "Action not found")
+    if action.status == "proposed":
+        from workers import scheduler
+
+        scheduler.apply_autopilot_action(db, action)
+    return RedirectResponse("/autopilot", status_code=303)
+
+
+@app.post("/autopilot/{action_id}/dismiss")
+def dismiss_autopilot_action(action_id: int, user: CurrentUser, db: DbDep):
+    from datetime import datetime
+
+    action = db.get(AutopilotAction, action_id)
+    if action is None or action.user_id != user.id:
+        raise HTTPException(404, "Action not found")
+    if action.status == "proposed":
+        action.status = "dismissed"
+        action.resolved_at = datetime.utcnow()
+        db.commit()
+    return RedirectResponse("/autopilot", status_code=303)
 
 
 @app.post("/channels/{channel_id}/autopilot")

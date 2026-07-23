@@ -232,3 +232,96 @@ def test_autopilot_pass_respects_per_channel_cadence():
     assert scheduler.autopilot_pass(db, respect_cadence=False)["channels"] == 0
     db.close()
 
+
+# ── Phase III: the brain — proposals + apply ──────────────────────────────────
+def test_propose_actions_by_classification():
+    from core import autopilot
+    from types import SimpleNamespace
+
+    # Winner near its cap → extend.
+    win = SimpleNamespace(topic_name="W", status=SimpleNamespace(value="active"),
+                          total_episodes=10, current_episode=9)
+    props = autopilot.propose_actions(win, [], {"label": "winner", "baseline": 50, "retention": 80})
+    assert [p["kind"] for p in props] == ["extend"] and props[0]["params"]["total_episodes"] > 10
+
+    # Healthy near its cap → plan a successor.
+    heal = SimpleNamespace(topic_name="H", status=SimpleNamespace(value="active"),
+                           total_episodes=10, current_episode=9)
+    props = autopilot.propose_actions(heal, [], {"label": "healthy", "baseline": 50, "retention": 52})
+    assert [p["kind"] for p in props] == ["successor"]
+
+    # Underperformer with a long low streak → wind down to its current episode.
+    lag = SimpleNamespace(topic_name="L", status=SimpleNamespace(value="active"),
+                          total_episodes=20, current_episode=8)
+    tasks = [SimpleNamespace(episode_number=i, stats_json={"avg_pct_viewed": 10}) for i in range(1, 9)]
+    props = autopilot.propose_actions(lag, tasks, {"label": "underperforming", "baseline": 50, "retention": 10})
+    assert [p["kind"] for p in props] == ["wind_down"] and props[0]["params"]["total_episodes"] == 8
+
+
+def test_propose_channel_is_idempotent_and_apply_extend():
+    from database.models import AutopilotAction, Task
+    from database.types import TaskStatus
+    from workers import scheduler
+
+    from database.models import Campaign
+    from database.types import CampaignStatus
+
+    db, user, ch, camp = _seed_ch("copilot")
+    camp.total_episodes = 10
+    camp.current_episode = 9
+    db.commit()
+    # Three measured episodes, all high.
+    for i in range(1, 4):
+        db.add(Task(campaign_id=camp.id, user_id=user.id, episode_number=i,
+                    status=TaskStatus.COMPLETED, stats_json={"avg_pct_viewed": 90}))
+    # A laggard sibling drags the channel baseline down so `camp` reads as a genuine winner
+    # (a lone campaign equals its own baseline and would only ever be "healthy").
+    lag = Campaign(user_id=user.id, channel_id=ch.id, topic_name="Lag", total_episodes=20,
+                   status=CampaignStatus.completed)
+    db.add(lag)
+    db.commit()
+    db.refresh(lag)
+    for i in range(1, 7):
+        db.add(Task(campaign_id=lag.id, user_id=user.id, episode_number=i,
+                    status=TaskStatus.COMPLETED, stats_json={"avg_pct_viewed": 10}))
+    db.commit()
+
+    assert scheduler.autopilot_propose_channel(db, ch) == 1          # files one "extend"
+    assert scheduler.autopilot_propose_channel(db, ch) == 0          # idempotent — no duplicate
+    action = db.query(AutopilotAction).filter_by(kind="extend").one()
+    assert action.status == "proposed"
+
+    assert scheduler.apply_autopilot_action(db, action) is True
+    db.refresh(action), db.refresh(camp)
+    assert action.status == "applied" and camp.total_episodes > 10   # extended, reversible config only
+
+
+def test_apply_wind_down_and_successor():
+    from database.models import AutopilotAction, Campaign
+    from database.types import CampaignStatus
+    from workers import scheduler
+
+    db, user, ch, camp = _seed_ch("copilot")
+    camp.config_json = {"language": "vi", "voice": "v"}
+    camp.current_episode = 6
+    db.commit()
+
+    wind = AutopilotAction(user_id=user.id, channel_id=ch.id, campaign_id=camp.id, kind="wind_down",
+                           summary="wind down", evidence={}, params={"total_episodes": 6})
+    succ = AutopilotAction(user_id=user.id, channel_id=ch.id, campaign_id=camp.id, kind="successor",
+                           summary="successor", evidence={}, params={})
+    db.add_all([wind, succ])
+    db.commit()
+
+    assert scheduler.apply_autopilot_action(db, wind) is True
+    db.refresh(camp)
+    assert camp.total_episodes == 6  # wound down to current — stops new work, deletes nothing
+
+    assert scheduler.apply_autopilot_action(db, succ) is True
+    db.refresh(succ)
+    new_id = succ.params["created_campaign_id"]
+    new = db.get(Campaign, new_id)
+    assert new.status == CampaignStatus.pending and new.config_json == {"language": "vi", "voice": "v"}
+    assert new.topic_name.endswith(" II")
+    db.close()
+

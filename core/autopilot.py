@@ -137,6 +137,65 @@ def review_decision(qc: dict | None, approve_min: int, reject_max: int) -> tuple
     return ("escalate", f"borderline auto-QC ({score}/10) — needs a human eye")
 
 
+# ── Strategy proposals (Phase III): reversible, evidence-backed, deterministic ─
+EXTEND_AT_PCT = 0.8        # a campaign this far through its run is "near its cap"
+EXTEND_BY = 0.25           # extend a winner by +25% episodes
+WIND_DOWN_CONSECUTIVE = 5  # this many straight measured episodes below the bar → wind down
+
+
+def _trailing_low(tasks, threshold: float) -> int:
+    """Count the most-recent MEASURED episodes that are below `threshold`, consecutively from newest
+    (stops at the first measured episode that clears the bar)."""
+    n = 0
+    for t in sorted(tasks, key=lambda x: x.episode_number, reverse=True):
+        r = _retention(t.stats_json)
+        if r is None:
+            continue
+        if r < threshold:
+            n += 1
+        else:
+            break
+    return n
+
+
+def propose_actions(campaign, tasks, verdict: dict) -> list[dict]:
+    """Deterministic strategy proposals for ONE active campaign, from its classification + measured
+    history. Pure (no DB writes, no AI). Each is a bounded, reversible change: extend a winner near
+    its cap, plan a successor for a healthy campaign near its cap, or wind a laggard down (which only
+    stops NEW episodes — nothing is ever deleted). Returns [{kind, summary, evidence, params}]."""
+    if campaign.status.value != "active":
+        return []
+    total = campaign.total_episodes or 0
+    prog = (campaign.current_episode / total) if total else 0.0
+    label, baseline, ret = verdict["label"], verdict.get("baseline"), verdict.get("retention")
+    out: list[dict] = []
+    if total and prog >= EXTEND_AT_PCT:
+        if label == "winner":
+            new_total = total + max(1, round(total * EXTEND_BY))
+            out.append({"kind": "extend",
+                        "summary": f"Extend “{campaign.topic_name}” to {new_total} episodes — it's a "
+                                   f"winner near its cap ({ret}% vs {baseline}% channel avg).",
+                        "evidence": {"retention": ret, "baseline": baseline,
+                                     "progress_pct": round(prog * 100)},
+                        "params": {"total_episodes": new_total}})
+        elif label == "healthy":
+            out.append({"kind": "successor",
+                        "summary": f"Plan a successor to “{campaign.topic_name}” — it's near its cap; "
+                                   f"carry its formula into a fresh campaign for review.",
+                        "evidence": {"retention": ret, "baseline": baseline,
+                                     "progress_pct": round(prog * 100)},
+                        "params": {}})
+    if label == "underperforming" and baseline is not None:
+        low = _trailing_low(tasks, baseline * LAGGARD_RATIO)
+        if low >= WIND_DOWN_CONSECUTIVE:
+            out.append({"kind": "wind_down",
+                        "summary": f"Wind down “{campaign.topic_name}” — {low} straight episodes well "
+                                   f"below the channel average. Stops new episodes; nothing is deleted.",
+                        "evidence": {"consecutive_low": low, "retention": ret, "baseline": baseline},
+                        "params": {"total_episodes": campaign.current_episode}})
+    return out
+
+
 def channel_baseline(db, channel_id: int) -> float | None:
     """Average retention across ALL measured episodes of one channel — the bar its campaigns are
     judged against. None until there are ≥ MIN_MEASURED measured episodes."""

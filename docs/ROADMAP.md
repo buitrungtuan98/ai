@@ -735,8 +735,17 @@ the existing scheduler daemon on a per-channel cadence (default 3h, configurable
   Verified: 184 tests (6 new — decision thresholds, full-auto approve/reject/escalate, copilot
   recommend-don't-publish, retry skip-rules, catch-up, per-channel cadence guard), ruff clean, docs
   guard green; the Channels autopilot control checked in a browser.
-- Phase III — the brain: Copilot proposals inbox (create / extend / wind down / trim / adopt) `TODO`
-- Phase IV — full-auto + weekly strategist call + guardrails `TODO`
+- **Phase III — the brain (Copilot proposals inbox)** `DONE`: `autopilot_propose_channel` files
+  deterministic, reversible, evidence-backed strategy suggestions into a new `AutopilotAction` table
+  — **extend** a winner near its cap (+25% episodes), plan a **successor** for a healthy one (a
+  pending clone of its winning config to review), **wind down** a laggard with ≥5 straight below-avg
+  episodes (stops new work; nothing deleted). Idempotent (no duplicate live proposal; won't re-file a
+  dismissed one for 30 days). New `/autopilot` inbox page shows each proposal with the numbers behind
+  it + Approve/Dismiss; approve applies via `apply_autopilot_action`; the pending count surfaces in
+  the dashboard triage. Verified: 188 tests (5 new — proposals by class, idempotency + apply extend,
+  wind-down + successor apply, HTTP approve/dismiss + ownership + no-crash on legacy rows), ruff
+  clean, docs guard green; inbox checked in a browser.
+- Phase IV — full-auto auto-applies proposals + weekly strategist call + guardrails `TODO`
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation

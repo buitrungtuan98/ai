@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block title %}Autopilot · AI Video Factory{% endblock %}
+{% block content %}
+{% call ui.page_head('Autopilot', 'The AI channel manager: strategy proposals from your data to approve or dismiss, plus the log of everything it has done. Turn autopilot on per channel from the Channels page.') %}
+  <a class="btn ghost" href="/channels">Channels →</a>
+{% endcall %}
+
+{% set kind_icon = {'extend': '📈', 'successor': '🌱', 'wind_down': '📉'} %}
+
+{% if proposed %}
+<div class="card">
+  <div class="card-head"><h3>Proposals</h3><span class="pill failed">{{ proposed|length }}</span></div>
+  <ul class="ap-list">
+    {% for a in proposed %}
+    {% set ch = chan_by_id.get(a.channel_id) %}
+    <li class="ap-row">
+      <div class="grow">
+        <b>{{ kind_icon.get(a.kind, '•') }} {{ a.summary }}</b>
+        <div class="meta">
+          {% if ch %}{{ ch.channel_name }} · {% endif %}
+          {% for k, v in (a.evidence or {}).items() %}{{ k.replace('_', ' ') }}: <b>{{ v }}</b>{% if not loop.last %} · {% endif %}{% endfor %}
+        </div>
+      </div>
+      <form method="post" action="/autopilot/{{ a.id }}/approve"><button class="btn sm" type="submit">✓ Approve</button></form>
+      <form method="post" action="/autopilot/{{ a.id }}/dismiss"><button class="btn ghost sm" type="submit">Dismiss</button></form>
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% else %}
+{% call ui.empty('🤖', 'No proposals right now', 'When a channel is on autopilot, the AI watches its data and files suggestions here — extend a winner, plan a successor for a healthy campaign near its cap, or wind down a laggard. Each is reversible and shows the numbers behind it.', '/channels', 'Set up autopilot') %}{% endcall %}
+{% endif %}
+
+{% if history %}
+<div class="card mt">
+  <div class="card-head"><h3>Decision log</h3><span class="meta">what autopilot has done</span></div>
+  <ul class="ap-list">
+    {% for a in history %}
+    {% set ch = chan_by_id.get(a.channel_id) %}
+    {% set st = {'applied': ('completed', 'Applied'), 'dismissed': ('', 'Dismissed'), 'failed': ('failed', 'Failed')} %}
+    <li class="ap-row">
+      <div class="grow">
+        <span>{{ kind_icon.get(a.kind, '•') }} {{ a.summary }}</span>
+        <div class="meta">{% if ch %}{{ ch.channel_name }}{% endif %}{% if a.resolved_at %}{% if ch %} · {% endif %}<span data-reltime="{{ a.resolved_at.isoformat() }}Z">{{ a.resolved_at.strftime('%Y-%m-%d %H:%M') }}</span>{% endif %}</div>
+      </div>
+      {{ ui.pill(st.get(a.status, ('', a.status))[0], st.get(a.status, ('', a.status))[1]) }}
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+{% endblock %}

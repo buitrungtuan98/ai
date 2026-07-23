@@ -373,6 +373,49 @@ def test_api_search_across_types(client):
     assert 'id="cmdk"' in home and 'id="cmdk-open"' in home
 
 
+def test_autopilot_inbox_approve_and_dismiss(client):
+    """The /autopilot inbox shows proposals; approve applies the change, dismiss resolves it."""
+    from database.db_session import SessionLocal
+    from database.models import AutopilotAction, Campaign, Channel
+    from database.types import CampaignStatus
+
+    client.post("/channels/facebook", data={"channel_name": "P", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    db = SessionLocal()
+    ch = db.query(Channel).first()
+    cam = Campaign(user_id=ch.user_id, channel_id=ch.id, topic_name="Doc", total_episodes=10,
+                   current_episode=9, status=CampaignStatus.active)
+    db.add(cam)
+    db.commit()
+    db.refresh(cam)
+    extend = AutopilotAction(user_id=ch.user_id, channel_id=ch.id, campaign_id=cam.id, kind="extend",
+                             summary="Extend Doc to 13 episodes", evidence={"retention": 80},
+                             params={"total_episodes": 13})
+    dismiss = AutopilotAction(user_id=ch.user_id, channel_id=ch.id, campaign_id=cam.id, kind="successor",
+                              summary="Plan a successor", evidence={}, params={})
+    # A resolved row with no resolved_at must not crash the decision-log render.
+    legacy = AutopilotAction(user_id=ch.user_id, channel_id=ch.id, campaign_id=cam.id, kind="extend",
+                             summary="Legacy applied", evidence={}, params={}, status="applied")
+    db.add_all([extend, dismiss, legacy])
+    db.commit()
+    eid, did, cam_id = extend.id, dismiss.id, cam.id
+    db.close()
+
+    page = client.get("/autopilot").text
+    assert "Extend Doc to 13 episodes" in page and "Plan a successor" in page
+
+    assert client.post(f"/autopilot/{eid}/approve", follow_redirects=False).status_code == 303
+    assert client.post(f"/autopilot/{did}/dismiss", follow_redirects=False).status_code == 303
+    # Foreign action → 404 (ownership guard).
+    assert client.post("/autopilot/999999/approve", follow_redirects=False).status_code == 404
+
+    db = SessionLocal()
+    assert db.get(Campaign, cam_id).total_episodes == 13          # approve applied the extend
+    assert db.get(AutopilotAction, eid).status == "applied"
+    assert db.get(AutopilotAction, did).status == "dismissed"
+    db.close()
+
+
 def test_campaign_actions_preserve_channel_scope(client):
     """Start/Delete taken while scoped to a channel land back in that channel's list, not 'all'."""
     from database.db_session import SessionLocal
