@@ -10,8 +10,7 @@
 {# Campaign hub — jump to this campaign's scoped Assets / Tasks / settings. #}
 <div class="hub-tabs">
   <span class="hub-tab active">📊 Overview</span>
-  <a class="hub-tab" href="/assets?campaign={{ campaign.id }}">▦ Assets{% if asset_count.ready + asset_count.awaiting_review %} ({{ asset_count.ready + asset_count.awaiting_review }}){% endif %}</a>
-  <a class="hub-tab" href="/tasks?campaign={{ campaign.id }}">≣ Tasks</a>
+  <a class="hub-tab" href="/episodes?campaign={{ campaign.id }}">🎬 Episodes{% if asset_count.ready + asset_count.awaiting_review %} ({{ asset_count.ready + asset_count.awaiting_review }}){% endif %}</a>
   <a class="hub-tab" href="/campaigns/{{ campaign.id }}/edit">✎ Edit</a>
 </div>
 

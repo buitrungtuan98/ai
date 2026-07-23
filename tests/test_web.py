@@ -373,6 +373,54 @@ def test_api_search_across_types(client):
     assert 'id="cmdk"' in home and 'id="cmdk-open"' in home
 
 
+def test_campaign_actions_preserve_channel_scope(client):
+    """Start/Delete taken while scoped to a channel land back in that channel's list, not 'all'."""
+    from database.db_session import SessionLocal
+    from database.models import Campaign, Channel
+    from database.types import CampaignStatus
+
+    client.post("/channels/facebook", data={"channel_name": "P", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    db = SessionLocal()
+    ch = db.query(Channel).first()
+    cs = [Campaign(user_id=ch.user_id, channel_id=ch.id, topic_name=f"C{i}", total_episodes=3,
+                   status=CampaignStatus.pending) for i in range(3)]
+    db.add_all(cs)
+    db.commit()
+    for c in cs:
+        db.refresh(c)
+    chid, ids = ch.id, [c.id for c in cs]
+    db.close()
+
+    r = client.post(f"/campaigns/{ids[0]}/start", data={"scope_channel": str(chid)},
+                    follow_redirects=False)
+    assert r.headers["location"] == f"/campaigns?channel={chid}"
+    r2 = client.post(f"/campaigns/{ids[1]}/delete", data={"scope_channel": str(chid)},
+                     follow_redirects=False)
+    assert r2.headers["location"] == f"/campaigns?channel={chid}"
+    # No scope supplied → the plain list (unchanged behavior).
+    r3 = client.post(f"/campaigns/{ids[2]}/delete", follow_redirects=False)
+    assert r3.headers["location"] == "/campaigns"
+
+
+def test_review_and_track_entry_points_go_to_episode(client):
+    """Dashboard triage, the Asset (Review) card, and the Performance hub all point at the episode's
+    single home / the unified Episodes list — not scattered filtered grids."""
+    from database.db_session import SessionLocal
+    from database.models import Task
+
+    tid, _bid = _make_episode(client)  # AWAITING_REVIEW task + buffer
+    db = SessionLocal()
+    cam_id = db.get(Task, tid).campaign_id
+    db.close()
+
+    assert f'href="/episodes/{tid}"' in client.get("/").text           # dashboard triage → detail
+    assert f'href="/episodes/{tid}"' in client.get("/assets").text     # Review card → detail
+    perf = client.get(f"/campaigns/{cam_id}/performance").text
+    assert f'href="/episodes?campaign={cam_id}"' in perf               # hub Episodes tab
+    assert f'href="/tasks?campaign={cam_id}"' not in perf              # old Tasks tab removed
+
+
 def test_ownership_guard_404(client):
     assert client.post("/campaigns/99999/delete", follow_redirects=False).status_code == 404
 

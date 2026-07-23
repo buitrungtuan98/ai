@@ -414,6 +414,17 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
         .where(Campaign.user_id == user.id, BufferPoolItem.status == BufferStatus.awaiting_review)
         .order_by(BufferPoolItem.id.desc()).limit(8)
     ).all()
+    # Resolve each awaiting-review buffer item to its episode (Task) so triage links to the episode's
+    # single home rather than a filtered Asset Pool grid.
+    rev_pairs = {(i.campaign_id, i.episode_number) for i in attention_review}
+    review_ids: dict = {}
+    if rev_pairs:
+        for t in db.scalars(select(Task).where(
+                Task.user_id == user.id,
+                Task.campaign_id.in_({c for c, _ in rev_pairs}),
+                Task.episode_number.in_({e for _, e in rev_pairs}))):
+            if (t.campaign_id, t.episode_number) in rev_pairs:
+                review_ids[(t.campaign_id, t.episode_number)] = t.id
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -423,6 +434,7 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
             "health": _system_health(db),
             "counts": _task_counts(db, user.id),
             "attention_failed": attention_failed, "attention_review": attention_review,
+            "review_ids": review_ids,
             "scorecard": _scorecard(db, user.id), "next_publish": _next_publish(db, user.id),
             "camp_by_id": {c.id: c for c in campaigns},
             "chan_by_id": {c.id: c for c in channels},
@@ -852,6 +864,13 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
     }
 
 
+def _campaigns_redirect(channel_id) -> RedirectResponse:
+    """Back to the campaigns list, preserving the channel scope the operator was in (so an action
+    taken while filtered to a channel doesn't dump them back to 'all campaigns')."""
+    return RedirectResponse(f"/campaigns?channel={channel_id}" if channel_id else "/campaigns",
+                            status_code=303)
+
+
 @app.post("/campaigns")
 def create_campaign(user: CurrentUser, db: DbDep, form: dict = Depends(_campaign_form),
                     start_now: str = Form("")):
@@ -870,7 +889,7 @@ def create_campaign(user: CurrentUser, db: DbDep, form: dict = Depends(_campaign
         campaign.status = CampaignStatus.active
         db.commit()
         video_worker.hydrate_buffers(db)
-    return RedirectResponse("/campaigns", status_code=303)
+    return _campaigns_redirect(campaign.channel_id)  # land beside the new campaign's channel
 
 
 @app.get("/campaigns/{campaign_id}/edit", response_class=HTMLResponse)
@@ -895,22 +914,24 @@ def update_campaign(user: CurrentUser, db: DbDep, campaign=Depends(get_owned_cam
     campaign.total_episodes = form["total_episodes"]
     campaign.config_json = form["config"]
     db.commit()
-    return RedirectResponse("/campaigns", status_code=303)
+    return _campaigns_redirect(campaign.channel_id)
 
 
 @app.post("/campaigns/{campaign_id}/start")
-def start_campaign(campaign=Depends(get_owned_campaign), db=Depends(get_db)):
+def start_campaign(campaign=Depends(get_owned_campaign), db=Depends(get_db),
+                   scope_channel: str = Form("")):
     campaign.status = CampaignStatus.active
     db.commit()
     video_worker.hydrate_buffers(db)  # queue the first episodes immediately
-    return RedirectResponse("/campaigns", status_code=303)
+    return _campaigns_redirect(scope_channel.strip() or None)
 
 
 @app.post("/campaigns/{campaign_id}/delete")
-def delete_campaign(campaign=Depends(get_owned_campaign), db=Depends(get_db)):
+def delete_campaign(campaign=Depends(get_owned_campaign), db=Depends(get_db),
+                    scope_channel: str = Form("")):
     db.delete(campaign)
     db.commit()
-    return RedirectResponse("/campaigns", status_code=303)
+    return _campaigns_redirect(scope_channel.strip() or None)
 
 
 # ── Cloud Credentials ────────────────────────────────────────────────────────
@@ -1054,6 +1075,14 @@ def assets_page(request: Request, user: CurrentUser, db: DbDep,
     previewable = {i.id for i in items
                    if i.status in (BufferStatus.ready, BufferStatus.awaiting_review)
                    and i.video_path and os.path.exists(i.video_path)}
+    # Map each shown item to its episode (Task) so a card can link to the episode's single home.
+    task_by_ep: dict = {}
+    if items:
+        for t in db.scalars(select(Task).where(
+                Task.user_id == user.id,
+                Task.campaign_id.in_({i.campaign_id for i in items}),
+                Task.episode_number.in_({i.episode_number for i in items}))):
+            task_by_ep[(t.campaign_id, t.episode_number)] = t.id
     scope_qs = (f"campaign={campaign}&" if campaign else (f"channel={channel}&" if channel else ""))
     if q:  # keep the search term on pager links too
         from urllib.parse import quote
@@ -1069,6 +1098,7 @@ def assets_page(request: Request, user: CurrentUser, db: DbDep,
         request, "assets.html",
         {"request": request, "user": user, "items": items, "nav": "assets",
          "camp_by_id": camp_by_id, "chan_by_id": chan_by_id, "previewable": previewable,
+         "task_by_ep": task_by_ep,
          "scope_campaign": camp_by_id.get(campaign) if campaign else None,
          "scope_channel": chan_by_id.get(channel) if channel else None,
          "status": status, "status_counts": status_counts, "total_all": total_all,

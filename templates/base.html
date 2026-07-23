@@ -39,7 +39,7 @@
         <p class="nav-group">Content</p>
         <a href="/episodes{{ scope_q }}" title="Episodes" class="{{ 'active' if nav=='episodes' else '' }}"><span class="ico">🎬</span> <span class="nav-text">Episodes</span></a>
         <a href="/campaigns{{ scope_q }}" title="Campaigns" class="{{ 'active' if nav=='campaigns' else '' }}"><span class="ico">▤</span> <span class="nav-text">Campaigns</span></a>
-        <a href="/assets{{ scope_q }}" title="Asset Pool" class="{{ 'active' if nav=='assets' else '' }}"><span class="ico">▦</span> <span class="nav-text">Asset Pool</span> <span class="nav-badge review" data-badge="awaiting_review" hidden></span></a>
+        <a href="/assets{{ scope_q }}" title="Review — rendered videos awaiting approval" class="{{ 'active' if nav=='assets' else '' }}"><span class="ico">▦</span> <span class="nav-text">Review</span> <span class="nav-badge review" data-badge="awaiting_review" hidden></span></a>
         <a href="/channels" title="Channels" class="{{ 'active' if nav=='channels' else '' }}"><span class="ico">◉</span> <span class="nav-text">Channels</span></a>
         <p class="nav-group">Setup</p>
         <a href="/credentials" title="Credentials" class="{{ 'active' if nav=='credentials' else '' }}"><span class="ico">⚿</span> <span class="nav-text">Credentials</span></a>
@@ -64,7 +64,7 @@
   <nav class="tabbar" aria-label="Primary (mobile)">
     <a href="/" class="{{ 'active' if nav=='dashboard' else '' }}"><span class="ico">▚</span><span>Home</span></a>
     <a href="/episodes{{ scope_q }}" class="{{ 'active' if nav=='episodes' else '' }}"><span class="ico">🎬</span><span>Episodes</span></a>
-    <a href="/assets{{ scope_q }}" class="{{ 'active' if nav=='assets' else '' }}"><span class="ico">▦</span><span>Assets</span><span class="nav-badge review" data-badge="awaiting_review" hidden></span></a>
+    <a href="/assets{{ scope_q }}" class="{{ 'active' if nav=='assets' else '' }}"><span class="ico">▦</span><span>Review</span><span class="nav-badge review" data-badge="awaiting_review" hidden></span></a>
     <a href="/campaigns{{ scope_q }}" class="{{ 'active' if nav=='campaigns' else '' }}"><span class="ico">▤</span><span>Campaigns</span></a>
   </nav>
 

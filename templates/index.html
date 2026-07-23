@@ -40,8 +40,8 @@
     <li>
       <span class="tri-dot failed"></span>
       <div class="grow">
-        <b>{{ camp.topic_name if camp else 'C' ~ t.campaign_id }} · Ep {{ t.episode_number }}</b> failed
-        <div class="meta">{{ (t.error_message or 'Render failed — open Task Logs for details.')[:120] }}</div>
+        <b><a href="/episodes/{{ t.id }}">{{ camp.topic_name if camp else 'C' ~ t.campaign_id }} · Ep {{ t.episode_number }}</a></b> failed
+        <div class="meta">{{ (t.error_message or 'Render failed — open the episode for details.')[:120] }}</div>
       </div>
       <form class="retry-form" data-task="{{ t.id }}"><button class="btn ghost sm" type="submit">↻ Retry</button></form>
     </li>
@@ -50,11 +50,12 @@
     {% set camp = camp_by_id.get(i.campaign_id) %}
     <li>
       <span class="tri-dot review"></span>
+      {% set tid = review_ids.get((i.campaign_id, i.episode_number)) %}
       <div class="grow">
-        <b>{{ camp.topic_name if camp else 'C' ~ i.campaign_id }} · Ep {{ i.episode_number }}</b> awaiting your review
+        <b>{% if tid %}<a href="/episodes/{{ tid }}">{{ camp.topic_name if camp else 'C' ~ i.campaign_id }} · Ep {{ i.episode_number }}</a>{% else %}{{ camp.topic_name if camp else 'C' ~ i.campaign_id }} · Ep {{ i.episode_number }}{% endif %}</b> awaiting your review
         <div class="meta">{{ i.metadata_json.get('title','') }}</div>
       </div>
-      <a class="btn sm" href="/assets?campaign={{ i.campaign_id }}">Review →</a>
+      <a class="btn sm" href="{{ ('/episodes/' ~ tid) if tid else ('/assets?campaign=' ~ i.campaign_id) }}">Review →</a>
     </li>
     {% endfor %}
   </ul>

@@ -612,6 +612,20 @@ see. All additive — no route renamed/removed, Task Logs & Asset Pool kept as s
 - Verified: 171 tests (3 new — pager filtered-count + clean URLs, timeline completed-vs-in-progress,
   retry publish-vs-render flash), ruff clean, docs guard green.
 
+## Role clarity + scope-preserving actions `DONE`
+- **Campaign actions keep the channel scope**: create/update/start/delete redirect to
+  `/campaigns?channel=N` (list forms carry a hidden `scope_channel`; create/edit use the campaign's
+  own channel) — an action taken while filtered no longer dumps you back to "all campaigns".
+- **Unified entry points**: dashboard triage items, the Task-Logs AWAITING_REVIEW cell, the Review
+  cards, and the campaign card all link to the episode's single home (`/episodes/{id}`); the
+  Performance hub's Assets+Tasks tabs collapse into one **Episodes** tab.
+- **Asset Pool → "Review"**: nav label + page heading renamed (route stays `/assets`) to name its
+  job — the video-review workbench — distinct from Episodes (stage tracking) and Task Logs (live).
+  ADR-039. No page/route removed.
+- Verified: 173 tests (2 new — campaign-action scope preservation incl. no-scope default; review/track
+  entry points → episode + Performance Episodes tab), ruff clean, docs guard green; nav rename, campaign
+  card, and live scope-preserving Start redirect verified in a browser.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

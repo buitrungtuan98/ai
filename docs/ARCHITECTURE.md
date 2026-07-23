@@ -709,3 +709,22 @@ scope in the URL (authoritative) with localStorage only as a convenience layer p
 "linkable, no-hidden-state" property of ADR-034 while making the scope feel persistent as you click
 around. Merging rather than replacing the query string means switching channel doesn't silently blow
 away the filter you were using.
+
+### ADR-039 — Clear roles: Review vs Episodes, scope-preserving actions, unified entry points
+**Decision:** post-restructure cleanup so the three episode-oriented surfaces read as distinct jobs.
+(1) The Asset Pool nav label + page heading are renamed **"Review"** (route stays `/assets`) — it is
+the video-review workbench (grid + QC + approve/reject/publish + J/K/A/R), distinct from **Episodes**
+(browse/track every episode by stage) and **Task Logs** (live render feed). (2) Entry points that used
+to scatter to filtered grids now point at the episode's single home or the unified list: the dashboard
+triage items link to `/episodes/{id}`, the Task-Logs AWAITING_REVIEW cell opens the episode, the Review
+cards link to the episode, and the Performance hub's two list tabs (Assets + Tasks) collapse into one
+**Episodes** tab. The campaign card's Assets+Tasks buttons likewise become one Episodes button.
+(3) Campaign actions (create/update/start/delete) preserve the channel scope in their redirect
+(`/campaigns?channel=N`) via a hidden `scope_channel` field on the list forms and the campaign's own
+channel on the create/edit forms — so an action taken while filtered no longer dumps you back to "all".
+**Why:** the restructure left three lists of episodes and several "review" destinations; the pages
+weren't redundant (grid-review vs stage-tracking vs live-feed) but the entry points didn't say so, which
+read as fragmentation. Renaming to "Review" names the job; routing every "this needs me" link to the
+episode's one home removes the "which page?" hop; and scope-preserving redirects finish the ADR-038
+promise that the channel filter genuinely persists through the actions you take inside it. No page or
+route was removed — only labels and link targets changed, so muscle memory and tests hold.
