@@ -714,7 +714,7 @@ and macros `sched_facts` / `now_next` feed all four surfaces. ADR-043.
   planner checked in a browser.
 - Verified overall: 176 tests, ruff clean, docs guard green.
 
-## Channel autopilot — manage each channel on the data, zero-cost `WIP`
+## Channel autopilot — manage each channel on the data, zero-cost `DONE`
 Opt-in, per-channel. Deterministic rules decide WHEN, AI decides WHAT, the operator picks HOW MUCH
 autonomy (Off / Copilot / Autopilot). Judged against each channel's own retention baseline. Runs in
 the existing scheduler daemon on a per-channel cadence (default 3h, configurable). ADR-044.
@@ -745,7 +745,20 @@ the existing scheduler daemon on a per-channel cadence (default 3h, configurable
   the dashboard triage. Verified: 188 tests (5 new — proposals by class, idempotency + apply extend,
   wind-down + successor apply, HTTP approve/dismiss + ownership + no-crash on legacy rows), ruff
   clean, docs guard green; inbox checked in a browser.
-- Phase IV — full-auto auto-applies proposals + weekly strategist call + guardrails `TODO`
+- **Phase IV — full-auto + weekly strategist + guardrails** `DONE`: in Full-auto mode the pass now
+  auto-applies its structural proposals (`autopilot_autoapply_channel`) — extend/wind-down
+  immediately, successor with guardrails (respects the `max_active` cap, ≤1 per pass, and the new
+  campaign starts **review-first "training wheels"** so its first videos wait for review even in
+  full-auto). Creative changes stay operator-confirmed: a once-weekly strategist
+  (`autopilot_strategist_channel`) makes ONE Gemini call (`ai_engine.suggest_channel_tune`) —
+  guarded by weekly cadence, a Gemini key, AND a daily-budget reserve (skips above 80% so rendering
+  is never starved) — and files a suggest-only "tune" (caption/music/rate). Never deletes; one click
+  back to Off freezes everything. Verified: 191 tests (3 new — full-auto apply + training wheels,
+  max-active cap, strategist files/guards/applies), ruff clean, docs guard green; all pages 200 after
+  the changes.
+- Verified overall: 191 tests, ruff clean, docs guard green. Zero-cost holds — review reuses the
+  render pipeline's QC verdict (0 AI calls), proposals/apply are deterministic, and the strategist is
+  ~1 budget-guarded call/week per channel.
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation

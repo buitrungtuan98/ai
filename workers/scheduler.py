@@ -24,7 +24,7 @@ import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from core.cleanup import sweep_orphans
 from core.config import settings
@@ -523,24 +523,36 @@ def autopilot_propose_channel(db, channel, now: datetime | None = None) -> int:
     return filed
 
 
-def _create_successor(db, parent) -> int:
-    """A successor = a fresh PENDING clone of a proven campaign's config (same persona/voice/format/
-    schedule), titled "<parent> II", for the operator to review and start. Deterministic, 0-AI,
-    reversible. Returns the new campaign id."""
+def _create_successor(db, parent, *, auto_start: bool = False, review_first: bool = False) -> int:
+    """A successor = a clone of a proven campaign's config (same persona/voice/format/schedule),
+    titled "<parent> II". Copilot-approved → PENDING for the operator to start. Full-auto →
+    auto_start + review_first: it begins rendering but its first videos wait for review ("training
+    wheels", ADR-044) even in full-auto, so the operator sees the new campaign's quality before it
+    ever self-publishes. Deterministic, 0-AI, reversible. Returns the new campaign id."""
+    config = dict(parent.config_json or {})
+    if review_first:
+        config["auto_publish"] = False  # training wheels: gate the new campaign's output on review
     new = Campaign(user_id=parent.user_id, channel_id=parent.channel_id,
                    topic_name=(parent.topic_name + " II")[:255],
-                   total_episodes=parent.total_episodes, status=CampaignStatus.pending,
-                   config_json=dict(parent.config_json or {}))
+                   total_episodes=parent.total_episodes,
+                   status=CampaignStatus.active if auto_start else CampaignStatus.pending,
+                   config_json=config)
     db.add(new)
     db.commit()
     db.refresh(new)
+    if auto_start:
+        try:
+            video_worker.hydrate_campaign(db, new)
+        except Exception:  # noqa: BLE001
+            logger.warning("successor hydration failed for campaign %s", new.id, exc_info=True)
     return new.id
 
 
-def apply_autopilot_action(db, action) -> bool:
+def apply_autopilot_action(db, action, *, auto_start_successor: bool = False,
+                           review_first_successor: bool = False) -> bool:
     """Apply a proposed action — reversible config changes only, never a delete. Marks the row
-    applied (or failed) and returns success. Shared by the Copilot approve route and (Phase IV)
-    full-auto."""
+    applied (or failed) and returns success. Shared by the Copilot approve route (defaults: a
+    successor is created PENDING) and full-auto (auto_start + review_first)."""
     campaign = db.get(Campaign, action.campaign_id) if action.campaign_id else None
     try:
         if action.kind in ("extend", "wind_down"):
@@ -553,10 +565,20 @@ def apply_autopilot_action(db, action) -> bool:
                     video_worker.hydrate_campaign(db, campaign)  # render the newly-allowed episodes
                 except Exception:  # noqa: BLE001
                     logger.warning("extend hydration failed for campaign %s", campaign.id, exc_info=True)
+        elif action.kind == "tune":
+            if campaign is None:
+                raise ValueError("campaign gone")
+            cfg = dict(campaign.config_json or {})
+            for k in ("caption_theme", "music_mood", "rate_pct"):
+                if k in (action.params or {}):
+                    cfg[k] = action.params[k]
+            campaign.config_json = cfg
+            db.commit()
         elif action.kind == "successor":
             if campaign is None:
                 raise ValueError("campaign gone")
-            new_id = _create_successor(db, campaign)
+            new_id = _create_successor(db, campaign, auto_start=auto_start_successor,
+                                       review_first=review_first_successor)
             action.params = {**(action.params or {}), "created_campaign_id": new_id}
         else:
             raise ValueError(f"unknown action kind {action.kind!r}")
@@ -574,6 +596,95 @@ def apply_autopilot_action(db, action) -> bool:
         return False
 
 
+def autopilot_autoapply_channel(db, channel) -> dict:
+    """Full-auto only: apply the proposals just filed, with guardrails. Structural, reversible
+    actions (extend / wind-down / successor) auto-apply; a successor respects the `max_active` cap
+    (default 2) and at most one is created per pass; creative 'tune' proposals are left for the
+    operator (creative direction stays human-confirmed). Never deletes anything."""
+    cfg = channel.autopilot_json or {}
+    max_active = int(cfg.get("max_active", 2) or 2)
+    applied = {"extend": 0, "wind_down": 0, "successor": 0}
+    successors = 0
+    for a in db.scalars(select(AutopilotAction).where(
+            AutopilotAction.channel_id == channel.id, AutopilotAction.status == "proposed")
+            .order_by(AutopilotAction.id)).all():
+        if a.kind == "successor":
+            active_n = db.scalar(select(func.count()).select_from(Campaign).where(
+                Campaign.channel_id == channel.id, Campaign.status == CampaignStatus.active)) or 0
+            if active_n >= max_active or successors >= 1:
+                continue  # cap reached — leave it as a proposal for the operator
+            if apply_autopilot_action(db, a, auto_start_successor=True, review_first_successor=True):
+                successors += 1
+                applied["successor"] += 1
+        elif a.kind in ("extend", "wind_down"):
+            if apply_autopilot_action(db, a):
+                applied[a.kind] += 1
+    return applied
+
+
+def autopilot_strategist_channel(db, user, channel, respect_cadence: bool = True) -> int:
+    """Weekly: ONE Gemini call suggesting a small creative tweak (caption theme / music mood / TTS
+    rate), filed as a suggest-only 'tune' proposal (creative direction always stays operator-
+    confirmed, even in full-auto). Guarded three ways: weekly cadence (Redis NX), a Gemini key, and
+    the daily-budget reserve (skips above 80% so rendering is never starved). Returns 0 or 1."""
+    from core import autopilot
+    from core.usage import ai_calls_today
+
+    if respect_cadence:
+        try:
+            if not task_queue.conn.set(f"autopilot:strat:{channel.id}", "1", nx=True, ex=7 * 86400):
+                return 0
+        except Exception:  # noqa: BLE001
+            pass
+    key = user.gemini_api_key or settings.GEMINI_API_KEY
+    if not key:
+        return 0
+    budget = (user.settings_json or {}).get("ai_daily_budget") or settings.GEMINI_DAILY_BUDGET
+    if budget and ai_calls_today() >= budget * 0.8:
+        return 0  # budget reserve — strategy never eats the quota rendering needs
+    campaigns = db.scalars(select(Campaign).where(
+        Campaign.channel_id == channel.id, Campaign.status == CampaignStatus.active)).all()
+    if not campaigns:
+        return 0
+    target = campaigns[0]
+    if db.scalar(select(AutopilotAction).where(
+            AutopilotAction.campaign_id == target.id, AutopilotAction.kind == "tune",
+            AutopilotAction.status == "proposed").limit(1)):
+        return 0  # don't stack tune proposals
+    cls = autopilot.classify_campaigns(db, campaigns)
+    scorecard = {
+        "channel": channel.channel_name,
+        "playbook": (target.learning_json or {}).get("playbook"),
+        "campaigns": [{"topic": c.topic_name, "verdict": cls[c.id]["label"],
+                       "retention": cls[c.id]["retention"]} for c in campaigns],
+        "current": {k: (target.config_json or {}).get(k)
+                    for k in ("caption_theme", "music_mood", "rate_pct")},
+    }
+    try:
+        from core import ai_engine
+
+        tune = ai_engine.suggest_channel_tune(
+            scorecard=scorecard, api_key=key, model=user.gemini_model or settings.GEMINI_MODEL)
+    except Exception:  # noqa: BLE001 — a strategist hiccup must not disturb the operations loop
+        logger.warning("Autopilot strategist failed for channel %s", channel.id, exc_info=True)
+        return 0
+    params = {}
+    if tune.caption_theme:
+        params["caption_theme"] = tune.caption_theme
+    if tune.music_mood:
+        params["music_mood"] = tune.music_mood
+    if tune.rate_pct is not None:
+        params["rate_pct"] = tune.rate_pct
+    if not params:
+        return 0  # the AI chose to change nothing
+    db.add(AutopilotAction(
+        user_id=user.id, channel_id=channel.id, campaign_id=target.id, kind="tune",
+        summary=(f"Try a creative tweak on “{target.topic_name}”: {tune.rationale}")[:300],
+        evidence={"rationale": tune.rationale}, params=params))
+    db.commit()
+    return 1
+
+
 def autopilot_pass(db=None, now: datetime | None = None, respect_cadence: bool = True) -> dict:
     """One autopilot cycle across every channel that has it enabled. Per-channel cadence is enforced
     with a Redis NX guard (default 3h, operator-set) so a frequent scheduler tick doesn't over-run a
@@ -583,7 +694,7 @@ def autopilot_pass(db=None, now: datetime | None = None, respect_cadence: bool =
     own = db is None
     db = db or SessionLocal()
     summary: dict = {"channels": 0, "approved": 0, "rejected": 0, "recommended": 0,
-                     "escalated": 0, "retried": 0, "caught_up": 0, "proposed": 0}
+                     "escalated": 0, "retried": 0, "caught_up": 0, "proposed": 0, "auto_applied": 0}
     try:
         channels = db.scalars(select(Channel)).all()
         for ch in channels:
@@ -603,6 +714,8 @@ def autopilot_pass(db=None, now: datetime | None = None, respect_cadence: bool =
                 caught = autopilot_catchup_channel(db, ch, now=now)
                 retried = autopilot_retry_channel(db, ch)
                 proposed = autopilot_propose_channel(db, ch, now=now)
+                proposed += autopilot_strategist_channel(db, db.get(User, ch.user_id), ch)
+                autoapplied = autopilot_autoapply_channel(db, ch) if mode == "autopilot" else {}
             except Exception:  # noqa: BLE001 — one channel's fault must not stop the others
                 logger.warning("Autopilot failed for channel %s", ch.id, exc_info=True)
                 db.rollback()
@@ -613,16 +726,19 @@ def autopilot_pass(db=None, now: datetime | None = None, respect_cadence: bool =
             summary["retried"] += retried
             summary["caught_up"] += caught
             summary["proposed"] += proposed
-            acted = r["approved"] + r["rejected"] + retried + caught
+            n_applied = sum(autoapplied.values())
+            summary["auto_applied"] += n_applied
+            acted = r["approved"] + r["rejected"] + retried + caught + n_applied
             if acted or proposed:
-                _autopilot_notify(db, ch, r, retried, caught, proposed)
+                _autopilot_notify(db, ch, r, retried, caught, proposed, n_applied)
         return summary
     finally:
         if own:
             db.close()
 
 
-def _autopilot_notify(db, channel, review: dict, retried: int, caught: int, proposed: int = 0) -> None:
+def _autopilot_notify(db, channel, review: dict, retried: int, caught: int, proposed: int = 0,
+                      auto_applied: int = 0) -> None:
     """Tell the operator what their autopilot did this cycle (Telegram), if anything material did."""
     user = db.get(User, channel.user_id)
     if user is None:
@@ -638,6 +754,8 @@ def _autopilot_notify(db, channel, review: dict, retried: int, caught: int, prop
         bits.append(f"caught up {caught} missed slot(s)")
     if retried:
         bits.append(f"retried {retried} failed render(s)")
+    if auto_applied:
+        bits.append(f"applied {auto_applied} strategy change(s)")
     if proposed:
         bits.append(f"filed {proposed} proposal(s) — review under Autopilot")
     if bits:

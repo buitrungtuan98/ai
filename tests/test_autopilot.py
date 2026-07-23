@@ -325,3 +325,77 @@ def test_apply_wind_down_and_successor():
     assert new.topic_name.endswith(" II")
     db.close()
 
+
+# ── Phase IV: full-auto auto-apply + guardrails + strategist ──────────────────
+def test_full_auto_applies_with_guardrails():
+    from database.models import AutopilotAction, Campaign
+    from database.types import CampaignStatus
+    from workers import scheduler
+
+    db, user, ch, camp = _seed_ch("autopilot")
+    camp.config_json = {"auto_publish": True, "language": "vi"}
+    db.commit()
+    ext = AutopilotAction(user_id=user.id, channel_id=ch.id, campaign_id=camp.id, kind="extend",
+                          summary="extend", evidence={}, params={"total_episodes": 30})
+    suc = AutopilotAction(user_id=user.id, channel_id=ch.id, campaign_id=camp.id, kind="successor",
+                          summary="successor", evidence={}, params={})
+    db.add_all([ext, suc])
+    db.commit()
+
+    applied = scheduler.autopilot_autoapply_channel(db, ch)
+    assert applied["extend"] == 1 and applied["successor"] == 1
+    db.refresh(camp)
+    assert camp.total_episodes == 30
+    # The auto-created successor starts active but with training wheels: review-first, not auto-publish.
+    new = db.query(Campaign).filter(Campaign.topic_name.endswith(" II")).one()
+    assert new.status == CampaignStatus.active and new.config_json["auto_publish"] is False
+    db.close()
+
+
+def test_full_auto_successor_respects_max_active_cap():
+    from database.models import AutopilotAction, Campaign
+    from workers import scheduler
+
+    db, user, ch, camp = _seed_ch("autopilot")
+    ch.autopilot_json = {"mode": "autopilot", "max_active": 1}  # already at the cap (camp is active)
+    db.commit()
+    suc = AutopilotAction(user_id=user.id, channel_id=ch.id, campaign_id=camp.id, kind="successor",
+                          summary="successor", evidence={}, params={})
+    db.add(suc)
+    db.commit()
+
+    assert scheduler.autopilot_autoapply_channel(db, ch)["successor"] == 0  # capped → not applied
+    db.refresh(suc)
+    assert suc.status == "proposed"  # left for the operator
+    assert db.query(Campaign).filter(Campaign.topic_name.endswith(" II")).count() == 0
+    db.close()
+
+
+def test_strategist_files_tune_proposal_guarded(monkeypatch):
+    from core import ai_engine
+    from core.ai_engine import ChannelTune
+    from core.config import settings
+    from database.models import AutopilotAction
+    from workers import scheduler
+
+    db, user, ch, camp = _seed_ch("autopilot")
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "k")
+    monkeypatch.setattr(settings, "GEMINI_DAILY_BUDGET", None)
+    monkeypatch.setattr(ai_engine, "suggest_channel_tune",
+                        lambda **k: ChannelTune(caption_theme="neon", rationale="neon lifts retention"))
+
+    assert scheduler.autopilot_strategist_channel(db, user, ch, respect_cadence=False) == 1
+    tune = db.query(AutopilotAction).filter_by(kind="tune").one()
+    assert tune.status == "proposed" and tune.params["caption_theme"] == "neon"
+    # Applying a tune mutates the campaign config (creative direction stays operator-confirmed).
+    assert scheduler.apply_autopilot_action(db, tune) is True
+    db.refresh(camp)
+    assert camp.config_json["caption_theme"] == "neon"
+
+    # No Gemini key → the strategist stands down (0 AI calls, no proposal).
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", None)
+    db.query(AutopilotAction).delete()
+    db.commit()
+    assert scheduler.autopilot_strategist_channel(db, user, ch, respect_cadence=False) == 0
+    db.close()
+
