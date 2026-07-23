@@ -99,7 +99,7 @@
     <table>
       <thead><tr><th>Ep</th><th>Synopsis</th><th>Status</th><th>Variant</th><th>Retention</th><th>Views</th><th>Likes</th><th>Link</th></tr></thead>
       <tbody>
-        {% for t in episodes %}
+        {% for t in episodes_page %}
         {% set ret = t.stats_json.get('avg_pct_viewed') if t.stats_json else none %}
         <tr {% if t.id == best_id %}class="win-row"{% endif %}>
           <td>{{ t.episode_number }}{% if t.id == best_id %} 🏆{% endif %}</td>
@@ -115,6 +115,13 @@
       </tbody>
     </table>
   </div>
+  {% if pages > 1 %}
+  <div class="pager">
+    {% if page > 1 %}<a class="btn ghost sm" href="/campaigns/{{ campaign.id }}/performance?page={{ page - 1 }}">← Newer</a>{% else %}<span class="btn ghost sm pager-off">← Newer</span>{% endif %}
+    <span class="meta">Page {{ page }} of {{ pages }}</span>
+    {% if page < pages %}<a class="btn ghost sm" href="/campaigns/{{ campaign.id }}/performance?page={{ page + 1 }}">Older →</a>{% else %}<span class="btn ghost sm pager-off">Older →</span>{% endif %}
+  </div>
+  {% endif %}
   <p class="hint mt-sm">Stats refresh daily for videos 2–30 days old (YouTube Analytics / Facebook insights).</p>
 </div>
 {% endblock %}

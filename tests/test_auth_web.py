@@ -96,7 +96,7 @@ def test_invalid_token_is_401(mt_client, monkeypatch):
 def test_bearer_header_still_works(mt_client, monkeypatch):
     _fake_verify(monkeypatch, uid="api-user")
     r = mt_client.get("/api/tasks", headers={"Authorization": "Bearer some-token"})
-    assert r.status_code == 200 and r.json() == {"tasks": []}
+    assert r.status_code == 200 and r.json() == {"tasks": [], "page": 1, "pages": 1, "total": 0}
 
 
 def test_sign_in_with_google_id_token_unit(monkeypatch):

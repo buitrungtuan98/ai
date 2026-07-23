@@ -444,3 +444,51 @@ with zero operator action. This also fixed four smaller bugs found in the audit:
 identity card bound to the wrong form in multi-tenant mode (now a stable id), the login page ignored the
 saved theme (added the no-FOUC head script), and the skip-link revealed on mobile taps (now
 `:focus-visible`, keyboard-only).
+
+### ADR-025 — Server-side pagination + filtering, immutable static caching, visibility-aware polling
+**Decision:** the two unbounded list surfaces now paginate on the server. The Asset Pool takes
+`?status=`/`?page=` and renders 24 cards per page behind filter chips whose counts are true
+per-status tallies over the *whole* scope (a `GROUP BY status` query, not a count of the current
+page); the chips are plain `<a>` links (URL is the single source of truth — shareable, back-button
+correct, no JS state), replacing the old client-side buttons that only hid already-loaded DOM. The
+Performance episode table paginates the same way (20 rows/page, newest first) while its aggregates —
+A/B variant summary, retention sparkline, best-episode 🏆 — keep reading the *full* episode list, so
+pagination never distorts a metric. Page clamping (`min(max(page,1),pages)`) makes out-of-range URLs
+safe. Separately, `CachedStaticFiles` sends `Cache-Control: public, max-age=31536000, immutable` but
+**only** for requests carrying the `?v=` content hash — a plain `/static/app.css` request stays
+uncached — so hashed URLs are cached forever and non-versioned fetches never go stale. Finally both
+JS pollers became visibility-aware: they clear their timer on `visibilitychange` when the tab is
+hidden and refresh immediately on return, and the task poller additionally adapts its interval (fast
+while a job is in flight, relaxed once every task is terminal).
+**Why:** the list pages loaded every asset/episode a campaign ever produced into one DOM — fine at a
+handful, a real cost once a long-running channel accumulates hundreds. Bounding the query at the
+database is the only fix that scales; doing the counts as a scoped `GROUP BY` keeps the chips honest
+regardless of which page you're on. Keeping the filter in the URL (rather than JS) makes every view
+linkable and lets the server send only the rows it means to show. The immutable-cache header is the
+serving-side complement to ADR-024's content hash: the hash makes each build a new URL, and
+`immutable` tells the browser it never needs to revalidate that URL — together they give
+zero-revalidation caching that is still instantly correct on deploy. Visibility-aware polling stops a
+backgrounded tab from hitting `/api/tasks` and `/api/summary` forever; the adaptive interval spends
+requests where they matter (an active render) and backs off when nothing is happening — meaningful on
+a single CPU-only box. ADR-025 deliberately deferred paginating Task Logs (a *live* surface, unlike
+these two server-rendered pages); ADR-026 revisits that.
+
+### ADR-026 — Paginating the live Task Logs feed (server-side page + search + scope)
+**Decision:** Task Logs — the one client-rendered, continuously-polled table — now paginates on the
+server too. `/api/tasks` gained `?page=` (25/page, newest first), `?q=` (SQL `ilike` over id / status
+/ campaign topic / channel name), and `?campaign=` scope, and it returns `{tasks, page, pages, total}`;
+the hard `LIMIT 50` that previously *hid* all older history is gone. `app.js` drives it: a debounced
+search box and a Newer/Older pager that both re-issue the poll, a monotonic request-sequence guard so a
+slow in-flight poll can never overwrite the result of a newer click, and it adopts the server's clamped
+`page` from every response. The adaptive/visibility polling from ADR-025 is unchanged, and now has a
+pleasant side effect — history pages contain only terminal tasks, so the poller automatically relaxes
+to the slow interval while you browse them. **Why:** the earlier deferral was wrong once the real
+constraint was named. The client filter and the `LIMIT 50` meant search and history both silently
+stopped at the 50 newest rows — a long-running channel's older failures were simply unreachable and
+unsearchable. A live table can't hold unbounded history in the DOM, so the only correct fix is to move
+paging, search *and* scope into SQL where they span the whole history, and to keep the browser holding
+just one page. Search moved server-side rather than staying a client convenience specifically so it
+searches everything, not the 25 rows currently loaded; doing it in SQL also handles the Vietnamese
+topic text the operator actually types. The request-sequence guard is the one piece a static paginated
+page doesn't need — on a table that also refreshes itself every few seconds, without it a background
+poll racing a pager click would snap the user back to the wrong page.

@@ -698,6 +698,42 @@ def test_api_tasks_returns_names_and_transparency_fields(client):
     assert data["duration_s"] == 750 and data["can_retry"] is False
 
 
+def test_api_tasks_pagination_and_search(client):
+    """History is server-paginated (newest first) and search/scope run in SQL over ALL of it."""
+    from database.db_session import SessionLocal
+    from database.models import Task
+    from database.types import TaskStatus
+
+    cam = _seed_campaign(client)
+    db = SessionLocal()
+    for ep in range(1, 31):  # 30 episodes → two pages of 25
+        db.add(Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=ep,
+                    status=TaskStatus.COMPLETED, progress_pct=100))
+    db.commit()
+    db.close()
+
+    p1 = client.get("/api/tasks").json()
+    assert p1["total"] == 30 and p1["pages"] == 2 and p1["page"] == 1
+    assert len(p1["tasks"]) == 25
+    assert p1["tasks"][0]["episode"] == 30  # newest first
+
+    p2 = client.get("/api/tasks?page=2").json()
+    assert p2["page"] == 2 and len(p2["tasks"]) == 5
+
+    # Out-of-range page clamps to the last page rather than erroring.
+    assert client.get("/api/tasks?page=99").json()["page"] == 2
+
+    # Search spans the whole history, not just the first page.
+    hit = client.get("/api/tasks?q=Space").json()
+    assert hit["total"] == 30
+    assert client.get("/api/tasks?q=completed").json()["total"] == 30
+    assert client.get("/api/tasks?q=no-such-topic").json()["total"] == 0
+
+    # Scope filter narrows to one campaign.
+    assert client.get(f"/api/tasks?campaign={cam.id}").json()["total"] == 30
+    assert client.get("/api/tasks?campaign=999999").json()["total"] == 0
+
+
 def test_api_summary_snapshot(client):
     """The live snapshot feeding the header attention badge + dashboard auto-refresh reuses the
     dashboard helpers, so its counts match a full reload."""

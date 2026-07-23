@@ -1,10 +1,19 @@
-// Minimal AJAX polling for the Real-Time Task Logs panel (no external libs, CSP-friendly).
+// AJAX driver for the Real-Time Task Logs panel (no external libs, CSP-friendly).
+// Server-side paginated + searched + scoped: page 1 carries the live jobs; older pages walk the
+// full history. Search and scope run in SQL, so they cover every task, not just the current page.
 (function () {
   var tbody = document.getElementById("task-rows");
   if (!tbody) return;
   var filterEl = document.getElementById("task-filter");
-  var scopeCampaign = tbody.dataset.scopeCampaign ? Number(tbody.dataset.scopeCampaign) : null;
+  var pagerEl = document.getElementById("task-pager");
+  var scopeCampaign = tbody.dataset.scopeCampaign || "";
+
+  var page = 1;
+  var query = "";
+  var meta = { page: 1, pages: 1, total: 0 };
   var lastTasks = [];
+  var seq = 0;              // request token — ignore responses that arrive out of order
+  var searchTimer = null;
 
   var STATUS_LABELS = {
     PENDING_QUEUE: "Pending Queue",
@@ -51,19 +60,11 @@
     return '<button class="btn ghost sm" data-retry="' + t.id + '">↻ Retry</button>';
   }
 
-  function matches(t, q) {
-    return (t.id + " " + (t.topic || "") + " " + (t.channel || "") + " " + (t.status || ""))
-      .toLowerCase().indexOf(q) >= 0;
-  }
-
-  function render(allTasks) {
-    var scoped = scopeCampaign ? allTasks.filter(function (t) { return t.campaign_id === scopeCampaign; }) : allTasks;
-    var q = (filterEl && filterEl.value.trim().toLowerCase()) || "";
-    var tasks = q ? scoped.filter(function (t) { return matches(t, q); }) : scoped;
+  function renderRows(tasks) {
     if (!tasks.length) {
       tbody.innerHTML = '<tr><td colspan="7"><div class="empty">' +
-        (q
-          ? '<span class="empty-ico">🔎</span><h3>No matching tasks</h3><p>No task matches “' + esc(q) + '”.</p>'
+        (query
+          ? '<span class="empty-ico">🔎</span><h3>No matching tasks</h3><p>No task matches “' + esc(query) + '”.</p>'
           : '<span class="empty-ico">≣</span><h3>No tasks yet</h3>' +
             '<p>Start a campaign to begin rendering — episodes will stream in here live.</p>') +
         "</div></td></tr>";
@@ -91,6 +92,20 @@
       .join("");
   }
 
+  function renderPager() {
+    if (!pagerEl) return;
+    if (meta.pages <= 1) { pagerEl.innerHTML = ""; return; }
+    var newer = meta.page > 1
+      ? '<button class="btn ghost sm" data-page="' + (meta.page - 1) + '">← Newer</button>'
+      : '<span class="btn ghost sm pager-off">← Newer</span>';
+    var older = meta.page < meta.pages
+      ? '<button class="btn ghost sm" data-page="' + (meta.page + 1) + '">Older →</button>'
+      : '<span class="btn ghost sm pager-off">Older →</span>';
+    pagerEl.innerHTML = newer +
+      '<span class="meta">Page ' + meta.page + " of " + meta.pages +
+      " · " + meta.total + (meta.total === 1 ? " task" : " tasks") + "</span>" + older;
+  }
+
   tbody.addEventListener("click", function (e) {
     var btn = e.target.closest("[data-retry]");
     if (!btn) return;
@@ -98,22 +113,71 @@
     btn.textContent = "Retrying…";
     fetch("/api/tasks/" + btn.dataset.retry + "/retry", { method: "POST" })
       .then(function (r) { if (!r.ok) throw new Error(); return r.json(); })
-      .then(poll)
+      .then(function () { poll(); })
       .catch(function () { btn.disabled = false; btn.textContent = "↻ Retry"; });
   });
 
+  if (pagerEl) {
+    pagerEl.addEventListener("click", function (e) {
+      var btn = e.target.closest("[data-page]");
+      if (!btn) return;
+      page = Number(btn.dataset.page) || 1;
+      poll();  // server clamps + returns the true page; jump immediately
+    });
+  }
+
+  var TERMINAL = { COMPLETED: 1, FAILED: 1, AWAITING_REVIEW: 1, SCHEDULED: 1 };
+  var pollTimer = null;
+  function nextDelay() {
+    // Fast only while an episode is actually in flight on THIS page (page 1 in practice); relaxed
+    // when everything visible is settled — so browsing history doesn't hammer the box.
+    var active = lastTasks.some(function (t) { return !TERMINAL[t.status]; });
+    return active ? 3000 : 15000;
+  }
+  function scheduleNext() {
+    clearTimeout(pollTimer);
+    if (!document.hidden) pollTimer = setTimeout(poll, nextDelay());  // pause when backgrounded
+  }
+  function url() {
+    var p = ["page=" + page];
+    if (query) p.push("q=" + encodeURIComponent(query));
+    if (scopeCampaign) p.push("campaign=" + encodeURIComponent(scopeCampaign));
+    return "/api/tasks?" + p.join("&");
+  }
   function poll() {
-    fetch("/api/tasks", { headers: { "Accept": "application/json" } })
+    clearTimeout(pollTimer);
+    var mine = ++seq;
+    fetch(url(), { headers: { "Accept": "application/json" } })
       .then(function (r) {
         if (r.status === 401) { window.location.href = "/login"; throw new Error("unauthenticated"); }
         return r.json();
       })
-      .then(function (d) { lastTasks = d.tasks || []; render(lastTasks); })
-      .catch(function () { /* transient — try again next tick */ });
+      .then(function (d) {
+        if (mine !== seq) return;                       // a newer request superseded this one
+        lastTasks = d.tasks || [];
+        meta = { page: d.page || 1, pages: d.pages || 1, total: d.total || 0 };
+        page = meta.page;                               // adopt the server's clamped page
+        renderRows(lastTasks);
+        renderPager();
+      })
+      .catch(function () { /* transient — try again next tick */ })
+      .finally(function () { if (mine === seq) scheduleNext(); });
   }
 
-  if (filterEl) filterEl.addEventListener("input", function () { render(lastTasks); });
+  if (filterEl) {
+    filterEl.addEventListener("input", function () {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(function () {
+        query = filterEl.value.trim();
+        page = 1;            // a new search always starts at the newest match
+        poll();
+      }, 300);               // debounce — search now hits the server
+    });
+  }
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) clearTimeout(pollTimer);
+    else poll();   // immediate refresh + resume on return to foreground
+  });
 
   poll();
-  setInterval(poll, 3000);
 })();

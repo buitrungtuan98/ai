@@ -26,7 +26,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, func, or_, select
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -55,6 +55,18 @@ async def lifespan(_app: FastAPI):
     yield
 
 
+class CachedStaticFiles(StaticFiles):
+    """Serve /static with a long, immutable cache for content-hashed (?v=) URLs. static_url() appends
+    a per-file hash that changes whenever the file changes, so the browser may cache forever and skip
+    revalidation entirely; un-versioned requests keep the default (validated) behaviour."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        if b"v=" in scope.get("query_string", b"") and response.status_code == 200:
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
+
+
 app = FastAPI(title="AI Video Factory", lifespan=lifespan)
 app.add_middleware(
     SessionMiddleware,
@@ -63,7 +75,7 @@ app.add_middleware(
     same_site="lax",
     https_only=True,  # ingress is always HTTPS via the Cloudflare Tunnel — mark the cookie Secure
 )
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", CachedStaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 templates.env.globals["settings"] = settings  # e.g. MULTI_TENANT_MODE toggles the sign-out chip
 templates.env.globals["voice_choices"] = VOICE_CHOICES  # campaign form: per-language voice picker
@@ -908,28 +920,57 @@ def save_credentials(
 
 
 # ── Asset Pool Cache (+ preview & review) ────────────────────────────────────
+_ASSET_STATUS_FILTERS = ("awaiting_review", "ready", "consumed")  # chip filters; others fall under "All"
+_ASSETS_PER_PAGE = 24
+
+
 @app.get("/assets", response_class=HTMLResponse)
 def assets_page(request: Request, user: CurrentUser, db: DbDep,
                 flash: str = "", flash_reason: str = "",
-                campaign: int | None = None, channel: int | None = None):
-    q = (select(BufferPoolItem)
-         .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
-         .where(Campaign.user_id == user.id))
+                campaign: int | None = None, channel: int | None = None,
+                status: str = "", page: int = 1):
+    conds = [Campaign.user_id == user.id]
     if campaign:  # drill-down scope from a campaign
-        q = q.where(BufferPoolItem.campaign_id == campaign)
+        conds.append(BufferPoolItem.campaign_id == campaign)
     if channel:   # drill-down scope from a channel
-        q = q.where(BufferPoolItem.channel_id == channel)
-    items = db.scalars(q.order_by(BufferPoolItem.id.desc())).all()
+        conds.append(BufferPoolItem.channel_id == channel)
+
+    def scoped(stmt):
+        return stmt.select_from(BufferPoolItem).join(
+            Campaign, BufferPoolItem.campaign_id == Campaign.id).where(*conds)
+
+    # True per-status tallies for the filter chips (whole scope, not just the current page).
+    status_counts = {s.value: n for s, n in db.execute(
+        scoped(select(BufferPoolItem.status, func.count())).group_by(BufferPoolItem.status)).all()}
+    total_all = sum(status_counts.values())
+
+    status = status if status in _ASSET_STATUS_FILTERS else ""
+    total = status_counts.get(status, 0) if status else total_all
+    pages = max(1, -(-total // _ASSETS_PER_PAGE))  # ceil-divide
+    page = min(max(page, 1), pages)
+
+    item_q = scoped(select(BufferPoolItem))
+    if status:
+        item_q = item_q.where(BufferPoolItem.status == BufferStatus(status))
+    items = db.scalars(item_q.order_by(BufferPoolItem.id.desc())
+                       .limit(_ASSETS_PER_PAGE).offset((page - 1) * _ASSETS_PER_PAGE)).all()
+
     campaigns = db.scalars(select(Campaign).where(Campaign.user_id == user.id)).all()
     chan_by_id = {c.id: c for c in db.scalars(select(Channel).where(Channel.user_id == user.id)).all()}
     camp_by_id = {c.id: c for c in campaigns}
-    previewable = {i.id for i in items if i.video_path and os.path.exists(i.video_path)}
+    # Only items that can still have a file on disk are worth stat-ing (skip consumed/rejected/expired).
+    previewable = {i.id for i in items
+                   if i.status in (BufferStatus.ready, BufferStatus.awaiting_review)
+                   and i.video_path and os.path.exists(i.video_path)}
+    scope_qs = (f"campaign={campaign}&" if campaign else (f"channel={channel}&" if channel else ""))
     return templates.TemplateResponse(
         request, "assets.html",
         {"request": request, "user": user, "items": items, "nav": "assets",
          "camp_by_id": camp_by_id, "chan_by_id": chan_by_id, "previewable": previewable,
          "scope_campaign": camp_by_id.get(campaign) if campaign else None,
          "scope_channel": chan_by_id.get(channel) if channel else None,
+         "status": status, "status_counts": status_counts, "total_all": total_all,
+         "page": page, "pages": pages, "scope_qs": scope_qs,
          # Post-action feedback (whitelisted — never echo arbitrary input back into the page).
          "flash": flash if flash in ("publish", "rerender", "rejected", "missing") else "",
          "flash_reason": flash_reason[:200]},
@@ -1114,18 +1155,28 @@ def ab_variant_summary(episodes) -> list[dict]:
     return summary
 
 
+_EPISODES_PER_PAGE = 20
+
+
 @app.get("/campaigns/{campaign_id}/performance", response_class=HTMLResponse)
 def campaign_performance(request: Request, user: CurrentUser, db: DbDep,
-                         campaign=Depends(get_owned_campaign)):
+                         campaign=Depends(get_owned_campaign), page: int = 1):
+    # Full list drives the aggregates (variant summary, sparkline, best episode); the episodes TABLE
+    # is paginated (newest first) so a long-running campaign doesn't render hundreds of rows at once.
     episodes = db.scalars(
         select(Task).where(Task.campaign_id == campaign.id).order_by(Task.episode_number)
     ).all()
     measured = [t for t in episodes if t.stats_json]
     best = max(measured, key=lambda t: t.stats_json.get("avg_pct_viewed", 0), default=None)
+    ep_recent = list(reversed(episodes))
+    pages = max(1, -(-len(ep_recent) // _EPISODES_PER_PAGE))
+    page = min(max(page, 1), pages)
+    episodes_page = ep_recent[(page - 1) * _EPISODES_PER_PAGE: page * _EPISODES_PER_PAGE]
     return templates.TemplateResponse(
         request, "performance.html",
         {"request": request, "user": user, "nav": "campaigns", "campaign": campaign,
-         "episodes": episodes, "learning": campaign.learning_json or {},
+         "episodes": episodes, "episodes_page": episodes_page, "page": page, "pages": pages,
+         "learning": campaign.learning_json or {},
          "best_id": best.id if best else None, "variants": ab_variant_summary(episodes),
          # Campaign-hub context: parent channel + its buffer tally for the drill-down links.
          "channel": db.get(Channel, campaign.channel_id),
@@ -1208,11 +1259,31 @@ def tasks_page(request: Request, user: CurrentUser, db: DbDep, campaign: int | N
         {"request": request, "user": user, "nav": "tasks", "scope_campaign": scope})
 
 
+_TASKS_PER_PAGE = 25
+
+
 @app.get("/api/tasks")
-def api_tasks(user: CurrentUser, db: DbDep):
-    rows = db.scalars(
-        select(Task).where(Task.user_id == user.id).order_by(Task.id.desc()).limit(50)
-    ).all()
+def api_tasks(user: CurrentUser, db: DbDep,
+              page: int = 1, q: str = "", campaign: int | None = None):
+    # Full task history, newest first, paginated — page 1 carries the live/active jobs. Scope (?campaign)
+    # and search (?q) run in SQL so they span ALL history, not just the page currently in the browser.
+    base = select(Task).where(Task.user_id == user.id)
+    if campaign:
+        base = base.where(Task.campaign_id == campaign)
+    q = q.strip()
+    if q:
+        like = f"%{q}%"
+        base = (base.outerjoin(Campaign, Task.campaign_id == Campaign.id)
+                    .outerjoin(Channel, Campaign.channel_id == Channel.id)
+                    .where(or_(cast(Task.id, String).ilike(like),
+                               cast(Task.status, String).ilike(like),
+                               Campaign.topic_name.ilike(like),
+                               Channel.channel_name.ilike(like))))
+    total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
+    pages = max(1, -(-total // _TASKS_PER_PAGE))  # ceil-divide
+    page = min(max(page, 1), pages)
+    rows = db.scalars(base.order_by(Task.id.desc())
+                      .limit(_TASKS_PER_PAGE).offset((page - 1) * _TASKS_PER_PAGE)).all()
     campaigns = {c.id: c for c in db.scalars(
         select(Campaign).where(Campaign.user_id == user.id)).all()}
     channels = {c.id: c for c in db.scalars(
@@ -1239,7 +1310,7 @@ def api_tasks(user: CurrentUser, db: DbDep):
             "can_retry": t.status == TaskStatus.FAILED,
             "updated_at": t.updated_at.isoformat() if t.updated_at else None,
         })
-    return {"tasks": out}
+    return {"tasks": out, "page": page, "pages": pages, "total": total}
 
 
 @app.get("/api/summary")
