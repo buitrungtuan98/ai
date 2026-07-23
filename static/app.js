@@ -77,7 +77,7 @@
         var ptone = t.status === "COMPLETED" ? " done" : (t.status === "FAILED" ? "" : " work");
         return (
           "<tr>" +
-          '<td data-label="Task">#' + t.id + "</td>" +
+          '<td data-label="Task"><a href="/episodes/' + t.id + '">#' + t.id + "</a></td>" +
           '<td data-label="Episode">' + esc(t.topic) + " · Ep " + t.episode +
             '<div class="meta">' + esc(t.channel) + "</div></td>" +
           '<td data-label="Status"><span class="pill ' + esc(t.status) + '">' + esc(label) + "</span>" + retries + "</td>" +

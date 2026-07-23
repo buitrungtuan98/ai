@@ -81,6 +81,42 @@ templates.env.globals["settings"] = settings  # e.g. MULTI_TENANT_MODE toggles t
 templates.env.globals["voice_choices"] = VOICE_CHOICES  # campaign form: per-language voice picker
 
 
+def _query_string(**params: object) -> str:
+    """Build a URL query string from kwargs, dropping empty/None values and URL-encoding — so the
+    shared filter-bar macro can compose chip/search links (status + search + scope) safely."""
+    from urllib.parse import urlencode
+
+    return urlencode({k: v for k, v in params.items() if v not in (None, "", [])})
+
+
+templates.env.globals["query_string"] = _query_string
+
+
+def _nav_channels(request: Request) -> list[dict]:
+    """The current user's channels, for the topbar scope switcher. Best-effort: any failure (no
+    session, DB hiccup) returns [] so `base.html` always renders. Reuses the auth user-resolution
+    so solo and multi-tenant modes behave identically."""
+    try:
+        from auth.dependencies import SOLO_UID, get_or_create_user
+        from database.db_session import SessionLocal
+
+        with SessionLocal() as db:
+            if not settings.MULTI_TENANT_MODE:
+                user = get_or_create_user(db, firebase_uid=SOLO_UID, is_admin=True)
+            else:
+                uid = request.session.get("uid") if "session" in request.scope else None
+                if not uid:
+                    return []
+                user = get_or_create_user(db, firebase_uid=uid)
+            return [{"id": c.id, "name": c.channel_name}
+                    for c in db.scalars(select(Channel).where(Channel.user_id == user.id))]
+    except Exception:  # noqa: BLE001 — the switcher is a convenience; never break page render
+        return []
+
+
+templates.env.globals["nav_channels"] = _nav_channels
+
+
 _asset_versions: dict[str, str] = {}
 
 
@@ -395,23 +431,40 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
 
 
 # ── Channels Manager ─────────────────────────────────────────────────────────
+_CHANNEL_STATUS_FILTERS = ("active", "expired")
+
+
 @app.get("/channels", response_class=HTMLResponse)
-def channels_page(request: Request, user: CurrentUser, db: DbDep):
-    channels = db.scalars(select(Channel).where(Channel.user_id == user.id)).all()
+def channels_page(request: Request, user: CurrentUser, db: DbDep, status: str = "", q: str = ""):
+    status_counts = {s.value: n for s, n in db.execute(
+        select(Channel.status, func.count())
+        .where(Channel.user_id == user.id).group_by(Channel.status)).all()}
+    total_all = sum(status_counts.values())
+    status = status if status in _CHANNEL_STATUS_FILTERS else ""
+    q = q.strip()
+    stmt = select(Channel).where(Channel.user_id == user.id)
+    if status:
+        stmt = stmt.where(Channel.status == ChannelStatus(status))
+    if q:
+        stmt = stmt.where(Channel.channel_name.ilike(f"%{q}%"))
+    channels = db.scalars(stmt).all()
     # Rollup: campaigns per channel (total + active) for the drill-down links.
     camp_counts: dict = {}
-    for chid, status, n in db.execute(
+    for chid, cstatus, n in db.execute(
         select(Campaign.channel_id, Campaign.status, func.count())
         .where(Campaign.user_id == user.id).group_by(Campaign.channel_id, Campaign.status)
     ).all():
         d = camp_counts.setdefault(chid, {"total": 0, "active": 0})
         d["total"] += n
-        if status == CampaignStatus.active:
+        if cstatus == CampaignStatus.active:
             d["active"] += n
+    chips = [{"label": "All", "value": "", "count": total_all}] + [
+        {"label": s.title(), "value": s, "count": status_counts.get(s, 0)}
+        for s in _CHANNEL_STATUS_FILTERS]
     return templates.TemplateResponse(
         request, "channels.html",
         {"request": request, "user": user, "channels": channels, "nav": "channels",
-         "camp_counts": camp_counts},
+         "camp_counts": camp_counts, "chips": chips, "status": status, "q": q, "total_all": total_all},
     )
 
 
@@ -511,19 +564,39 @@ def _google_flow(scopes: list[str], redirect_path: str):
 
 
 # ── Campaigns Manager ────────────────────────────────────────────────────────
+_CAMPAIGN_STATUS_FILTERS = ("active", "pending", "failed", "completed")
+
+
 @app.get("/campaigns", response_class=HTMLResponse)
-def campaigns_page(request: Request, user: CurrentUser, db: DbDep, channel: int | None = None):
-    q = select(Campaign).where(Campaign.user_id == user.id)
+def campaigns_page(request: Request, user: CurrentUser, db: DbDep, channel: int | None = None,
+                   status: str = "", q: str = ""):
+    conds = [Campaign.user_id == user.id]
     if channel:  # scoped to one channel (drill-down from Channels)
-        q = q.where(Campaign.channel_id == channel)
-    campaigns = db.scalars(q).all()
+        conds.append(Campaign.channel_id == channel)
+    # True per-status counts for the chips (over the current scope, before the status filter).
+    status_counts = {s.value: n for s, n in db.execute(
+        select(Campaign.status, func.count()).where(*conds).group_by(Campaign.status)).all()}
+    total_all = sum(status_counts.values())
+    status = status if status in _CAMPAIGN_STATUS_FILTERS else ""
+    q = q.strip()
+    stmt = select(Campaign).where(*conds)
+    if status:
+        stmt = stmt.where(Campaign.status == CampaignStatus(status))
+    if q:
+        stmt = stmt.where(Campaign.topic_name.ilike(f"%{q}%"))
+    campaigns = db.scalars(stmt.order_by(Campaign.id.desc())).all()
     channels = {c.id: c for c in db.scalars(select(Channel).where(Channel.user_id == user.id)).all()}
+    chips = [{"label": "All", "value": "", "count": total_all}] + [
+        {"label": s.title(), "value": s, "count": status_counts.get(s, 0)}
+        for s in _CAMPAIGN_STATUS_FILTERS]
     return templates.TemplateResponse(
         request,
         "campaigns.html",
         {"request": request, "user": user, "campaigns": campaigns, "channels": channels, "nav": "campaigns",
          "asset_counts": _buffer_counts(db, user.id),
-         "scope_channel": channels.get(channel) if channel else None},
+         "scope_channel": channels.get(channel) if channel else None,
+         "chips": chips, "status": status, "q": q, "total_all": total_all,
+         "scope_hidden": {"channel": channel} if channel else {}},
     )
 
 
@@ -938,31 +1011,40 @@ _ASSETS_PER_PAGE = 24
 def assets_page(request: Request, user: CurrentUser, db: DbDep,
                 flash: str = "", flash_reason: str = "",
                 campaign: int | None = None, channel: int | None = None,
-                status: str = "", page: int = 1):
-    conds = [Campaign.user_id == user.id]
-    if campaign:  # drill-down scope from a campaign
-        conds.append(BufferPoolItem.campaign_id == campaign)
-    if channel:   # drill-down scope from a channel
-        conds.append(BufferPoolItem.channel_id == channel)
+                status: str = "", page: int = 1, q: str = ""):
+    q = q.strip()
+    # Scope conditions (channel/campaign drill-down) — chip counts are computed over THIS, without the
+    # search, so the chips read as "how many exist here" (consistent with Campaigns/Channels). Search +
+    # status narrow only the visible items and the paging count.
+    scope_conds = [Campaign.user_id == user.id]
+    if campaign:
+        scope_conds.append(BufferPoolItem.campaign_id == campaign)
+    if channel:
+        scope_conds.append(BufferPoolItem.channel_id == channel)
 
-    def scoped(stmt):
+    def joined(stmt, conds):
         return stmt.select_from(BufferPoolItem).join(
             Campaign, BufferPoolItem.campaign_id == Campaign.id).where(*conds)
 
-    # True per-status tallies for the filter chips (whole scope, not just the current page).
     status_counts = {s.value: n for s, n in db.execute(
-        scoped(select(BufferPoolItem.status, func.count())).group_by(BufferPoolItem.status)).all()}
-    total_all = sum(status_counts.values())
+        joined(select(BufferPoolItem.status, func.count()), scope_conds)
+        .group_by(BufferPoolItem.status)).all()}
+    pool_total = sum(status_counts.values())  # is there anything in this scope at all?
+    total_all = pool_total                    # chip "All" count (scope, search-independent)
 
     status = status if status in _ASSET_STATUS_FILTERS else ""
-    total = status_counts.get(status, 0) if status else total_all
+    # Filtered conditions drive the visible items + the paging count (status + search applied).
+    item_conds = list(scope_conds)
+    if status:
+        item_conds.append(BufferPoolItem.status == BufferStatus(status))
+    if q:
+        item_conds.append(or_(Campaign.topic_name.ilike(f"%{q}%"),
+                              cast(BufferPoolItem.episode_number, String).ilike(f"%{q}%")))
+    total = db.scalar(joined(select(func.count()), item_conds)) or 0
     pages = max(1, -(-total // _ASSETS_PER_PAGE))  # ceil-divide
     page = min(max(page, 1), pages)
-
-    item_q = scoped(select(BufferPoolItem))
-    if status:
-        item_q = item_q.where(BufferPoolItem.status == BufferStatus(status))
-    items = db.scalars(item_q.order_by(BufferPoolItem.id.desc())
+    items = db.scalars(joined(select(BufferPoolItem), item_conds)
+                       .order_by(BufferPoolItem.id.desc())
                        .limit(_ASSETS_PER_PAGE).offset((page - 1) * _ASSETS_PER_PAGE)).all()
 
     campaigns = db.scalars(select(Campaign).where(Campaign.user_id == user.id)).all()
@@ -973,6 +1055,16 @@ def assets_page(request: Request, user: CurrentUser, db: DbDep,
                    if i.status in (BufferStatus.ready, BufferStatus.awaiting_review)
                    and i.video_path and os.path.exists(i.video_path)}
     scope_qs = (f"campaign={campaign}&" if campaign else (f"channel={channel}&" if channel else ""))
+    if q:  # keep the search term on pager links too
+        from urllib.parse import quote
+
+        scope_qs += f"q={quote(q)}&"
+    scope_hidden = {"campaign": campaign} if campaign else ({"channel": channel} if channel else {})
+    chips = [{"label": "All", "value": "", "count": total_all},
+             {"label": "Awaiting review", "value": "awaiting_review",
+              "count": status_counts.get("awaiting_review", 0)},
+             {"label": "Ready", "value": "ready", "count": status_counts.get("ready", 0)},
+             {"label": "Published", "value": "consumed", "count": status_counts.get("consumed", 0)}]
     return templates.TemplateResponse(
         request, "assets.html",
         {"request": request, "user": user, "items": items, "nav": "assets",
@@ -980,6 +1072,7 @@ def assets_page(request: Request, user: CurrentUser, db: DbDep,
          "scope_campaign": camp_by_id.get(campaign) if campaign else None,
          "scope_channel": chan_by_id.get(channel) if channel else None,
          "status": status, "status_counts": status_counts, "total_all": total_all,
+         "pool_total": pool_total, "chips": chips, "q": q, "scope_hidden": scope_hidden,
          "page": page, "pages": pages, "scope_qs": scope_qs,
          # Post-action feedback (whitelisted — never echo arbitrary input back into the page).
          "flash": flash if flash in ("publish", "rerender", "rejected", "missing") else "",
@@ -1051,12 +1144,32 @@ def asset_thumb(request: Request, item=Depends(get_owned_buffer_item)):
     return _ranged_file_response(item.thumbnail_path, request, "image/jpeg")
 
 
+def _episode_return(return_to: str) -> str | None:
+    """Return a safe internal episode path (`/episodes/<digits>`) if `return_to` is one, else None.
+    Lets asset/task actions posted from the Episode view redirect back to it instead of /assets."""
+    tail = (return_to or "").removeprefix("/episodes/")
+    return return_to if return_to.startswith("/episodes/") and tail.isdigit() else None
+
+
+def _action_redirect(return_to: str, flash: str, default: str, flash_reason: str = "") -> RedirectResponse:
+    """Redirect an asset/task action to its Episode view (when it came from there) or the default
+    /assets URL (unchanged behavior when no return path is supplied)."""
+    ep = _episode_return(return_to)
+    if ep is None:
+        return RedirectResponse(default, status_code=303)
+    qs = f"?flash={flash}" if flash else ""
+    if flash_reason:
+        from urllib.parse import quote
+        qs += f"&flash_reason={quote(flash_reason)}"
+    return RedirectResponse(ep + qs, status_code=303)
+
+
 @app.post("/assets/{item_id}/approve")
-def approve_asset(db: DbDep, item=Depends(get_owned_buffer_item)):
+def approve_asset(db: DbDep, item=Depends(get_owned_buffer_item), return_to: str = Form("")):
     if item.status != BufferStatus.awaiting_review:
         raise HTTPException(400, "Only items awaiting review can be approved")
     if not (item.video_path and os.path.exists(item.video_path)):
-        return RedirectResponse("/assets?flash=missing", status_code=303)
+        return _action_redirect(return_to, "missing", "/assets?flash=missing")
     task = db.scalar(select(Task).where(
         Task.campaign_id == item.campaign_id, Task.episode_number == item.episode_number))
     if task is not None:
@@ -1064,22 +1177,22 @@ def approve_asset(db: DbDep, item=Depends(get_owned_buffer_item)):
         task.error_message = None
         db.commit()
     task_queue.enqueue_publish(item.id)
-    return RedirectResponse("/assets", status_code=303)
+    return _action_redirect(return_to, "publish", "/assets")
 
 
 @app.post("/assets/{item_id}/publish-now")
-def publish_asset_now(db: DbDep, item=Depends(get_owned_buffer_item)):
+def publish_asset_now(db: DbDep, item=Depends(get_owned_buffer_item), return_to: str = Form("")):
     """Skip the posting slot: publish a pre-rendered (`ready`) episode immediately."""
     if item.status != BufferStatus.ready:
         raise HTTPException(400, "Only pre-rendered (ready) items can be published now")
     if not (item.video_path and os.path.exists(item.video_path)):
-        return RedirectResponse("/assets?flash=missing", status_code=303)
+        return _action_redirect(return_to, "missing", "/assets?flash=missing")
     task_queue.enqueue_publish(item.id)
-    return RedirectResponse("/assets?flash=publish", status_code=303)
+    return _action_redirect(return_to, "publish", "/assets?flash=publish")
 
 
 @app.post("/assets/{item_id}/rerender")
-def rerender_asset(db: DbDep, item=Depends(get_owned_buffer_item)):
+def rerender_asset(db: DbDep, item=Depends(get_owned_buffer_item), return_to: str = Form("")):
     """Discard a rendered episode (delete its files) and immediately queue a fresh render of the
     same episode — for when a render is wrong (bad footage, missing subtitles, …) but the episode
     itself should still exist."""
@@ -1103,11 +1216,12 @@ def rerender_asset(db: DbDep, item=Depends(get_owned_buffer_item)):
     db.commit()
     task.rq_job_id = task_queue.enqueue_render(task.id)
     db.commit()
-    return RedirectResponse("/assets?flash=rerender", status_code=303)
+    return _action_redirect(return_to, "rerender", "/assets?flash=rerender")
 
 
 @app.post("/assets/{item_id}/reject")
-def reject_asset(db: DbDep, item=Depends(get_owned_buffer_item), reason: str = Form("")):
+def reject_asset(db: DbDep, item=Depends(get_owned_buffer_item), reason: str = Form(""),
+                 return_to: str = Form("")):
     if item.status != BufferStatus.awaiting_review:
         raise HTTPException(400, "Only items awaiting review can be rejected")
     for path in (item.video_path, item.thumbnail_path):
@@ -1133,11 +1247,129 @@ def reject_asset(db: DbDep, item=Depends(get_owned_buffer_item), reason: str = F
             learning["reject_reasons"] = reasons + [reason]
             campaign.learning_json = learning
     db.commit()
+    ep = _episode_return(return_to)
+    if ep is not None:
+        return _action_redirect(return_to, "rejected", "/assets", flash_reason=reason)
     from urllib.parse import quote
 
     return RedirectResponse(
         "/assets?flash=rejected" + (f"&flash_reason={quote(reason)}" if reason else ""),
         status_code=303,
+    )
+
+
+# ── Episodes (the pipeline list — every episode by stage) + the per-episode view ──
+# Lifecycle stage → the task statuses it groups. The Episodes list filters/tabs by stage; a stage is
+# a friendlier bucket than the 9 raw statuses.
+_STAGE_STATUSES: dict[str, tuple[str, ...]] = {
+    "queued": ("PENDING_QUEUE",),
+    "rendering": ("AI_GENERATION", "AUDIO_SYNCED", "RENDERING"),
+    "review": ("AWAITING_REVIEW",),
+    "scheduled": ("SCHEDULED",),
+    "published": ("PUBLISHING", "COMPLETED"),
+    "failed": ("FAILED",),
+}
+_STATUS_TO_STAGE = {st: stage for stage, sts in _STAGE_STATUSES.items() for st in sts}
+_EPISODES_LIST_PER_PAGE = 25
+
+
+@app.get("/episodes", response_class=HTMLResponse)
+def episodes_list(request: Request, user: CurrentUser, db: DbDep,
+                  channel: int | None = None, campaign: int | None = None,
+                  status: str = "", q: str = "", page: int = 1):
+    """The pipeline: every episode as one row, grouped by lifecycle stage — the unified view that
+    merges what used to be split between Task Logs (render) and Asset Pool (review). Row → the
+    Episode detail page. Server-rendered + stage tabs + search + scope + pagination (one grammar)."""
+    scope_conds = [Task.user_id == user.id]
+    if campaign:
+        scope_conds.append(Task.campaign_id == campaign)
+    camp_by_id = {c.id: c for c in db.scalars(select(Campaign).where(Campaign.user_id == user.id)).all()}
+    chan_by_id = {c.id: c for c in db.scalars(select(Channel).where(Channel.user_id == user.id)).all()}
+    if channel:  # scope by channel via the episode's campaign
+        scope_conds.append(Task.campaign_id.in_(
+            [cid for cid, c in camp_by_id.items() if c.channel_id == channel]))
+
+    def joined(stmt, conds):
+        return stmt.select_from(Task).join(Campaign, Task.campaign_id == Campaign.id).where(*conds)
+
+    # Per-stage counts over the scope (search-independent, like the other chip bars).
+    raw_counts = {s.value: n for s, n in db.execute(
+        joined(select(Task.status, func.count()), scope_conds).group_by(Task.status)).all()}
+    stage_counts = {stage: sum(raw_counts.get(st, 0) for st in sts)
+                    for stage, sts in _STAGE_STATUSES.items()}
+    total_all = sum(raw_counts.values())
+
+    stage = status if status in _STAGE_STATUSES else ""
+    q = q.strip()
+    item_conds = list(scope_conds)
+    if stage:
+        item_conds.append(Task.status.in_([TaskStatus(st) for st in _STAGE_STATUSES[stage]]))
+    if q:
+        item_conds.append(or_(Campaign.topic_name.ilike(f"%{q}%"),
+                              Task.synopsis.ilike(f"%{q}%"),
+                              cast(Task.episode_number, String).ilike(f"%{q}%"),
+                              cast(Task.status, String).ilike(f"%{q}%")))
+    total = db.scalar(joined(select(func.count()), item_conds)) or 0
+    pages = max(1, -(-total // _EPISODES_LIST_PER_PAGE))
+    page = min(max(page, 1), pages)
+    episodes = db.scalars(joined(select(Task), item_conds)
+                          .order_by(Task.id.desc())
+                          .limit(_EPISODES_LIST_PER_PAGE)
+                          .offset((page - 1) * _EPISODES_LIST_PER_PAGE)).all()
+
+    chips = [{"label": "All", "value": "", "count": total_all}] + [
+        {"label": stage.replace("_", " ").title(), "value": stage, "count": stage_counts.get(stage, 0)}
+        for stage in _STAGE_STATUSES]
+    scope_hidden = {"campaign": campaign} if campaign else ({"channel": channel} if channel else {})
+    scope_qs = _query_string(**scope_hidden, status=stage, q=q)
+    return templates.TemplateResponse(
+        request, "episodes.html",
+        {"request": request, "user": user, "nav": "episodes", "episodes": episodes,
+         "camp_by_id": camp_by_id, "chan_by_id": chan_by_id, "status_to_stage": _STATUS_TO_STAGE,
+         "chips": chips, "status": stage, "q": q, "total_all": total_all,
+         "scope_hidden": scope_hidden, "scope_qs": scope_qs, "page": page, "pages": pages,
+         "scope_campaign": camp_by_id.get(campaign) if campaign else None,
+         "scope_channel": chan_by_id.get(channel) if channel else None},
+    )
+
+
+# ── Episode view (one home per episode: the whole lifecycle in one place) ────
+_EPISODE_STAGES = ("Queued", "Rendering", "Review", "Scheduled", "Published")
+# Task status → index in _EPISODE_STAGES (None = FAILED, shown off-track).
+_STAGE_INDEX = {
+    "PENDING_QUEUE": 0, "AI_GENERATION": 1, "AUDIO_SYNCED": 1, "RENDERING": 1,
+    "AWAITING_REVIEW": 2, "SCHEDULED": 3, "PUBLISHING": 4, "COMPLETED": 4,
+}
+
+
+@app.get("/episodes/{task_id}", response_class=HTMLResponse)
+def episode_view(request: Request, user: CurrentUser, db: DbDep, task_id: int,
+                 flash: str = "", flash_reason: str = ""):
+    """One episode's whole story in one page: lifecycle timeline, preview, stage-aware actions,
+    render/QC history and (once live) published stats — so an episode has a single home instead of
+    being scattered across Task Logs / Asset Pool / Calendar / Performance."""
+    task = db.get(Task, task_id)
+    if task is None or task.user_id != user.id:
+        raise HTTPException(404, "Episode not found")
+    campaign = db.get(Campaign, task.campaign_id)
+    channel = db.get(Channel, campaign.channel_id) if campaign else None
+    # The live buffer row for this episode (newest first), if one exists.
+    buffer = db.scalar(select(BufferPoolItem).where(
+        BufferPoolItem.campaign_id == task.campaign_id,
+        BufferPoolItem.episode_number == task.episode_number,
+    ).order_by(BufferPoolItem.id.desc()))
+    previewable = bool(
+        buffer and buffer.status in (BufferStatus.ready, BufferStatus.awaiting_review)
+        and buffer.video_path and os.path.exists(buffer.video_path))
+    stage_index = _STAGE_INDEX.get(task.status.value)
+    return templates.TemplateResponse(
+        request, "episode.html",
+        {"request": request, "user": user, "nav": "episodes", "task": task, "campaign": campaign,
+         "channel": channel, "buffer": buffer, "previewable": previewable,
+         "stages": _EPISODE_STAGES, "stage_index": stage_index,
+         "failed": task.status == TaskStatus.FAILED,
+         "flash": flash if flash in ("publish", "rerender", "rejected", "missing") else "",
+         "flash_reason": flash_reason[:200]},
     )
 
 
@@ -1202,9 +1434,9 @@ def reset_learning(db: DbDep, campaign=Depends(get_owned_campaign)):
 
 
 # ── Content calendar ─────────────────────────────────────────────────────────
-def upcoming_slot_cells(campaign: Campaign, days: int = 7) -> list[list[str]] | None:
-    """Per-day slot times for the next `days` days in the campaign's own timezone, honoring its
-    posting_days. None = the campaign doesn't slot-publish (continuous or review mode)."""
+def upcoming_slot_cells(campaign: Campaign, days: int = 7, week: int = 0) -> list[list[str]] | None:
+    """Per-day slot times for `days` days starting `week` weeks from now, in the campaign's own
+    timezone, honoring its posting_days. None = the campaign doesn't slot-publish (continuous/review)."""
     from datetime import timedelta
 
     from workers.scheduler import WEEKDAY_KEYS, local_now
@@ -1214,7 +1446,7 @@ def upcoming_slot_cells(campaign: Campaign, days: int = 7) -> list[list[str]] | 
     if not slots or not cfg.get("auto_publish", True):
         return None
     allowed = cfg.get("posting_days") or []
-    start = local_now(cfg.get("timezone"))
+    start = local_now(cfg.get("timezone")) + timedelta(days=week * 7)
     cells: list[list[str]] = []
     for d in range(days):
         day = start + timedelta(days=d)
@@ -1224,11 +1456,12 @@ def upcoming_slot_cells(campaign: Campaign, days: int = 7) -> list[list[str]] | 
 
 
 @app.get("/calendar", response_class=HTMLResponse)
-def calendar_page(request: Request, user: CurrentUser, db: DbDep):
+def calendar_page(request: Request, user: CurrentUser, db: DbDep, week: int = 0):
     from datetime import timedelta
 
     from workers.scheduler import local_now
 
+    week = max(-8, min(week, 12))  # bound the navigation to a sane range
     campaigns = db.scalars(select(Campaign).where(
         Campaign.user_id == user.id, Campaign.status == CampaignStatus.active)).all()
     ready_counts = dict(db.execute(
@@ -1238,7 +1471,7 @@ def calendar_page(request: Request, user: CurrentUser, db: DbDep):
     ).all())
     slotted, unslotted = [], []
     for c in campaigns:
-        cells = upcoming_slot_cells(c)
+        cells = upcoming_slot_cells(c, week=week)
         entry = {"campaign": c, "ready": ready_counts.get(c.id, 0),
                  "tz": (c.config_json or {}).get("timezone") or settings.TIMEZONE,
                  "mode": "review" if not (c.config_json or {}).get("auto_publish", True) else "continuous"}
@@ -1247,12 +1480,15 @@ def calendar_page(request: Request, user: CurrentUser, db: DbDep):
             slotted.append(entry)
         else:
             unslotted.append(entry)
-    base = local_now()
+    base = local_now() + timedelta(days=week * 7)
     day_headers = [(base + timedelta(days=d)).strftime("%a %d/%m") for d in range(7)]
+    label = "This week" if week == 0 else (f"In {week} week{'s' if week != 1 else ''}" if week > 0
+                                           else f"{-week} week{'s' if week != -1 else ''} ago")
     return templates.TemplateResponse(
         request, "calendar.html",
         {"request": request, "user": user, "nav": "calendar", "slotted": slotted,
-         "unslotted": unslotted, "day_headers": day_headers},
+         "unslotted": unslotted, "day_headers": day_headers,
+         "week": week, "week_label": label},
     )
 
 
@@ -1336,10 +1572,44 @@ def api_summary(user: CurrentUser, db: DbDep):
             "channels": channels, "active_campaigns": active}
 
 
+@app.get("/api/search")
+def api_search(user: CurrentUser, db: DbDep, q: str = ""):
+    """One read-only search across the whole workspace (channels, campaigns, episodes) for the ⌘K
+    palette — so 'find that thing' is one box, not 'which page do I search on?'. Tenant-scoped."""
+    q = q.strip()
+    if len(q) < 2:
+        return {"results": []}
+    like = f"%{q}%"
+    results: list[dict] = []
+    for c in db.scalars(select(Channel).where(
+            Channel.user_id == user.id, Channel.channel_name.ilike(like)).limit(5)):
+        results.append({"type": "Channel", "label": c.channel_name,
+                        "sub": c.platform.value, "href": f"/campaigns?channel={c.id}"})
+    for c in db.scalars(select(Campaign).where(
+            Campaign.user_id == user.id, Campaign.topic_name.ilike(like))
+            .order_by(Campaign.id.desc()).limit(6)):
+        results.append({"type": "Campaign", "label": c.topic_name,
+                        "sub": c.status.value, "href": f"/episodes?campaign={c.id}"})
+    camp_names = {c.id: c.topic_name for c in db.scalars(
+        select(Campaign).where(Campaign.user_id == user.id))}
+    for t in db.scalars(select(Task).where(
+            Task.user_id == user.id,
+            or_(Task.synopsis.ilike(like), cast(Task.episode_number, String).ilike(like)))
+            .order_by(Task.id.desc()).limit(8)):
+        topic = camp_names.get(t.campaign_id, f"C{t.campaign_id}")
+        label = f"Ep {t.episode_number} · {topic}"
+        results.append({"type": "Episode", "label": label,
+                        "sub": (t.synopsis or t.status.value)[:60], "href": f"/episodes/{t.id}"})
+    return {"results": results}
+
+
 @app.post("/api/tasks/{task_id}/retry")
-def retry_task(task_id: int, user: CurrentUser, db: DbDep):
+def retry_task(task_id: int, user: CurrentUser, db: DbDep, return_to: str = Form("")):
     """Retry a failed episode. If the rendered file still exists (e.g. the upload failed or the
-    item was awaiting review), only the publish step is retried — no re-render."""
+    item was awaiting review), only the publish step is retried — no re-render.
+
+    Returns JSON for the Task Logs poller (fetch, no `return_to`); a form POST from the Episode view
+    passes `return_to` and gets a 303 back to that page instead."""
     task = db.get(Task, task_id)
     if task is None or task.user_id != user.id:
         raise HTTPException(404, "Task not found")
@@ -1357,8 +1627,10 @@ def retry_task(task_id: int, user: CurrentUser, db: DbDep):
     if buf is not None and buf.video_path and os.path.exists(buf.video_path):
         db.commit()
         task_queue.enqueue_publish(buf.id)
-        return {"ok": True, "mode": "publish"}
+        return _action_redirect(return_to, "rerender", "") if _episode_return(return_to) \
+            else {"ok": True, "mode": "publish"}
     db.commit()
     task.rq_job_id = task_queue.enqueue_render(task.id)
     db.commit()
-    return {"ok": True, "mode": "render"}
+    return _action_redirect(return_to, "rerender", "") if _episode_return(return_to) \
+        else {"ok": True, "mode": "render"}

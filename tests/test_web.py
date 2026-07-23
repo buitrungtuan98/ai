@@ -130,6 +130,172 @@ def test_video_format_config_and_duration_bounds(client):
     db.close()
 
 
+def _make_episode(client):
+    """A campaign + one AWAITING_REVIEW task and its buffer item — the raw material for the
+    Episode view and its stage-aware actions."""
+    from database.db_session import SessionLocal
+    from database.models import BufferPoolItem, Campaign, Task
+    from database.types import BufferStatus, TaskStatus
+
+    _seed_campaign(client)
+    db = SessionLocal()
+    cam = db.query(Campaign).order_by(Campaign.id.desc()).first()  # the campaign just created
+    t = Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=1,
+             status=TaskStatus.AWAITING_REVIEW, synopsis="A test episode")
+    db.add(t)
+    db.commit()
+    db.refresh(t)
+    b = BufferPoolItem(campaign_id=cam.id, channel_id=cam.channel_id, episode_number=1,
+                       video_path="/nonexistent/v.mp4", status=BufferStatus.awaiting_review,
+                       metadata_json={"title": "My Episode Title", "qc": {"passed": True, "score": 8}})
+    db.add(b)
+    db.commit()
+    ids = (t.id, b.id)
+    db.close()
+    return ids
+
+
+def test_episode_view_renders_lifecycle_and_actions(client):
+    tid, bid = _make_episode(client)
+    r = client.get(f"/episodes/{tid}")
+    assert r.status_code == 200
+    body = r.text
+    assert "Lifecycle" in body and "My Episode Title" in body
+    assert f"/assets/{bid}/approve" in body                       # stage-aware action present
+    assert 'name="return_to" value="/episodes/%d"' % tid in body  # actions return to this page
+
+
+def test_episode_view_404(client):
+    assert client.get("/episodes/999999").status_code == 404
+
+
+def test_asset_action_return_to_episode(client):
+    """An action posted from the Episode view redirects back there; without return_to the classic
+    Asset Pool redirect is unchanged."""
+    tid, bid = _make_episode(client)
+    r = client.post(f"/assets/{bid}/reject",
+                    data={"reason": "slow open", "return_to": f"/episodes/{tid}"},
+                    follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"].startswith(f"/episodes/{tid}?flash=rejected")
+
+    tid2, bid2 = _make_episode(client)
+    r2 = client.post(f"/assets/{bid2}/reject", data={"reason": "x"}, follow_redirects=False)
+    assert r2.headers["location"].startswith("/assets?flash=rejected")  # unchanged default
+
+    # A hostile return_to is ignored (only /episodes/<digits> is honored).
+    tid3, bid3 = _make_episode(client)
+    r3 = client.post(f"/assets/{bid3}/reject",
+                     data={"reason": "x", "return_to": "https://evil.example/steal"},
+                     follow_redirects=False)
+    assert r3.headers["location"].startswith("/assets?flash=rejected")
+
+
+def test_campaigns_filter_and_search(client):
+    """Campaigns get server-side status chips (true counts) + text search — the shared filter grammar."""
+    from database.db_session import SessionLocal
+    from database.models import Campaign, Channel
+    from database.types import CampaignStatus
+
+    client.post("/channels/facebook", data={"channel_name": "P", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    db = SessionLocal()
+    ch = db.query(Channel).first()
+    db.add_all([
+        Campaign(user_id=ch.user_id, channel_id=ch.id, topic_name="Space Facts", total_episodes=5,
+                 status=CampaignStatus.active),
+        Campaign(user_id=ch.user_id, channel_id=ch.id, topic_name="Ocean Myths", total_episodes=5,
+                 status=CampaignStatus.pending),
+    ])
+    db.commit()
+    db.close()
+
+    r = client.get("/campaigns")
+    assert "Active (1)" in r.text and "Pending (1)" in r.text and "All (2)" in r.text
+    assert "Space Facts" in client.get("/campaigns?status=active").text
+    assert "Ocean Myths" not in client.get("/campaigns?status=active").text
+    assert "Ocean Myths" in client.get("/campaigns?q=ocean").text
+    assert "Space Facts" not in client.get("/campaigns?q=ocean").text
+
+
+def test_channels_filter_and_search(client):
+    client.post("/channels/facebook", data={"channel_name": "Alpha Page", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    client.post("/channels/facebook", data={"channel_name": "Beta Page", "page_id": "2", "page_access_token": "t"},
+                follow_redirects=False)
+    r = client.get("/channels")
+    assert "All (2)" in r.text
+    # Assert on the channel CARD heading (the scope switcher lists every channel name, so a raw
+    # substring check would always see both).
+    filtered = client.get("/channels?q=alpha").text
+    assert "<h3>Alpha Page</h3>" in filtered and "<h3>Beta Page</h3>" not in filtered
+
+
+def test_assets_search(client):
+    _make_episode(client)  # campaign "Space" with an awaiting-review buffer item
+    assert "asset-card" in client.get("/assets?q=Space").text
+    assert "No items match this filter" in client.get("/assets?q=zzznomatch").text
+
+
+def test_episodes_list_stages_search_and_links(client):
+    """The Episodes pipeline: stage tabs with counts, stage filter + search, rows link to the
+    per-episode detail view."""
+    from database.db_session import SessionLocal
+    from database.models import Campaign, Task
+    from database.types import TaskStatus
+
+    tid, _bid = _make_episode(client)  # ep1, AWAITING_REVIEW (Review stage)
+    db = SessionLocal()
+    cam = db.query(Campaign).order_by(Campaign.id.desc()).first()
+    db.add(Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=2,
+                status=TaskStatus.FAILED, synopsis="broke here"))
+    db.add(Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=3,
+                status=TaskStatus.COMPLETED, synopsis="all done now"))
+    db.commit()
+    db.close()
+
+    r = client.get("/episodes")
+    assert r.status_code == 200
+    assert "Review (1)" in r.text and "Failed (1)" in r.text and "Published (1)" in r.text
+    assert f'href="/episodes/{tid}"' in r.text                       # row → detail view
+    failed = client.get("/episodes?status=failed").text
+    assert "broke here" in failed and "all done now" not in failed   # stage filter
+    assert "all done now" in client.get("/episodes?q=done").text     # search over synopsis
+
+
+def test_scope_switcher_and_scoped_nav(client):
+    """The topbar scope switcher appears once channels exist, and an active channel scope is carried
+    onto the scope-aware nav links (Campaigns / Asset Pool / Task Logs)."""
+    assert 'id="scope-switcher"' not in client.get("/").text  # no channels → no switcher
+    client.post("/channels/facebook", data={"channel_name": "Chan A", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    from database.db_session import SessionLocal
+    from database.models import Channel
+
+    db = SessionLocal()
+    cid = db.query(Channel).first().id
+    db.close()
+
+    home = client.get("/").text
+    assert 'id="scope-switcher"' in home and "Chan A" in home
+    scoped = client.get(f"/campaigns?channel={cid}").text
+    assert f'href="/assets?channel={cid}"' in scoped and f'href="/tasks?channel={cid}"' in scoped
+    assert f'value="{cid}" selected' in scoped  # the active channel is marked in the switcher
+
+
+def test_api_search_across_types(client):
+    """The ⌘K search endpoint spans channels, campaigns and episodes and is tenant-scoped."""
+    tid, _bid = _make_episode(client)  # campaign "Space" + ep1 synopsis "A test episode"
+    assert client.get("/api/search?q=a").json()["results"] == []  # <2 chars → nothing
+    camp_hits = client.get("/api/search?q=Space").json()["results"]
+    assert any(r["type"] == "Campaign" and r["href"].startswith("/episodes?campaign=")
+               for r in camp_hits)
+    ep_hits = client.get("/api/search?q=test").json()["results"]
+    assert any(r["type"] == "Episode" and r["href"] == f"/episodes/{tid}" for r in ep_hits)
+    # The palette itself is present in the shell.
+    home = client.get("/").text
+    assert 'id="cmdk"' in home and 'id="cmdk-open"' in home
+
+
 def test_ownership_guard_404(client):
     assert client.post("/campaigns/99999/delete", follow_redirects=False).status_code == 404
 
@@ -369,6 +535,14 @@ def test_calendar_page_and_slot_cells(client):
 
     page = client.get("/calendar")
     assert page.status_code == 200 and "CalCam" in page.text and "21:00" in page.text
+    # The campaign name links to its episodes (act-from-the-calendar).
+    assert f'href="/episodes?campaign={cam.id}"' in page.text
+
+    # Week navigation: labels + bounded range, and the "Today" reset appears only when off-week.
+    assert "This week" in page.text and "Today" not in page.text
+    nxt = client.get("/calendar?week=1")
+    assert nxt.status_code == 200 and "In 1 week" in nxt.text and ">Today<" in nxt.text
+    assert client.get("/calendar?week=999").status_code == 200  # clamped, never errors
 
 
 def test_propose_campaign_route(client, monkeypatch):

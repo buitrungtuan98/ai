@@ -515,6 +515,78 @@ committed with tests green + docs. Still automation-first and zero-cost (free ti
 render-concurrency-1 lock and CPU-only constraints are untouched. Follow-ups noted inline: per-user
 Gemini budget setting (awaiting go), and multi-call chaptered generation for very long videos.
 
+# UI/UX restructure — "one episode, one home"
+
+Fixes the fragmentation where one episode's story is scattered across Task Logs / Asset Pool /
+Calendar / Performance. North star: one episode = one home · one filter language · one persistent
+scope · act where you see. Six phases, each additive (no route renamed/removed, tests stay green).
+
+## Phase 1 — Episode view `DONE`
+- New `/episodes/{task_id}` page: lifecycle timeline (Queued→Rendering→Review→Scheduled→Published,
+  current step from task status), video preview, metadata + Auto-QC verdict, render/retry history,
+  stage-aware actions, and published stats (retention/views/likes) once live.
+- Actions reuse the existing shared routes (approve/reject/rerender/publish-now/retry) via a
+  `return_to` form field guarded to `/episodes/<digits>` only; default `/assets` redirects unchanged.
+- Linked from Task Logs rows and Performance episode rows (Asset Pool/Dashboard in later phases).
+  ADR-032 records it.
+- Verified: 160 tests (3 new — episode view renders lifecycle+actions, 404 guard, return_to redirect
+  incl. hostile-path rejection), ruff clean, docs guard green; review/failed/published states
+  screenshotted at 1280px + mobile.
+
+## Phase 2 — One filter grammar `DONE`
+- Shared `filter_bar` macro (status chips with true counts + server-side search) now renders
+  identically on Campaigns, Channels and Asset Pool; all URL-driven via a `query_string` global.
+- Chip counts are scope-based (search-independent — "how many exist here"); search + status narrow
+  the visible rows + paging count. Asset Pool keeps `pool_total` so an empty search shows "no match",
+  not "empty pool". Campaigns' old client-side search removed. ADR-033.
+- Task Logs already had server search; its stage chips land with the Phase-4 pipeline (stage tabs).
+- Verified: 163 tests (3 new — campaigns filter+search+chip counts, channels search, assets search
+  incl. no-match), ruff clean, docs guard green; campaigns filter bar screenshotted.
+
+## Phase 3 — Persistent scope switcher `DONE`
+- Sidebar channel `<select>` (desktop + mobile drawer) scopes the workspace to one channel, populated
+  by a best-effort `nav_channels(request)` global (reuses auth resolution, fails open).
+- Scope lives in the URL (`?channel=<id>` — the existing drill-down param), so it's shareable +
+  back-button correct; the scope-aware nav links (Campaigns / Asset Pool / Task Logs) carry it, and
+  scoped pages compute chip counts within the scope. ADR-034.
+- Verified: 164 tests (1 new — switcher appears with channels + active scope carried onto nav links),
+  ruff clean, docs guard green; scoped Campaigns view screenshotted.
+
+## Phase 4 — Episodes pipeline list `DONE`
+- New `/episodes` list: every episode as one row grouped by lifecycle stage (Queued / Rendering /
+  Review / Scheduled / Published / Failed) — stage tabs with counts + search + scope + pagination,
+  reusing the Phase-2 filter grammar; each row → the Phase-1 detail view. Unifies what was split
+  between Task Logs (render) and Asset Pool (review).
+- "Episodes" is now a primary nav item; Task Logs & Asset Pool kept as routes + linked from the
+  Episodes header as the specialized live/review views; mobile tab bar swaps Tasks → Episodes.
+  Server-rendered (browse/triage doesn't need the live poller). ADR-035.
+- Verified: 165 tests (1 new — stage tabs+counts, stage filter, synopsis search, row→detail links),
+  ruff clean, docs guard green; Episodes list screenshotted.
+
+## Phase 5 — Planner (actionable calendar) `DONE`
+- Week navigation (`?week=` offset, clamped −8..+12) with Prev/Today/Next + a week label;
+  `upcoming_slot_cells` takes the same offset.
+- Campaign rows link to their scoped Episodes list; a zero-runway row shows an inline "⚠ buffer
+  empty → check episodes" link. Runway + per-campaign-timezone slots unchanged. ADR-036.
+- "Render now" deliberately omitted (would need a new queue-enqueue endpoint touching the single-
+  render lock / daily cap — beyond this frontend phase); empty-buffer links to where controls exist.
+- Verified: 165 tests (calendar test extended — campaign→episodes link, week labels, Today reset,
+  clamped out-of-range week), ruff clean, docs guard green; Planner screenshotted.
+
+## Phase 6 — Global search ⌘K `DONE`
+- Command palette (⌘K / Ctrl-K, or "/") over one read-only `/api/search` endpoint spanning channels
+  / campaigns / episodes (tenant-scoped, per-type capped, min 2 chars, Vietnamese text included).
+- `ui.js`: debounced fetch with a request-sequence guard, keyboard nav (↑/↓/↵/Esc), results built
+  with textContent/DOM nodes only (XSS-safe); sidebar "🔎 Search ⌘K" button opens it for mouse/mobile.
+  Jumps straight to the right home (campaign → its Episodes, episode → its detail). ADR-037.
+- Verified: 166 tests (1 new — search spans types, tenant-scoped, min-length, palette present in
+  shell), ruff clean, docs guard green; palette screenshotted with live results.
+
+## UI/UX restructure — status
+All six phases DONE (Episode view · filter grammar · scope switcher · Episodes pipeline · Planner ·
+⌘K search). One episode now has one home; one filter language; one persistent scope; act where you
+see. All additive — no route renamed/removed, Task Logs & Asset Pool kept as specialized views.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

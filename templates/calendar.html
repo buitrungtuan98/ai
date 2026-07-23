@@ -2,7 +2,14 @@
 {% import "macros.html" as ui %}
 {% block title %}Calendar · AI Video Factory{% endblock %}
 {% block content %}
-{% call ui.page_head('Content Calendar', 'Upcoming posting slots for the next 7 days. Each row is computed in its own campaign timezone; header dates use the server timezone.') %}{% endcall %}
+{% call ui.page_head('Content Calendar', 'Posting slots per week. Each row is computed in its own campaign timezone; header dates use the server timezone.') %}
+  <div class="week-nav">
+    <a class="btn ghost sm" href="/calendar?week={{ week - 1 }}">‹ Prev</a>
+    <span class="meta nowrap">{{ week_label }}</span>
+    {% if week != 0 %}<a class="btn ghost sm" href="/calendar">Today</a>{% endif %}
+    <a class="btn ghost sm" href="/calendar?week={{ week + 1 }}">Next ›</a>
+  </div>
+{% endcall %}
 
 {% if slotted %}
 <div class="card">
@@ -19,12 +26,13 @@
         {% for row in slotted %}
         <tr>
           <td class="nowrap">
-            <b>{{ row.campaign.topic_name }}</b><br>
+            <b><a href="/episodes?campaign={{ row.campaign.id }}">{{ row.campaign.topic_name }}</a></b><br>
             <span class="hint">{{ row.tz }} · Ep {{ row.campaign.current_episode }}/{{ row.campaign.total_episodes }}</span>
           </td>
           <td>
             {% set rw = 'none' if row.ready == 0 else ('low' if row.ready <= 1 else 'ok') %}
             <span class="runway {{ rw }}"><span class="dot2 {{ 'bad' if rw == 'none' else 'ok' }}"></span>{{ row.ready }} ready</span>
+            {% if row.ready == 0 %}<br><a class="hint" href="/episodes?campaign={{ row.campaign.id }}" style="color:var(--st-failed)">⚠ buffer empty — check episodes →</a>{% endif %}
           </td>
           {% for times in row.cells %}
           <td class="cell{{ ' gate' if not times }}">{{ times|join(', ') if times else '—' }}</td>
@@ -35,7 +43,8 @@
     </table>
   </div>
   <p class="hint mt-sm">A slot publishes only if a pre-rendered episode is ready — the <b>Runway</b> column
-    shows how many episodes are buffered. — = weekday gate (no publishing that day).</p>
+    shows how many episodes are buffered. — = weekday gate (no publishing that day). Click a campaign to
+    see its episodes.</p>
 </div>
 {% endif %}
 

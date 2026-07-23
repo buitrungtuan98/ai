@@ -239,9 +239,104 @@
     stopSummary();
     (function loop() { summaryTimer = setTimeout(function () { pollSummary(); loop(); }, 6000); })();
   }
+  // Topbar scope switcher: pick a channel → reload the current page scoped to it (or clear to All).
+  function initScopeSwitcher() {
+    var sel = document.getElementById("scope-switcher");
+    if (!sel) return;
+    sel.addEventListener("change", function () {
+      var base = window.location.pathname;
+      window.location.href = sel.value ? base + "?channel=" + encodeURIComponent(sel.value) : base;
+    });
+  }
+
+  // Global search palette (⌘K / Ctrl-K, or "/"): one box across channels/campaigns/episodes.
+  function initCmdK() {
+    var backdrop = document.getElementById("cmdk");
+    var input = document.getElementById("cmdk-input");
+    var list = document.getElementById("cmdk-results");
+    if (!backdrop || !input || !list) return;
+    var items = [], sel = -1, timer = null, seq = 0;
+
+    function open() {
+      backdrop.hidden = false;
+      input.value = "";
+      list.innerHTML = "";
+      items = [];
+      sel = -1;
+      input.focus();
+    }
+    function close() { backdrop.hidden = true; }
+    function go() { if (sel >= 0 && items[sel]) window.location.href = items[sel].href; }
+
+    function highlight() {
+      Array.prototype.forEach.call(list.children, function (li, i) {
+        li.classList.toggle("active", i === sel);
+      });
+      if (sel >= 0 && list.children[sel]) list.children[sel].scrollIntoView({ block: "nearest" });
+    }
+    function render(results) {
+      items = results || [];
+      sel = items.length ? 0 : -1;
+      list.innerHTML = "";
+      if (!items.length) {
+        var empty = document.createElement("li");
+        empty.className = "cmdk-empty";
+        empty.textContent = input.value.trim().length < 2 ? "Type to search…" : "No matches.";
+        list.appendChild(empty);
+        return;
+      }
+      items.forEach(function (r, i) {
+        // Built with textContent (never innerHTML) — the labels are user/AI data.
+        var li = document.createElement("li");
+        li.className = "cmdk-item" + (i === 0 ? " active" : "");
+        var tag = document.createElement("span");
+        tag.className = "cmdk-type";
+        tag.textContent = r.type;
+        var label = document.createElement("span");
+        label.className = "cmdk-label";
+        label.textContent = r.label;
+        var sub = document.createElement("span");
+        sub.className = "cmdk-sub";
+        sub.textContent = r.sub || "";
+        li.appendChild(tag);
+        li.appendChild(label);
+        li.appendChild(sub);
+        li.addEventListener("click", function () { sel = i; go(); });
+        list.appendChild(li);
+      });
+    }
+    function search() {
+      var q = input.value.trim();
+      if (q.length < 2) { render([]); return; }
+      var mine = ++seq;
+      fetch("/api/search?q=" + encodeURIComponent(q), { headers: { "Accept": "application/json" } })
+        .then(function (r) { return r.json(); })
+        .then(function (d) { if (mine === seq) render(d.results || []); })
+        .catch(function () { /* transient */ });
+    }
+
+    document.getElementById("cmdk-open") &&
+      document.getElementById("cmdk-open").addEventListener("click", open);
+    input.addEventListener("input", function () { clearTimeout(timer); timer = setTimeout(search, 180); });
+    backdrop.addEventListener("click", function (e) { if (e.target === backdrop) close(); });
+    input.addEventListener("keydown", function (e) {
+      if (e.key === "ArrowDown") { sel = Math.min(sel + 1, items.length - 1); highlight(); e.preventDefault(); }
+      else if (e.key === "ArrowUp") { sel = Math.max(sel - 1, 0); highlight(); e.preventDefault(); }
+      else if (e.key === "Enter") { go(); e.preventDefault(); }
+      else if (e.key === "Escape") { close(); }
+    });
+    document.addEventListener("keydown", function (e) {
+      var typing = /^(input|textarea|select)$/i.test((e.target.tagName || ""));
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { open(); e.preventDefault(); }
+      else if (e.key === "/" && !typing && backdrop.hidden) { open(); e.preventDefault(); }
+    });
+  }
+
   function init() {
     initTheme();
     initNav();
+    initScopeSwitcher();
+    initCmdK();
     initConfirmForms();
     initRelTimes();
     pollSummary();

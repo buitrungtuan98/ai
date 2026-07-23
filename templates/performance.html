@@ -102,7 +102,7 @@
         {% for t in episodes_page %}
         {% set ret = t.stats_json.get('avg_pct_viewed') if t.stats_json else none %}
         <tr {% if t.id == best_id %}class="win-row"{% endif %}>
-          <td>{{ t.episode_number }}{% if t.id == best_id %} 🏆{% endif %}</td>
+          <td><a href="/episodes/{{ t.id }}">{{ t.episode_number }}</a>{% if t.id == best_id %} 🏆{% endif %}</td>
           <td class="meta" style="max-width:340px">{{ t.synopsis or '—' }}</td>
           <td>{{ ui.pill(t.status.value) }}</td>
           <td>{{ t.ab_variant or '—' }}</td>

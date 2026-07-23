@@ -593,3 +593,99 @@ detectors beat a handful of fuzzy ones: caption-overflow and "hook-present" were
 out — the former needs a render-and-measure pass (not deterministic from the master), and the latter is
 already enforced upstream by the script prompt + critic, so adding flaky versions here would only
 produce false rejects (YAGNI).
+
+### ADR-032 — Episode view: one home per episode (UI restructure, phase 1)
+**Decision:** a new `/episodes/{task_id}` page gathers an episode's whole lifecycle into one place —
+a Queued→Rendering→Review→Scheduled→Published timeline (current step derived from the task status),
+the video preview, metadata + Auto-QC verdict, render/retry history, stage-aware actions, and (once
+live) published stats. Every other surface links to it (Task Logs rows, Performance episode rows;
+Asset Pool/Dashboard follow in later phases). The action buttons POST to the EXISTING shared routes
+(`/assets/{id}/approve|reject|rerender|publish-now`, `/api/tasks/{id}/retry`) with a `return_to`
+form field; a small `_episode_return` guard accepts only `/episodes/<digits>` and redirects there,
+otherwise the routes behave exactly as before (default `/assets` redirects unchanged). **Why:** the
+operator's real pain was *tracking* — one episode's story was smeared across Task Logs (render), Asset
+Pool (review), Calendar (slot) and Performance (stats), and the human did the join. Giving an episode
+a single URL is the highest-leverage fix, and it's almost entirely a read + link layer over data that
+already exists (Task ⋈ BufferPoolItem by campaign+episode), so it ships without touching the render or
+publish pipeline. Reusing the existing action routes via `return_to` (rather than duplicating them)
+keeps one definition of each action and one set of tests; the allowlist guard means a crafted
+`return_to` can only ever bounce within the app, never to an external host.
+
+### ADR-033 — One filter grammar across list pages (UI restructure, phase 2)
+**Decision:** a single `filter_bar` Jinja macro — status chips with true counts + a server-side
+search box, all URL-driven — now renders identically on Campaigns, Channels and Asset Pool (Task Logs
+already had server search; its stage chips arrive with the Phase-4 pipeline). Chip counts are computed
+over the page's *scope* (channel/campaign drill-down) and are search-independent, so they always read
+"how many exist here"; the search term and active status narrow only the visible rows and the paging
+count. A `query_string()` template global builds the chip/search hrefs (dropping empty params,
+URL-encoding), and Asset Pool keeps a separate `pool_total` (scope count, ignoring search) so an
+empty search result shows "no match" rather than the "buffer pool is empty" state. Campaigns' old
+client-side, only-shown-above-3 search box is gone. **Why:** the pages had four different filter
+models (client hide-search on Campaigns, server chips on Assets, server search on Task Logs, nothing
+on Channels), which is the concrete source of the "fragmented, hard to filter" complaint. One macro +
+one URL convention means every list filters the same way, every filtered view is linkable and
+back-button correct (same principle as the pagination ADRs), and the server sends only the rows it
+means to show. Keeping chip counts scope-based rather than search-filtered avoids the confusing
+"counts jump around as I type" behavior and keeps the empty-vs-no-match distinction honest.
+
+### ADR-034 — Persistent channel scope switcher (UI restructure, phase 3)
+**Decision:** a channel `<select>` in the sidebar (visible on desktop, reachable in the mobile drawer)
+scopes the operator's whole workspace to one channel. It's populated by a `nav_channels(request)`
+template global — a best-effort, self-contained helper that reuses the auth user-resolution and opens
+its own short-lived session, returning [] on any failure so `base.html` always renders. The active
+scope lives in the URL (`?channel=<id>`, the same drill-down param the list pages already accept), so
+it is shareable and back-button correct; the switcher's onchange just reloads the current path with
+(or without) that param, and the scope-aware nav links (Campaigns / Asset Pool / Task Logs) carry the
+active `?channel=` so the scope follows you across them. Scoped pages already show a breadcrumb +
+"show all" escape and now compute their chip counts within the scope. **Why:** a channel operator was
+re-drilling from scratch on every navigation because scope didn't persist. Keeping the scope in the
+URL (rather than a cookie/session) matches every other stateful thing in this app — no hidden state,
+every scoped view linkable — and reusing the existing `?channel=` param means zero new query plumbing
+on the pages. The global-function injection avoids threading `channels` through every route's context
+or adding request middleware; it costs one cheap read per page render, acceptable on a single-box app,
+and fails open so it can never take a page down.
+
+### ADR-035 — Episodes pipeline list unifies Task Logs + Asset Pool (UI restructure, phase 4)
+**Decision:** a new `/episodes` list shows every episode as one row grouped by lifecycle STAGE
+(Queued / Rendering / Review / Scheduled / Published / Failed), each a friendly bucket over the 9 raw
+task statuses (`_STAGE_STATUSES`). It reuses the Phase-2 filter grammar — stage tabs with counts +
+search + scope + pagination, all URL-driven — and every row links to the Phase-1 `/episodes/{id}`
+detail page. "Episodes" becomes a primary nav item (Content group); Task Logs and Asset Pool stay as
+routes and are linked from the Episodes header ("live render log", "Asset Pool") as the specialized
+live/review views, and the mobile tab bar swaps its Tasks slot for Episodes. The list is
+server-rendered (not the live JS poller) with relative-time stamps that tick client-side. **Why:** the
+fragmentation the operator felt was one episode having no single browsable home — you watched it in
+Task Logs, reviewed it in Asset Pool, and mentally joined the two. Episodes is that home at the list
+level, and it drops onto already-consistent foundations (the detail view from phase 1, the filter
+grammar from phase 2, the scope switcher from phase 3), so it's mostly a query + template, not new
+mechanism. It stays server-rendered because "browse/triage by stage" doesn't need per-second liveness
+(that's what Task Logs is for) — keeping it static means it's just another instance of the one filter
+grammar rather than a second live-polling surface to maintain.
+
+### ADR-036 — Planner: an actionable calendar (UI restructure, phase 5)
+**Decision:** the calendar gains week navigation (`?week=<offset>`, clamped to −8..+12) with
+Prev/Today/Next controls and a "This week / in N weeks" label; `upcoming_slot_cells` takes the same
+`week` offset. Each campaign row's name links to its scoped Episodes list, and a row whose ready
+buffer is 0 shows an inline "⚠ buffer empty — check episodes" link. Runway indicators and the
+per-campaign-timezone slot computation are unchanged. **Why:** the calendar was a read-only poster of
+the next 7 days — you couldn't look ahead or act from it. Week navigation (URL-driven, like every
+other stateful view) makes it a planning tool, and linking rows to the Episodes list turns "this slot
+won't fill" into a one-click path to the episodes that need attention. A "render now" button was
+deliberately NOT added: forcing an out-of-band render would mean a new queue-enqueue endpoint and
+interact with the single-render lock / daily-cap logic — higher risk than this frontend-only phase
+warrants — so the empty-buffer case links to where the operator already has the controls instead.
+
+### ADR-037 — Global search palette (⌘K) (UI restructure, phase 6)
+**Decision:** a command palette (⌘K / Ctrl-K, or "/" when not typing) searches the whole workspace
+through one read-only `/api/search` endpoint that spans channels (name), campaigns (topic) and
+episodes (synopsis / episode number), tenant-scoped, capped per type, min 2 chars. The palette lives
+in `base.html` + `ui.js`: a debounced fetch with a monotonic request-sequence guard (so a slow
+response can't overwrite a newer query — same pattern as the Task Logs poller), keyboard navigation
+(↑/↓/↵/Esc), and results built with `textContent`/DOM nodes only (never innerHTML — the labels are
+user/AI data, honoring the XSS boundary). A sidebar "🔎 Search ⌘K" button opens it for mouse/mobile.
+**Why:** "which page do I search on?" was itself part of the fragmentation — each page searched only
+its own type. One palette over one endpoint makes finding anything a single reflex and jumps straight
+to the right home (a campaign → its Episodes, an episode → its detail view). Reusing the established
+request-sequence guard and the textContent-only build means it inherits the app's correctness and
+security conventions rather than inventing new ones; keeping the endpoint read-only and per-type-capped
+keeps it cheap on the single box.
