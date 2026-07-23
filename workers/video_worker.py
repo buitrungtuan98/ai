@@ -441,6 +441,7 @@ def render_task(task_id: int) -> None:
             duration_max_s=cfg.get("duration_max_s"),
             rate_pct=int(cfg.get("rate_pct", 0)),
             script_depth=cfg.get("script_depth", "standard"),
+            video_format=cfg.get("video_format", "short"),
             model=gemini_model,
         )
         # Episode memory must NEVER be empty after a successful generation — an episode without a
@@ -485,6 +486,7 @@ def render_task(task_id: int) -> None:
                 affiliate_label=cfg.get("affiliate_label"),
                 recent_clip_ids=recent_clips,
                 motion_seed=task.episode_number,
+                video_format=cfg.get("video_format", "short"),
                 vet_batch=vet_batch,
                 on_progress=lambda p: set_progress(task_id, 10 + p * 0.8),
             )

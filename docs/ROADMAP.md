@@ -481,6 +481,22 @@ support, stronger QC. Everything stays automation-first and zero-cost (free tier
   worker dedupe round-trip; select_clips test replaced; +trim path added to the ffmpeg integration
   render), ruff clean, docs guard green.
 
+## Batch D — Long-video support `DONE`
+- **RenderProfile**: per-campaign `video_format` (`short` default | `long`) selects geometry — short =
+  vertical 1080×1920 (unchanged), long = 16:9 1920×1080. `motion_filter`, `build_scene_args`,
+  `build_ass`, `generate_thumbnail` and Pexels orientation all read the profile; it defaults to
+  `short` so every existing call/test renders byte-identical vertical output (purely additive).
+- **Long-form script**: `VideoScript.scenes` cap raised to 40; prompt branches (12-30 scenes,
+  part-numbered titles welcome — inverse of the Shorts rule). `CampaignProposal` proposes a format.
+- **Chapters**: `chapter_lines` emits YouTube description timestamps from scene starts (≥10s-spaced,
+  ≥3 or none). Publishing unchanged — YouTube auto-classifies by aspect/duration.
+- **Bounds + UI**: duration clamps 60-900s for long (vs 10-180s short); campaign form gets a
+  short/long selector (+ propose-fill) with a CPU-cost hint. ADR-030 records it.
+- Deferred within D: multi-call chaptered *generation* (outline + per-chapter) — single-call with the
+  raised scene cap suffices for a first cut; the repair loop absorbs oversized drafts.
+- Verified: 155 tests (5 new — profiles/geometry, caption dims, chapter_lines, long prompt branch,
+  web format+duration bounds; +1 ffmpeg-gated 16:9 scene render), ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

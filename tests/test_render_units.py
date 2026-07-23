@@ -71,6 +71,54 @@ def test_prefer_unused_reorders_footage():
     assert [c.id for c in prefer_unused(pool, set())] == [1, 2, 3]
 
 
+def test_render_profiles_and_long_geometry():
+    from core.video_factory import (LONG_PROFILE, SHORT_PROFILE, build_scene_args, resolve_profile)
+
+    assert resolve_profile("short") is SHORT_PROFILE and resolve_profile(None) is SHORT_PROFILE
+    assert resolve_profile("long") is LONG_PROFILE
+    assert (SHORT_PROFILE.width, SHORT_PROFILE.height) == (1080, 1920)
+    assert (LONG_PROFILE.width, LONG_PROFILE.height) == (1920, 1080)
+
+    # Long profile → landscape scale/crop and a landscape zoompan size.
+    a = build_scene_args(["c.mp4"], "a.mp3", "s.ass", "o.mp4", 5.0, None,
+                         motion_effect="zoom_in", profile=LONG_PROFILE)
+    fc = a[a.index("-filter_complex") + 1]
+    assert "scale=1920:1080" in fc and "crop=1920:1080" in fc and "1920x1080" in fc
+    # Default (no profile) is unchanged vertical geometry.
+    b = build_scene_args(["c.mp4"], "a.mp3", "s.ass", "o.mp4", 5.0, None)
+    assert "scale=1080:1920" in b[b.index("-filter_complex") + 1]
+
+
+def test_build_ass_dimensions(tmp_path):
+    from core.captions import build_ass
+    from core.tts import WordTiming
+
+    out = str(tmp_path / "s.ass")
+    build_ass([WordTiming("Hi", 0.0, 0.5)], out, width=1920, height=1080)
+    txt = open(out, encoding="utf-8").read()
+    assert "PlayResX: 1920" in txt and "PlayResY: 1080" in txt
+    # Default stays vertical (and the historical MarginV 280 is preserved).
+    out2 = str(tmp_path / "s2.ass")
+    build_ass([WordTiming("Hi", 0.0, 0.5)], out2)
+    txt2 = open(out2, encoding="utf-8").read()
+    assert "PlayResX: 1080" in txt2 and "PlayResY: 1920" in txt2 and ",280,1" in txt2
+
+
+def test_chapter_lines_for_long():
+    from core.video_factory import chapter_lines
+
+    class S:
+        def __init__(self, hook):
+            self.caption_hook = hook
+
+    scenes = [S(f"Chapter {i}") for i in range(5)]
+    lines = chapter_lines(scenes, [30.0] * 5)
+    assert len(lines) == 5
+    assert lines[0].startswith("0:00 ") and lines[1].startswith("0:30 ")
+    # Cuts closer than 10s can't all qualify → too few chapters returns [] (never a broken half-list).
+    assert chapter_lines([S("a"), S("b"), S("c")], [3.0, 3.0, 3.0]) == []
+
+
 def test_voice_check_flags_broken_tts(monkeypatch):
     """Deterministic voice sanity (zero API cost): silent, truncated or unreadable narration
     audio is caught BEFORE minutes of CPU rendering. Unlike vision QC this fails CLOSED."""
@@ -345,18 +393,25 @@ def test_search_footage_fallback_chain(monkeypatch):
 
     calls = []
 
-    def fake_search(query, key, per_page=10):
-        calls.append(query)
+    def fake_search(query, key, per_page=10, orientation="portrait"):
+        calls.append((query, orientation))
         # Joined query and first keyword fail; second keyword succeeds.
         return ["clip"] if query == "fog" else []
 
     monkeypatch.setattr(vf.pexels, "search_videos", fake_search)
     assert vf.search_footage(["dòng sông", "fog"], "k") == ["clip"]
-    assert calls == ["dòng sông fog", "dòng sông", "fog"]
+    assert [q for q, _ in calls] == ["dòng sông fog", "dòng sông", "fog"]
+    assert all(o == "portrait" for _, o in calls)  # default orientation
+
+    # Landscape orientation flows through for long-form.
+    calls.clear()
+    vf.search_footage(["fog"], "k", "landscape")
+    assert calls[0] == ("fog", "landscape")
 
     # Everything fails → generic fallback is tried last; empty means truly nothing.
     calls.clear()
-    monkeypatch.setattr(vf.pexels, "search_videos", lambda q, k, per_page=10: (calls.append(q), [])[1])
+    monkeypatch.setattr(vf.pexels, "search_videos",
+                        lambda q, k, per_page=10, orientation="portrait": (calls.append(q), [])[1])
     assert vf.search_footage(["xyz"], "k") == []
     assert calls[-1] == vf.FALLBACK_FOOTAGE_QUERY
 

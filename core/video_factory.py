@@ -27,6 +27,27 @@ TARGET_W = 1080
 TARGET_H = 1920
 FPS = 30
 
+
+@dataclass(frozen=True)
+class RenderProfile:
+    """The output geometry for a video format. `short` is the vertical 1080×1920 default (unchanged);
+    `long` is 16:9 1920×1080 for multi-minute videos. Everything geometric (scale/crop, motion,
+    captions, thumbnail) reads the profile, so adding a format never forks the render pipeline."""
+    name: str
+    width: int
+    height: int
+    fps: int = 30
+
+
+SHORT_PROFILE = RenderProfile("short", TARGET_W, TARGET_H, FPS)   # == the historical constants
+LONG_PROFILE = RenderProfile("long", 1920, 1080, FPS)
+PROFILES: dict[str, RenderProfile] = {"short": SHORT_PROFILE, "long": LONG_PROFILE}
+
+
+def resolve_profile(video_format: str | None) -> RenderProfile:
+    return PROFILES.get(video_format or "short", SHORT_PROFILE)
+
+
 # Stage weights for a monotonic global progress bar (sum = 100). Per-scene work (TTS + footage +
 # encode) is one rising band so progress never jumps backward between scenes.
 _STAGE_BUDGET = {"scenes": 85, "concat": 8, "thumb": 7}
@@ -149,19 +170,20 @@ def voice_check(audio_path: str, text: str) -> str | None:
     return None
 
 
-def motion_filter(effect: str, duration: float) -> str:
-    frames = max(int(duration * FPS), 1)
+def motion_filter(effect: str, duration: float, profile: RenderProfile = SHORT_PROFILE) -> str:
+    w, h, fps = profile.width, profile.height, profile.fps
+    frames = max(int(duration * fps), 1)
     rate = (_MOTION_MAX_ZOOM - 1.0) / frames
     center = "x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
     if effect == "zoom_in":
         return (f"zoompan=z='min(zoom+{rate:.6f},{_MOTION_MAX_ZOOM})':{center}"
-                f":d=1:s={TARGET_W}x{TARGET_H}:fps={FPS}")
+                f":d=1:s={w}x{h}:fps={fps}")
     if effect == "zoom_out":
         return (f"zoompan=z='if(eq(on,1),{_MOTION_MAX_ZOOM},max(zoom-{rate:.6f},1.0))':{center}"
-                f":d=1:s={TARGET_W}x{TARGET_H}:fps={FPS}")
+                f":d=1:s={w}x{h}:fps={fps}")
     # pan: overscan then glide horizontally across the extra width for the scene duration
-    ow, oh = int(TARGET_W * 1.12), int(TARGET_H * 1.12)
-    return (f"scale={ow}:{oh},crop={TARGET_W}:{TARGET_H}"
+    ow, oh = int(w * 1.12), int(h * 1.12)
+    return (f"scale={ow}:{oh},crop={w}:{h}"
             f":x='(in_w-out_w)*min(t/{max(duration, 0.1):.3f},1)':y='(in_h-out_h)/2'")
 
 
@@ -175,13 +197,15 @@ def build_scene_args(
     motion_effect: str | None = None,
     color_grade: str | None = None,
     shot_durations: list[float] | None = None,
+    profile: RenderProfile = SHORT_PROFILE,
 ) -> list[str]:
     """Build the ffmpeg args (after the `ffmpeg` binary) for one re-encoded scene.
 
     When `shot_durations` is given, each clip is trimmed to its shot length before scaling — this is
     what turns a pile of clips into an edited cut rhythm. Omit it (the default) for the legacy
-    play-each-clip-in-full behavior."""
+    play-each-clip-in-full behavior. `profile` sets the output geometry (default vertical 1080×1920)."""
     branding = branding or Branding()
+    w, h, fps = profile.width, profile.height, profile.fps
     args: list[str] = []
     for path in clip_paths:
         args += ["-i", path]
@@ -197,8 +221,8 @@ def build_scene_args(
     for i in range(len(clip_paths)):
         trim = f"trim=0:{shot_durations[i]:.3f}," if shot_durations else ""
         filters.append(
-            f"[{i}:v]{trim}scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=increase,"
-            f"crop={TARGET_W}:{TARGET_H},setsar=1,fps={FPS},setpts=PTS-STARTPTS[v{i}]"
+            f"[{i}:v]{trim}scale={w}:{h}:force_original_aspect_ratio=increase,"
+            f"crop={w}:{h},setsar=1,fps={fps},setpts=PTS-STARTPTS[v{i}]"
         )
     if len(clip_paths) == 1:
         cur = "[v0]"
@@ -208,7 +232,7 @@ def build_scene_args(
         cur = "[vc]"
 
     if motion_effect:
-        filters.append(f"{cur}{motion_filter(motion_effect, duration)}[vmn]")
+        filters.append(f"{cur}{motion_filter(motion_effect, duration, profile)}[vmn]")
         cur = "[vmn]"
 
     if color_grade and color_grade in COLOR_GRADES:
@@ -233,7 +257,7 @@ def build_scene_args(
         "-filter_complex", ";".join(filters),
         "-map", "[vout]", "-map", f"{audio_idx}:a",
         "-c:v", "libx264", "-preset", settings.FFMPEG_PRESET, "-crf", "23",
-        "-pix_fmt", "yuv420p", "-r", str(FPS), "-vsync", "cfr",
+        "-pix_fmt", "yuv420p", "-r", str(fps), "-vsync", "cfr",
         "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "128k",
         "-t", f"{duration:.3f}", "-video_track_timescale", "30000",
         # Encoder thread cap (CLAUDE.md constraint 4). As an OUTPUT option it binds to libx264;
@@ -292,14 +316,15 @@ def build_concat_args(
 FALLBACK_FOOTAGE_QUERY = "abstract dark background"
 
 
-def search_footage(keywords: list[str], api_key: str) -> list:
+def search_footage(keywords: list[str], api_key: str, orientation: str = "portrait") -> list:
     """Resilient footage search: joined keywords → each keyword alone → generic fallback.
     One weak keyword (or a non-English slip) must not fail the whole episode — and neither must
-    a transient Pexels error on one query: each call is isolated so the chain can continue."""
+    a transient Pexels error on one query: each call is isolated so the chain can continue.
+    `orientation` matches the output geometry (portrait for shorts, landscape for long-form)."""
     queries = [" ".join(keywords), *keywords, FALLBACK_FOOTAGE_QUERY]
     for query in queries:
         try:
-            found = pexels.search_videos(query, api_key, per_page=10)
+            found = pexels.search_videos(query, api_key, per_page=10, orientation=orientation)
         except Exception:  # noqa: BLE001 — a 429/5xx on one query must not kill the episode
             logger.warning("Pexels search failed for %r — trying next fallback", query, exc_info=True)
             continue
@@ -308,6 +333,30 @@ def search_footage(keywords: list[str], api_key: str) -> list:
                 logger.info("Footage fallback used: %r", query)
             return found
     return []
+
+
+def _fmt_ts(seconds: float) -> str:
+    s = int(seconds)
+    h, m, sec = s // 3600, (s % 3600) // 60, s % 60
+    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
+
+def chapter_lines(scenes: list, durations: list[float]) -> list[str]:
+    """YouTube description chapter markers from scene start times. The first is forced to 0:00 and
+    entries are spaced ≥10s (YouTube's rule, or it renders none); returns [] if fewer than 3 qualify
+    so we never emit a broken half-list. Titles use each scene's caption_hook, else 'Part N'."""
+    picked: list[tuple[float, str]] = []
+    t, last = 0.0, -1e9
+    for i, (scene, d) in enumerate(zip(scenes, durations)):
+        if i == 0 or t - last >= 10.0:
+            title = (getattr(scene, "caption_hook", None) or f"Part {len(picked) + 1}").strip()
+            picked.append((t, title))
+            last = t
+        t += d
+    if len(picked) < 3:
+        return []
+    picked[0] = (0.0, picked[0][1])
+    return [f"{_fmt_ts(start)} {title}" for start, title in picked]
 
 
 def prefer_unused(found: list, recent_clip_ids: set[int] | None) -> list:
@@ -395,6 +444,7 @@ def produce(
     extra_blacklist: set[str] | None = None,
     recent_clip_ids: set[int] | None = None,
     motion_seed: int = 0,
+    video_format: str = "short",
     vet_batch=None,
     on_progress=None,
 ) -> RenderResult:
@@ -402,6 +452,7 @@ def produce(
     `output_dir` (outside the workspace) so it survives cleanup; all temp media is auto-removed."""
     import os
 
+    profile = resolve_profile(video_format)
     branding = branding or Branding()
     if music_path and not os.path.exists(music_path):
         # Explicit failure beats a silently music-less video (config-truth rule).
@@ -452,11 +503,12 @@ def produce(
                     raise RuntimeError(f"Scene {si} narration failed the voice check: {problem}")
             d_i = media.probe_duration(audio_path)
 
-            # Footage to cover d_i (with keyword fallback chain). Reorder so footage this channel
-            # hasn't used yet leads — the shot planner then draws from fresh clips first.
+            # Footage to cover d_i (with keyword fallback chain). Orientation matches the format
+            # (landscape for long-form); reorder so footage this channel hasn't used yet leads.
             safety_filter.assert_licensed_footage("pexels")
+            orientation = "landscape" if profile.width > profile.height else "portrait"
             found = prefer_unused(
-                search_footage(scene.pexels_keywords, pexels_api_key), recent_clip_ids)
+                search_footage(scene.pexels_keywords, pexels_api_key, orientation), recent_clip_ids)
             if not found:
                 raise RuntimeError(
                     f"No Pexels footage for scene {si} (keywords={scene.pexels_keywords!r})")
@@ -503,13 +555,14 @@ def produce(
 
             ass_path = ws.path(f"scene_{si}.ass")
             build_ass(plan["timings"], ass_path, clip_duration=d_i, style=subtitle_style,
-                      theme=caption_theme, accent_hex=branding.tint_color)
+                      theme=caption_theme, accent_hex=branding.tint_color,
+                      width=profile.width, height=profile.height)
             scene_out = ws.path(f"scene_{si}.mp4")
             # Motion effect seeded by episode so different episodes don't share an identical rhythm.
             effect = MOTION_EFFECTS[(motion_seed + si) % len(MOTION_EFFECTS)] if motion else None
             args = build_scene_args(clip_paths, plan["audio"], ass_path, scene_out, d_i, branding,
                                     motion_effect=effect, color_grade=color_grade,
-                                    shot_durations=shot_durations)
+                                    shot_durations=shot_durations, profile=profile)
             run_ffmpeg(
                 args, total_duration=d_i,
                 on_progress=lambda p, s=si: report("scenes", 30 + (s + p / 100) / n_scenes * 70),
@@ -531,9 +584,16 @@ def produce(
         metadata = pick_metadata(script, episode_number, ab_testing=ab_testing,
                                  title_prefix=title_prefix,
                                  affiliate_url=affiliate_url, affiliate_label=affiliate_label)
+        # Long-form gets YouTube chapter markers in the description (real-creator signal); the
+        # platform turns "0:00 Title" lines into a clickable chapter list.
+        if profile.name == "long":
+            chapters = chapter_lines(script.scenes, durations)
+            if chapters:
+                metadata["description"] = "\n".join(chapters) + "\n\n" + metadata.get("description", "")
         thumb = os.path.join(output_dir, f"episode_{episode_number}.jpg")
         generate_thumbnail(master, thumb, metadata["title"],
-                           logo_path=branding.watermark_path)
+                           logo_path=branding.watermark_path,
+                           width=profile.width, height=profile.height)
         report("thumb", 100)
 
     return RenderResult(

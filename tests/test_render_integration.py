@@ -66,6 +66,28 @@ def test_scene_render_and_concat_copy(tmp_path):
     assert media.probe_duration(master) > dur * 1.5  # two scenes stitched
 
 
+def test_long_profile_scene_renders_16x9(tmp_path):
+    """A scene rendered with the long profile is real 1920×1080 (landscape) — validates the
+    profile-driven scale/crop/motion geometry on actual ffmpeg."""
+    from core import media
+    from core.captions import build_ass
+    from core.ffmpeg_runner import run_ffmpeg
+    from core.tts import WordTiming
+    from core.video_factory import LONG_PROFILE, build_scene_args
+
+    d = str(tmp_path)
+    audio, clip = _make_inputs(d)
+    dur = media.probe_duration(audio)
+    ass = os.path.join(d, "s.ass")
+    build_ass([WordTiming("Hi", 0.0, dur)], ass, clip_duration=dur,
+              width=LONG_PROFILE.width, height=LONG_PROFILE.height)
+    scene = os.path.join(d, "long.mp4")
+    run_ffmpeg(build_scene_args([clip], audio, ass, scene, dur, None,
+                                motion_effect="zoom_in", shot_durations=[dur], profile=LONG_PROFILE))
+    meta = media.probe_video_meta(scene)
+    assert meta["width"] == 1920 and meta["height"] == 1080
+
+
 def _assert_filter_valid(graph: str) -> None:
     """One lavfi frame through the filter — an invalid option name fails instantly."""
     subprocess.run(

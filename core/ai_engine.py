@@ -142,7 +142,9 @@ class MetadataVariation(BaseModel):
 class VideoScript(_SynopsisMixin):
     language: Language
     topic: str
-    scenes: list[Scene] = Field(min_length=3, max_length=8)
+    # Up to 8 scenes covers a short; long-form (multi-minute) videos need many more, so the cap is
+    # 40 and the prompt asks for a count that fits the target duration.
+    scenes: list[Scene] = Field(min_length=3, max_length=40)
     metadata_variations: list[MetadataVariation] = Field(min_length=3, max_length=3)
 
 
@@ -342,6 +344,10 @@ class CampaignProposal(BaseModel):
     """A complete, ready-to-review campaign configuration proposed by Gemini."""
     topic_name: str = Field(min_length=1, max_length=120)
     language: Language
+    video_format: Literal["short", "long"] = Field(
+        default="short",
+        description="'short' = vertical clips ≤3 min (the usual choice); 'long' = horizontal 16:9 "
+                    "multi-minute videos. Only choose 'long' when the concept truly needs depth.")
     total_episodes: int = Field(ge=1, le=365)
     persona: str = Field(min_length=1)
     style_examples: str = ""
@@ -625,6 +631,7 @@ def build_script_prompt(
     duration_max_s: int | None = None,
     rate_pct: int = 0,
     brief: EpisodeBrief | None = None,
+    video_format: str = "short",
 ) -> str:
     length_line = ""
     if duration_min_s and duration_max_s:
@@ -635,26 +642,45 @@ def build_script_prompt(
             f"{duration_max_s} seconds when spoken — approximately {lo}-{hi} words in {language}. "
             "Fit the scene count and sentence lengths to this budget. "
         )
+    is_long = video_format == "long"
+    if is_long:
+        format_line = ("Create a HORIZONTAL (16:9) long-form video script for episode "
+                       f"{episode} of {total_episodes} in a series about: '{topic}'. ")
+        scene_line = ("Produce 12-30 scenes covering the full length — each a beat of the story, "
+                      "with narration, an on-screen caption hook that doubles as a chapter title, "
+                      "and 1-4 stock-footage keywords. ")
+        # Long-form is browsed as a series, so episode/part numbering in the title HELPS discovery.
+        title_line = ("TITLE RULES: a strong, specific title; a part/episode number is welcome "
+                      "('Part 3', 'Tập 5'). Open with the most curious element. ")
+        hashtag_line = (f"voice. End with 3-6 relevant hashtags plus EXACTLY this series hashtag: "
+                        f"{series_hashtag(topic)} (fans find the whole series through it).")
+    else:
+        format_line = ("Create a vertical short-form video script for episode "
+                       f"{episode} of {total_episodes} in a series about: '{topic}'. ")
+        scene_line = ("Produce 3-6 scenes; each scene has narration the voice will speak, an "
+                      "optional short on-screen caption hook, and 1-4 stock-footage keywords. ")
+        title_line = ("TITLE RULES (Shorts are discovered one by one — every title must stand "
+                      "alone): NEVER put the series/campaign name in the title, and NEVER include "
+                      "episode numbering of any form ('Ep 5', 'Tập 3', 'Part 2', '#12'). Open with "
+                      "the most curious/emotional element in the first 40 characters; ideally stay "
+                      "under 70 characters. Each of the 3 variants takes a genuinely different "
+                      "angle (question / bold claim / mid-action). ")
+        hashtag_line = (f"voice. End with 3-5 hashtags: relevant topical ones plus #Shorts and "
+                        f"EXACTLY this series hashtag: {series_hashtag(topic)} (fans find the whole "
+                        "series through it).")
     base = (
-        f"Create a vertical short-form video script for episode {episode} of {total_episodes} "
-        f"in a series about: '{topic}'. Language: {language}. "
-        + length_line +
-        "Produce 3-6 scenes; each scene has narration the voice will speak, an optional short "
-        "on-screen caption hook, and 1-4 stock-footage keywords. Also produce exactly 3 distinct "
-        "A/B metadata variations (variant A/B/C) each with a title (<=100 chars), a description, "
-        "and 5-15 tags, all in the same persona/voice. Include a one-sentence 'synopsis' of this "
-        "episode's specific premise. Keep it original and engaging. "
+        format_line +
+        f"Language: {language}. "
+        + length_line + scene_line +
+        "Also produce exactly 3 distinct A/B metadata variations (variant A/B/C) each with a title "
+        "(<=100 chars), a description, and 5-15 tags, all in the same persona/voice. Include a "
+        "one-sentence 'synopsis' of this episode's specific premise. Keep it original and engaging. "
         "IMPORTANT: pexels_keywords must be ENGLISH visual search terms (e.g. 'river night fog'), "
         "even when the narration language is not English.\n"
-        "TITLE RULES (Shorts are discovered one by one — every title must stand alone): NEVER put "
-        "the series/campaign name in the title, and NEVER include episode numbering of any form "
-        "('Ep 5', 'Tập 3', 'Part 2', '#12'). Open with the most curious/emotional element in the "
-        "first 40 characters; ideally stay under 70 characters. Each of the 3 variants takes a "
-        "genuinely different angle (question / bold claim / mid-action).\n"
+        + title_line + "\n"
         "DESCRIPTION RULES: the FIRST line re-hooks (it is the only line viewers see uncollapsed) "
         "— never start with the series name. Then 1-3 short lines of context in the persona's "
-        f"voice. End with 3-5 hashtags: relevant topical ones plus #Shorts and EXACTLY this series "
-        f"hashtag: {series_hashtag(topic)} (fans find the whole series through it)."
+        + hashtag_line
     )
     banned = AI_CLICHES.get(language, AI_CLICHES["en"])
     base += ("\nBANNED PHRASES — never use these AI-tell clichés or close variants anywhere "
@@ -707,6 +733,7 @@ def generate_script(
     duration_max_s: int | None = None,
     rate_pct: int = 0,
     script_depth: str = "standard",
+    video_format: str = "short",
     model: str = DEFAULT_MODEL,
 ) -> VideoScript:
     system = compose_system_prompt(
@@ -736,7 +763,7 @@ def generate_script(
         topic, language, total_episodes, episode,
         continuity=continuity, previous_synopses=previous_synopses,
         duration_min_s=duration_min_s, duration_max_s=duration_max_s, rate_pct=rate_pct,
-        brief=brief,
+        brief=brief, video_format=video_format,
     )
     temperature = 0.85 if continuity != "none" else 0.7
     script = generate_structured(

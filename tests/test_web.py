@@ -102,6 +102,34 @@ def test_create_and_start_now_in_one_step(client):
     assert len(tasks) >= 1 and tasks[0]["status"] == "PENDING_QUEUE"
 
 
+def test_video_format_config_and_duration_bounds(client):
+    """Long format is stored and its duration bounds go up to 15 min; short still caps at 180s."""
+    from database.db_session import SessionLocal
+    from database.models import Campaign, Channel
+
+    client.post("/channels/facebook", data={"channel_name": "P", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    db = SessionLocal()
+    cid = db.query(Channel).first().id
+    db.close()
+    client.post("/campaigns", data={"topic_name": "LongDoc", "channel_id": str(cid),
+                                    "total_episodes": "5", "language": "en", "video_format": "long",
+                                    "duration_min_s": "300", "duration_max_s": "600"},
+                follow_redirects=False)
+    client.post("/campaigns", data={"topic_name": "ShortClip", "channel_id": str(cid),
+                                    "total_episodes": "5", "language": "en", "video_format": "short",
+                                    "duration_min_s": "300", "duration_max_s": "600"},
+                follow_redirects=False)
+    db = SessionLocal()
+    long_cam = db.query(Campaign).filter_by(topic_name="LongDoc").one()
+    short_cam = db.query(Campaign).filter_by(topic_name="ShortClip").one()
+    assert long_cam.config_json["video_format"] == "long"
+    assert long_cam.config_json["duration_min_s"] == 300 and long_cam.config_json["duration_max_s"] == 600
+    assert short_cam.config_json["video_format"] == "short"
+    assert short_cam.config_json["duration_max_s"] == 180  # short clamps 600 → 180
+    db.close()
+
+
 def test_ownership_guard_404(client):
     assert client.post("/campaigns/99999/delete", follow_redirects=False).status_code == 404
 

@@ -236,6 +236,16 @@ def test_cliche_gate_forces_one_rewrite(monkeypatch):
     assert len(calls) == 1
 
 
+def test_long_format_prompt_branch():
+    from core.ai_engine import build_script_prompt
+
+    p = build_script_prompt("t", "en", 10, 3, video_format="long")
+    assert "HORIZONTAL (16:9)" in p and "12-30 scenes" in p
+    assert "Part 3" in p and "welcome" in p            # long-form titles may carry part numbers
+    s = build_script_prompt("t", "en", 10, 3)          # short (default)
+    assert "vertical short-form" in s and "NEVER include episode numbering" in s
+
+
 def test_propose_campaign_drops_invalid_voice(monkeypatch):
     """The designer validates the voice against the curated list — an invented one falls back to
     the default ('') so TTS never gets an unusable voice name."""

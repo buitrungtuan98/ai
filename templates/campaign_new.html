@@ -50,6 +50,15 @@
           {% endfor %}
         </select>
       </div>
+      <div class="form-row"><label>Video format</label>
+        <select name="video_format">
+          <option value="short" {{ 'selected' if cfg.get('video_format','short')!='long' }}>Short — vertical 9:16, ≤3 min (Shorts / Reels)</option>
+          <option value="long" {{ 'selected' if cfg.get('video_format')=='long' }}>Long — horizontal 16:9, 3–15 min (with chapter markers)</option>
+        </select>
+        <p class="hint">Long videos render in 16:9 with landscape footage, auto chapter timestamps in
+          the description, and allow part numbering in titles. They take much longer to render on one
+          CPU — keep a small daily cap and a modest buffer.</p>
+      </div>
       <div class="form-row">
         <button type="button" class="btn ghost" id="script-preview">📝 Preview a script (1 AI call)</button>
         <p class="hint">Dry-run with the values in this form — read what the AI would write, tune the
@@ -414,6 +423,7 @@
           setVal("catchphrase_close", p.catchphrase_close);
           setVal("continuity", p.continuity);
           setVal("script_depth", p.script_depth);
+          setVal("video_format", p.video_format);
           fillVoices("");            // rebuild the voice list for the proposed language first
           setVal("voice", p.voice);  // the proposal's voice is always in that language's catalog
           setVal("rate_pct", p.rate_pct);

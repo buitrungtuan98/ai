@@ -554,3 +554,25 @@ so the render tests stay reproducible, and none of it adds a second encode or a 
 deliberate omission: dip-to-black transitions between scenes would force re-encoding at the concat
 stage, breaking the stream-copy stitch that is the biggest CPU saver on the ARM box (hard constraint
 1/4) — so transitions were left out rather than pay that cost.
+
+### ADR-030 — Long-video support via a RenderProfile (short stays the default)
+**Decision:** a per-campaign `video_format` (`short` default | `long`) selects a `RenderProfile`
+(name, width, height, fps). `short` is exactly the historical 1080×1920 constants; `long` is 16:9
+1920×1080. Everything geometric now reads the profile instead of module constants —
+`motion_filter`, `build_scene_args` (scale/crop/fps/motion), `build_ass` (PlayRes + proportional
+caption margin), `generate_thumbnail`, and Pexels search orientation (landscape for long). Because the
+profile defaults to `short`, every existing call and test renders byte-identical vertical output — the
+feature is purely additive. Long-form also: raises `VideoScript.scenes` to 40 and branches the script
+prompt (12-30 scenes, part-numbered titles welcome — the opposite of the Shorts rule); emits YouTube
+chapter markers into the description from scene start times (`chapter_lines`, ≥10s-spaced, ≥3 or none);
+and takes wider duration bounds (60-900s vs 10-180s), clamped in the campaign form. Publishing is
+unchanged — YouTube auto-classifies Short vs regular by aspect/duration, so no upload-API branch is
+needed. **Why:** the whole pipeline was hard-coded to one geometry, so "support long video" could have
+meant forking the renderer. A single `RenderProfile` threaded through the geometric functions adds the
+format without a second code path, and defaulting to `short` guarantees the existing behavior and test
+suite are untouched. Chapters and part-numbered titles are the cheap, high-signal "real long-form
+creator" cues. The hard render cost of a multi-minute 1080p encode on one CPU-only box is real, but it
+stays safe under the render-concurrency-1 lock (hard constraint 1); long campaigns are advised (in the
+form) to keep a small daily cap and buffer rather than the pipeline enforcing a new limit. Deferred:
+multi-call chaptered *generation* (outline + per-chapter) — single-call generation with a raised scene
+cap is enough for a first cut, and the repair loop absorbs the occasional oversized draft.

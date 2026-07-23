@@ -19,8 +19,11 @@ def generate_thumbnail(
     at_fraction: float = 0.15,
     logo_path: str | None = None,
     font_path: str | None = None,
+    width: int = VIDEO_W,
+    height: int = VIDEO_H,
 ) -> str:
-    """Grab a representative frame, darken the lower area, and draw a wrapped bold title."""
+    """Grab a representative frame, darken the lower area, and draw a wrapped bold title. `width`/
+    `height` set the thumbnail geometry (default vertical 1080×1920; 1920×1080 for long-form)."""
     frame_png = out_path + ".frame.png"
     # A frame ~15% in avoids a black intro. Duration is not always known here, so use a small fixed
     # offset if fraction can't be applied by the caller.
@@ -28,18 +31,18 @@ def generate_thumbnail(
 
     try:
         with Image.open(frame_png) as raw:
-            img = raw.convert("RGB").resize((VIDEO_W, VIDEO_H))
+            img = raw.convert("RGB").resize((width, height))
         draw = ImageDraw.Draw(img, "RGBA")
 
         # Bottom scrim for text contrast.
-        scrim_top = int(VIDEO_H * 0.6)
-        draw.rectangle([0, scrim_top, VIDEO_W, VIDEO_H], fill=(0, 0, 0, 150))
+        scrim_top = int(height * 0.6)
+        draw.rectangle([0, scrim_top, width, height], fill=(0, 0, 0, 150))
 
-        usable = VIDEO_W - 2 * MARGIN_PX
+        usable = width - 2 * MARGIN_PX
         lines = wrap_text(title, TITLE_FONT_PX, usable, font_path=font_path)
         font = _load_font(font_path, TITLE_FONT_PX)
         line_h = TITLE_FONT_PX + 18
-        y = VIDEO_H - MARGIN_PX - line_h * len(lines)
+        y = height - MARGIN_PX - line_h * len(lines)
         for line in lines:
             draw.text(
                 (MARGIN_PX, y), line, font=font, fill=(255, 255, 255),
@@ -50,7 +53,7 @@ def generate_thumbnail(
         if logo_path and os.path.exists(logo_path):
             with Image.open(logo_path) as logo_raw:
                 logo = logo_raw.convert("RGBA")
-                img.paste(logo, (VIDEO_W - logo.width - 40, 40), logo)
+                img.paste(logo, (width - logo.width - 40, 40), logo)
 
         img.convert("RGB").save(out_path, "JPEG", quality=85, optimize=True)
     finally:
