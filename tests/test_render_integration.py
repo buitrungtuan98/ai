@@ -99,6 +99,43 @@ def test_motion_filters_are_valid_ffmpeg_filters():
             raise AssertionError(f"motion {effect!r} rejected by ffmpeg: {exc.stderr.decode()[-300:]}")
 
 
+def _assert_audio_graph_valid(fc: str, n_inputs: int, out_label: str) -> None:
+    """Run a filter_complex audio graph through real ffmpeg with lavfi sine inputs — a bad option
+    name (e.g. a sidechaincompress typo) fails instantly instead of on every music render."""
+    inp: list[str] = []
+    for _ in range(n_inputs):
+        inp += ["-f", "lavfi", "-i", "sine=frequency=330:sample_rate=24000:duration=1"]
+    subprocess.run(
+        ["ffmpeg", "-v", "error", *inp, "-filter_complex", fc, "-map", out_label, "-f", "null", "-"],
+        check=True, capture_output=True,
+    )
+
+
+def test_music_ducking_graph_is_valid_ffmpeg():
+    """The sidechaincompress music-ducking graph must parse on real ffmpeg (unit tests only assert
+    the string, which would let an invalid compressor option ship and break every music render)."""
+    from core.video_factory import build_concat_args
+
+    args = build_concat_args("l.txt", "m.mp4", music_path="bg.mp3", music_volume=0.15)
+    fc = args[args.index("-filter_complex") + 1]
+    try:
+        _assert_audio_graph_valid(fc, n_inputs=2, out_label="[aout]")
+    except subprocess.CalledProcessError as exc:  # pragma: no cover - diagnostic
+        raise AssertionError(f"music-ducking graph rejected by ffmpeg: {exc.stderr.decode()[-300:]}")
+
+
+def test_paced_concat_graph_is_valid_ffmpeg():
+    """The per-sentence pacing concat (aevalsrc silence + concat) must parse on real ffmpeg."""
+    from core.tts import build_paced_concat_args
+
+    args = build_paced_concat_args(["a.mp3", "b.mp3"], [0.4], "out.mp3")
+    fc = args[args.index("-filter_complex") + 1]
+    try:
+        _assert_audio_graph_valid(fc, n_inputs=2, out_label="[out]")
+    except subprocess.CalledProcessError as exc:  # pragma: no cover - diagnostic
+        raise AssertionError(f"paced-concat graph rejected by ffmpeg: {exc.stderr.decode()[-300:]}")
+
+
 def test_probe_audio_stats_and_voice_check(tmp_path):
     """volumedetect parsing + the voice sanity thresholds against REAL audio: digital silence is
     flagged, an ordinary tone passes."""

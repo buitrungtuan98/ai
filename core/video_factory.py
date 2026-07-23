@@ -227,10 +227,17 @@ def build_concat_args(
             out_path,
         ]
     out_label = "[mix]" if loudnorm else "[aout]"
-    # normalize=0: amix must NOT auto-scale inputs by 1/n (that would halve the narration). The
-    # music is already ducked via the explicit volume filter; loudnorm (default on) tames peaks.
-    mix = (f"[1:a]volume={music_volume:.2f}[m];"
-           f"[0:a][m]amix=inputs=2:duration=first:dropout_transition=0:normalize=0{out_label}")
+    # Duck the music UNDER the narration (the human-editor sound): split the narration, key a
+    # compressor on the music with one copy as the sidechain, then mix the ducked music back with
+    # the other. Music dips when the voice speaks and swells in the gaps. music_volume sets the
+    # base bed level before ducking. normalize=0: amix must NOT auto-scale inputs by 1/n (that would
+    # halve the narration); loudnorm (default on) tames the final peaks.
+    mix = (
+        f"[0:a]asplit=2[nar_mix][nar_sc];"
+        f"[1:a]volume={music_volume:.2f}[mus];"
+        f"[mus][nar_sc]sidechaincompress=threshold=0.02:ratio=6:attack=15:release=250[duck];"
+        f"[nar_mix][duck]amix=inputs=2:duration=first:dropout_transition=0:normalize=0{out_label}"
+    )
     if loudnorm:
         mix += f";[mix]{LOUDNORM_FILTER}[aout]"
     return [
@@ -378,16 +385,18 @@ def produce(
             if not clean and not filtered.changed:
                 clean = scene.narration  # nothing filtered → empty means the source was empty
 
-            # TTS → mp3 + word timings; audio duration = ground truth.
+            # TTS → mp3 + word timings; audio duration = ground truth. Paced synthesis stitches the
+            # scene's sentences with breath gaps (returns merged timings so captions still align).
             audio_path = ws.path(f"scene_{si}.mp3")
-            timings = tts.synthesize(clean, audio_path, language=lang, voice=voice, rate_pct=rate_pct)
+            timings = tts.synthesize_paced(clean, audio_path, language=lang, voice=voice,
+                                           rate_pct=rate_pct)
             # Voice sanity (deterministic, free): silent/truncated TTS output → one re-synthesis,
             # then a loud failure — never hours later as a broken published video.
             problem = voice_check(audio_path, clean)
             if problem:
                 logger.warning("Scene %d voice check failed (%s) — re-synthesizing once", si, problem)
-                timings = tts.synthesize(clean, audio_path, language=lang, voice=voice,
-                                         rate_pct=rate_pct)
+                timings = tts.synthesize_paced(clean, audio_path, language=lang, voice=voice,
+                                               rate_pct=rate_pct)
                 problem = voice_check(audio_path, clean)
                 if problem:
                     raise RuntimeError(f"Scene {si} narration failed the voice check: {problem}")

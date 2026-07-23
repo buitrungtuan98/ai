@@ -79,6 +79,8 @@ def test_build_concat_args_with_music_keeps_video_copy():
     args = build_concat_args("l.txt", "m.mp4", music_path="bg.mp3", music_volume=0.2)
     fc = args[args.index("-filter_complex") + 1]
     assert "volume=0.20" in fc and "amix=inputs=2:duration=first" in fc
+    assert "sidechaincompress" in fc         # music is ducked UNDER the narration, not flat-mixed
+    assert fc.index("sidechaincompress") < fc.index("amix")  # duck first, then mix
     assert fc.index("amix") < fc.index("loudnorm")  # normalize the final mix, not the parts
     assert "-stream_loop" in args            # music loops to cover the video
     i = args.index("-c:v")
@@ -425,6 +427,52 @@ def test_tts_requests_word_boundaries(monkeypatch, tmp_path):
     timings = tts.synthesize("hello", str(tmp_path / "o.mp3"))
     assert captured["boundary"] == "WordBoundary"          # explicit — the 7.x default is sentences
     assert [w.text for w in timings] == ["hello"]          # word events used, sentence events ignored
+
+
+def test_split_sentences_and_pause():
+    from core import tts
+
+    assert tts.split_sentences("A cat. A dog? Yes!") == ["A cat.", "A dog?", "Yes!"]
+    assert tts.split_sentences("no terminator here") == ["no terminator here"]
+    assert tts.split_sentences("") == []
+    # A question / cliffhanger earns a longer breath than a plain period.
+    assert tts.pause_after("Why?") > tts.pause_after("Because.")
+    assert tts.pause_after("Wait…") >= tts.pause_after("Now!")
+
+
+def test_build_paced_concat_args_shape():
+    from core import tts
+
+    args = tts.build_paced_concat_args(["p0.mp3", "p1.mp3", "p2.mp3"], [0.4, 0.6], "out.mp3")
+    fc = args[args.index("-filter_complex") + 1]
+    assert args[:2] == ["-i", "p0.mp3"] and args.count("-i") == 3
+    assert "aevalsrc=0:d=0.400" in fc and "aevalsrc=0:d=0.600" in fc  # two silence gaps
+    assert "concat=n=5:v=0:a=1[out]" in fc                            # 3 parts + 2 gaps = 5 segments
+    assert "libmp3lame" in args and args[-1] == "out.mp3"
+
+
+def test_synthesize_paced_merges_timings(monkeypatch, tmp_path):
+    """Per-sentence synthesis stitches with gaps and returns ONE timing list with absolute offsets;
+    a single sentence falls through to plain synthesize()."""
+    from core import tts
+
+    # Each sentence: one word 0.0-1.0s; each part probes to 1.0s. Gap after sentence 1 = 0.35 ('.').
+    def fake_synth(text, out, **k):
+        open(out, "w").close()
+        return [tts.WordTiming(text.split()[0], 0.0, 1.0)]
+
+    monkeypatch.setattr(tts, "synthesize", fake_synth)
+    monkeypatch.setattr("core.media.probe_duration", lambda p: 1.0)
+    monkeypatch.setattr("core.ffmpeg_runner.run_ffmpeg", lambda *a, **k: None)
+
+    merged = tts.synthesize_paced("Alpha here. Beta there.", str(tmp_path / "o.mp3"), language="en")
+    assert [w.text for w in merged] == ["Alpha", "Beta"]
+    assert merged[0].start == 0.0
+    assert abs(merged[1].start - (1.0 + 0.35)) < 1e-6   # second sentence offset by dur + gap
+
+    # Single sentence → straight delegation (no gaps, no concat).
+    single = tts.synthesize_paced("Only one sentence here", str(tmp_path / "s.mp3"), language="en")
+    assert [w.text for w in single] == ["Only"]
 
 
 def test_ffmpeg_runner_uses_nice_threads(monkeypatch):

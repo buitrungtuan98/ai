@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import re
 import time
 from dataclasses import dataclass
 
@@ -114,3 +116,94 @@ def synthesize(
             if attempt < _RETRY_ATTEMPTS - 1 and _RETRY_SLEEP_SECONDS:
                 time.sleep(_RETRY_SLEEP_SECONDS * (attempt + 1))
     raise last if last is not None else RuntimeError("TTS failed with no error")
+
+
+# ── Paced narration: real editors leave breathing room between sentences ─────
+# A single TTS call for a whole scene runs sentences together with no beat; real narration pauses,
+# and pauses LONGER after a question or a cliffhanger. synthesize_paced() renders each sentence
+# separately, stitches them with deterministic silence gaps, and returns ONE merged word-timing list
+# with correct absolute offsets, so captions still line up exactly with the assembled audio.
+_SENTENCE_RE = re.compile(r"[^.!?…]*[.!?…]+|[^.!?…]+$", re.UNICODE)
+_GAP_DEFAULT = 0.35
+
+
+def split_sentences(text: str) -> list[str]:
+    """Split narration into sentences, keeping terminators. Deterministic (no NLP dependency)."""
+    return [m.group().strip() for m in _SENTENCE_RE.finditer(text or "") if m.group().strip()]
+
+
+def pause_after(sentence: str) -> float:
+    """Deterministic breath gap (seconds) following a sentence — longer after a beat that lands."""
+    s = sentence.rstrip()
+    if s.endswith("…") or s.endswith("..."):
+        return 0.7   # cliffhanger / trailing off — let it hang
+    if s.endswith("?"):
+        return 0.6   # a question invites a beat before the answer
+    if s.endswith("!"):
+        return 0.5
+    return _GAP_DEFAULT
+
+
+# One common audio format for every segment so the concat filter never rejects a mismatch.
+_SEG_FMT = "aformat=sample_fmts=fltp:sample_rates=24000:channel_layouts=mono"
+
+
+def build_paced_concat_args(parts: list[str], gaps: list[float], out_path: str) -> list[str]:
+    """ffmpeg args (after the binary) that concatenate sentence audio `parts` with `gaps[i]` seconds
+    of generated silence after part i (gaps has one fewer entry than parts). One re-encode; free."""
+    args: list[str] = []
+    for p in parts:
+        args += ["-i", p]
+    filters = [f"[{i}:a]{_SEG_FMT}[a{i}]" for i in range(len(parts))]
+    seq: list[str] = []
+    for i in range(len(parts)):
+        seq.append(f"[a{i}]")
+        if i < len(gaps) and gaps[i] > 0:
+            filters.append(f"aevalsrc=0:d={gaps[i]:.3f}:s=24000,{_SEG_FMT}[g{i}]")
+            seq.append(f"[g{i}]")
+    filters.append("".join(seq) + f"concat=n={len(seq)}:v=0:a=1[out]")
+    return args + ["-filter_complex", ";".join(filters), "-map", "[out]",
+                   "-c:a", "libmp3lame", "-q:a", "4", out_path]
+
+
+def synthesize_paced(
+    text: str,
+    out_path: str,
+    *,
+    language: str = "en",
+    voice: str | None = None,
+    rate_pct: int = 0,
+) -> list[WordTiming]:
+    """Like synthesize(), but paces multi-sentence narration with breath gaps. A single-sentence
+    (or terminator-free) input falls straight through to synthesize() — identical to the old path."""
+    sentences = split_sentences(text)
+    if len(sentences) <= 1:
+        return synthesize(text, out_path, language=language, voice=voice, rate_pct=rate_pct)
+
+    from core import media
+    from core.ffmpeg_runner import run_ffmpeg
+
+    parts: list[str] = []
+    per_timings: list[list[WordTiming]] = []
+    durations: list[float] = []
+    for i, sentence in enumerate(sentences):
+        part = f"{out_path}.p{i}.mp3"
+        per_timings.append(synthesize(sentence, part, language=language, voice=voice, rate_pct=rate_pct))
+        parts.append(part)
+        durations.append(media.probe_duration(part))
+
+    gaps = [pause_after(s) for s in sentences[:-1]]
+    run_ffmpeg(build_paced_concat_args(parts, gaps, out_path))
+
+    merged: list[WordTiming] = []
+    offset = 0.0
+    for i, timings in enumerate(per_timings):
+        merged += [WordTiming(w.text, w.start + offset, w.end + offset) for w in timings]
+        offset += durations[i] + (gaps[i] if i < len(gaps) else 0.0)
+
+    for part in parts:  # be tidy (the render workspace would sweep them anyway)
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+    return merged

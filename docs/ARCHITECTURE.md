@@ -511,3 +511,23 @@ cliché gate follows the codebase's established "cheap deterministic gate before
 step" pattern (voice_check, the length-fit rewrite): free, testable, and it catches the tells the
 model ignores instructions about. Neither is detection evasion (ADR-006) — the goal is natural spoken
 language, and operators still follow platform synthetic-content disclosure rules.
+
+### ADR-028 — Sound craft: paced narration + sidechain-ducked music
+**Decision:** two audio changes make an episode sound edited by a person. (1) `tts.synthesize_paced`
+renders each *sentence* of a scene separately and stitches them with deterministic breath gaps
+(`pause_after`: 0.35s default, longer after `?`/`!`/`…`), returning ONE merged word-timing list with
+absolute offsets — so captions still align exactly with the assembled audio, and scene duration
+(the render's ground truth) naturally includes the pauses. A single-sentence scene falls straight
+through to the old `synthesize()` path. The stitch is one ffmpeg re-encode (`aevalsrc` silence +
+`concat`), and per-sentence durations come from `probe_duration` so offsets are exact. (2) In
+`build_concat_args`, the flat `volume`+`amix` music bed is replaced by `sidechaincompress`: the
+narration is `asplit` into a mix copy and a sidechain key, the music (at its `music_volume` floor) is
+compressed against that key, then the ducked music is mixed back — music dips under the voice and
+swells in the gaps. Video is still stream-copied; loudnorm still normalizes the final mix.
+**Why:** two dead giveaways of an auto-generated video are narration with no breathing room and a
+music bed that sits at one flat level over speech. Both are fixed in the audio graph without extra
+cost: pacing is just silence between existing TTS calls, and ducking is one compressor in the single
+audio re-encode that already happens at concat. Keeping the timing merge exact was the hard part —
+captions are built from word offsets, so per-sentence synthesis had to re-base every word onto the
+stitched timeline. New CI-only integration tests push both filter graphs through real ffmpeg (like
+the colour-grade guard) so an invalid `sidechaincompress`/`aevalsrc` option can never ship silently.

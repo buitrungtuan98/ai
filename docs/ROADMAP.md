@@ -452,6 +452,19 @@ support, stronger QC. Everything stays automation-first and zero-cost (free tier
 - Verified: 144 tests (4 new — cliché detection, prompt injection, deep-mode brief call, one-rewrite
   gate), ruff clean, docs guard green.
 
+## Batch C — Sound craft `DONE`
+- **Paced narration**: `tts.synthesize_paced` renders each sentence separately and stitches them with
+  deterministic breath gaps (`pause_after` — longer after `?`/`!`/`…`), returning one merged word-
+  timing list with absolute offsets so captions still align. Single-sentence scenes fall through to
+  the old `synthesize()`. One ffmpeg re-encode (`aevalsrc` silence + `concat`).
+- **Music ducking**: `build_concat_args` replaces the flat `volume`+`amix` bed with `sidechaincompress`
+  — narration `asplit` into a mix copy + sidechain key, music compressed against the voice, ducked
+  music mixed back. Video still stream-copied; loudnorm still normalizes the final mix.
+- ADR-028 records it. Two new CI-only integration tests push both audio graphs through real ffmpeg so
+  an invalid compressor/silence option can't ship silently.
+- Verified: 147 tests (3 new units — sentence split/pause, paced-concat arg shape, timing-merge; +2
+  ffmpeg-gated graph validators that skip without ffmpeg), ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download
