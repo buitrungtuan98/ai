@@ -626,6 +626,23 @@ see. All additive — no route renamed/removed, Task Logs & Asset Pool kept as s
   entry points → episode + Performance Episodes tab), ruff clean, docs guard green; nav rename, campaign
   card, and live scope-preserving Start redirect verified in a browser.
 
+## Campaign hub — one page, three tabs `DONE`
+- **Tabbed hub at the clean URL `/campaigns/{id}`** replaces the three separate destinations
+  (Performance / global Episodes-filtered / Edit). Three server-rendered tabs share a header
+  (breadcrumb + title + status + Start/Duplicate/Delete): **Overview** (`/campaigns/{id}` — playbook,
+  A/B retention bars, retention sparkline, episodes/measured/best-🏆 scorecard), **Episodes**
+  (`/campaigns/{id}/episodes` — this campaign's stage-tabbed episode list) and **Settings**
+  (`/campaigns/{id}/settings` — the edit form).
+- **DRY extraction**: the episode stage-list logic became `_episode_list_ctx` (main.py) + the shared
+  `templates/_episodes_table.html`, reused by both the global `/episodes` view and the hub Episodes
+  tab; the hub header/tab bar is the shared `templates/_campaign_hub.html`.
+- **Legacy URLs kept as 307 redirects** — `/campaigns/{id}/performance` → the hub Overview, GET
+  `/campaigns/{id}/edit` → Settings — so bookmarks, cross-page links and tests still land right; POST
+  `/edit` stays the form target and now returns to the hub Overview after saving. ADR-040.
+- Verified: 173 tests (test_review_and_track_entry_points updated for the in-hub Episodes tab URL),
+  ruff clean, docs guard green; all three tabs + the pending-campaign Start action verified in a
+  browser at 1280px and 375px.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

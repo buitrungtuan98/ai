@@ -728,3 +728,31 @@ read as fragmentation. Renaming to "Review" names the job; routing every "this n
 episode's one home removes the "which page?" hop; and scope-preserving redirects finish the ADR-038
 promise that the channel filter genuinely persists through the actions you take inside it. No page or
 route was removed — only labels and link targets changed, so muscle memory and tests hold.
+
+### ADR-040 — Campaign hub: one page, three server-rendered tabs (Overview/Episodes/Settings)
+**Decision:** a campaign's three surfaces — its results, its episodes, and its settings — used to be
+three separate destinations reached by leaving the page: Performance (`/campaigns/{id}/performance`),
+a global Episodes list filtered by `?campaign=`, and an Edit form (`/campaigns/{id}/edit`). The only
+"tabs" were three links painted on the Performance page that navigated *away* to pages with no tabs, so
+you lost your place on every hop. Replaced with a real hub anchored at the clean URL
+**`/campaigns/{id}`**, with three server-rendered tabs that keep a shared header (breadcrumb + title +
+status + Start/Duplicate/Delete) visible on all three:
+- `GET /campaigns/{id}` — **Overview**: playbook, A/B-variant retention bars, retention-trend sparkline,
+  and a compact scorecard (episodes / measured / best-retention 🏆). Aggregates compute over the full
+  episode set; the per-episode table moved to the Episodes tab.
+- `GET /campaigns/{id}/episodes` — **Episodes**: this campaign's episodes as a stage-tabbed list, reusing
+  the same stage grammar as the global `/episodes` view (extracted into `_episode_list_ctx` +
+  `_episodes_table.html`), scoped in-page so the hub tabs stay put.
+- `GET /campaigns/{id}/settings` — **Settings**: the existing edit form, wrapped in the hub header/tabs.
+
+The old URLs are kept as 307 redirects (`/performance` → `/campaigns/{id}`, GET `/edit` →
+`/campaigns/{id}/settings`) so bookmarks, tests and cross-page links still land right; POST `/edit`
+stays the form target and now redirects back to the hub Overview after saving. The shared header/tab bar
+lives in `templates/_campaign_hub.html`; the episode table lives in `templates/_episodes_table.html`
+(one definition, used by both the global list and the hub tab). **Why:** the workflow "look at how it's
+doing → open an episode → tweak a setting" is one task on one object, so it should be one page you move
+*within*, not three you bounce *between*. Server-rendered tabs (not JS show/hide) keep every tab a real,
+linkable URL — preserving the "shareable, back-button-correct, no-hidden-state" property the rest of the
+dashboard is built on — while the extraction into shared partials/context kills the copy-paste between
+the global and per-campaign episode lists. No functionality was removed; the render concurrency, port,
+secrets and CPU-only constraints are untouched (front-end + routing only).

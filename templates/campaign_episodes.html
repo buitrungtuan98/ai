@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block title %}Episodes · {{ campaign.topic_name }} · AI Video Factory{% endblock %}
+{% block content %}
+{% set hub_active = 'episodes' %}
+{% include "_campaign_hub.html" %}
+
+{% if total_all %}
+{{ ui.filter_bar('/campaigns/' ~ campaign.id ~ '/episodes', chips, current=status, q=q, placeholder='🔎 Search episodes…') }}
+{% if episodes %}
+{% set table_action = '/campaigns/' ~ campaign.id ~ '/episodes' %}
+{% set show_campaign = false %}
+{% include "_episodes_table.html" %}
+{% else %}
+<div class="empty" style="padding:var(--sp-8)">No episodes match this filter. <a href="/campaigns/{{ campaign.id }}/episodes">Show all →</a></div>
+{% endif %}
+{% else %}
+{% call ui.empty('🎬', 'No episodes yet', 'This campaign has not rendered any episodes yet — start it to queue the first ones.') %}{% endcall %}
+{% endif %}
+{% endblock %}

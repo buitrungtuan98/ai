@@ -6,9 +6,16 @@
 {% set branding = cfg.get('branding') or {} %}
 {% block title %}{{ 'Edit' if editing else ('Duplicate' if dup else 'New') }} Campaign · AI Video Factory{% endblock %}
 {% block content %}
-{% call ui.page_head(('Edit Campaign' if editing else ('Duplicate Campaign' if dup else 'New Campaign')),
+{% if editing %}
+{% set hub_active = 'settings' %}
+{% include "_campaign_hub.html" %}
+<p class="subtitle mt">Edit Campaign — configure strategy, persona, audio &amp; branding, and distribution.
+  Every field here is honored by the render pipeline.</p>
+{% else %}
+{% call ui.page_head(('Duplicate Campaign' if dup else 'New Campaign'),
    (('Copied from “' ~ source.topic_name ~ '” — pick a new channel/language, keep the persona.') if dup
     else 'Configure strategy, persona, audio & branding, and distribution. Every field here is honored by the render pipeline.')) %}{% endcall %}
+{% endif %}
 
 {% if not channels %}
 {% call ui.empty('◉', 'Connect a channel first', 'Every campaign publishes to a channel — add one to get started.', '/channels', 'Add a channel') %}{% endcall %}
