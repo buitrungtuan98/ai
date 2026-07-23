@@ -1326,7 +1326,7 @@ def episodes_list(request: Request, user: CurrentUser, db: DbDep,
         request, "episodes.html",
         {"request": request, "user": user, "nav": "episodes", "episodes": episodes,
          "camp_by_id": camp_by_id, "chan_by_id": chan_by_id, "status_to_stage": _STATUS_TO_STAGE,
-         "chips": chips, "status": stage, "q": q, "total_all": total_all,
+         "chips": chips, "status": stage, "q": q, "total_all": total_all, "total": total,
          "scope_hidden": scope_hidden, "scope_qs": scope_qs, "page": page, "pages": pages,
          "scope_campaign": camp_by_id.get(campaign) if campaign else None,
          "scope_channel": chan_by_id.get(channel) if channel else None},
@@ -1642,7 +1642,8 @@ def retry_task(task_id: int, user: CurrentUser, db: DbDep, return_to: str = Form
     if buf is not None and buf.video_path and os.path.exists(buf.video_path):
         db.commit()
         task_queue.enqueue_publish(buf.id)
-        return _action_redirect(return_to, "rerender", "") if _episode_return(return_to) \
+        # File still on disk → only the publish is retried (no re-render): say so.
+        return _action_redirect(return_to, "publish", "") if _episode_return(return_to) \
             else {"ok": True, "mode": "publish"}
     db.commit()
     task.rq_job_id = task_queue.enqueue_render(task.id)

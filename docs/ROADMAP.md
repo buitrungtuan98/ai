@@ -601,6 +601,17 @@ see. All additive — no route renamed/removed, Task Logs & Asset Pool kept as s
   week-nav keeps scope), ruff clean, docs guard green; persistence + filter-keeping verified live in
   a browser (pick channel → scopes; visit Dashboard → remembered; switch/clear → status kept).
 
+## Polish sweep (review findings) `DONE`
+- Episodes pager: label now shows the FILTERED total ("N matches"), not the whole-scope count; pager
+  URLs built via `query_string` so an unfiltered page no longer emits a malformed `?&page=`.
+- Episode timeline: a COMPLETED episode now shows every step done (green) instead of the Published
+  step glowing as "current".
+- Retry banner: retrying a failed episode whose file still exists (re-publish, no re-render) now shows
+  "Publish queued", not "Re-render queued".
+- Removed the dead `id="campaign-grid"` left over when the client-side campaign search was replaced.
+- Verified: 171 tests (3 new — pager filtered-count + clean URLs, timeline completed-vs-in-progress,
+  retry publish-vs-render flash), ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

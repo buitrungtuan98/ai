@@ -14,7 +14,7 @@
 {% if total_all %}
 {{ ui.filter_bar('/campaigns', chips, current=status, q=q, placeholder='🔎 Search campaigns…', hidden=scope_hidden) }}
 {% if campaigns %}
-<div class="grid cols-3" id="campaign-grid">
+<div class="grid cols-3">
   {% for c in campaigns %}
   {% set pct = (100 * c.current_episode / c.total_episodes)|round(0, 'floor')|int if c.total_episodes else 0 %}
   <div class="card">
