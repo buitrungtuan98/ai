@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from itertools import cycle
 
 from core import media, pexels, safety_filter, tts
 from core.ai_engine import VideoScript
@@ -54,23 +53,57 @@ class RenderResult:
     scene_count: int
     branding_applied: bool = False
     policy_warnings: list[str] = field(default_factory=list)
+    used_clip_ids: list[int] = field(default_factory=list)  # Pexels ids used → per-channel dedupe
 
 
 # ── Pure, testable helpers ───────────────────────────────────────────────────
-def select_clips(clip_durations: list[float], target: float) -> list[int]:
-    """Greedily pick clip indices (cycling if needed) until their total covers `target`."""
+# Cut rhythm: a real editor changes shots every few seconds, so no single clip sits on screen for a
+# whole scene. plan_shots caps each shot near SHOT_TARGET_S and lands the cut on a word boundary
+# (we already have per-word timings from edge-tts), cycling through the clip pool for variety. Each
+# shot's duration never exceeds its clip's native length, so the concatenation can't leave a gap;
+# the loop runs until the scene is covered.
+SHOT_TARGET_S = 3.0
+SHOT_MIN_S = 1.6
+SHOT_MAX_S = 4.5
+
+
+def _snap_cut(t_start: float, word_gaps: list[float]) -> float:
+    """The word-gap time nearest to t_start+SHOT_TARGET_S, within [MIN, MAX]; else the plain target."""
+    ideal = t_start + SHOT_TARGET_S
+    lo, hi = t_start + SHOT_MIN_S, t_start + SHOT_MAX_S
+    candidates = [g for g in word_gaps if lo <= g <= hi]
+    return min(candidates, key=lambda g: abs(g - ideal)) if candidates else ideal
+
+
+def plan_shots(clip_durations: list[float], word_gaps: list[float],
+               scene_duration: float) -> list[tuple[int, float]]:
+    """Slice a scene into shots as (clip_index, shot_duration) pairs covering `scene_duration`.
+
+    Consecutive shots use different clips (cycling the pool). Each shot is bounded by SHOT_MAX_S and
+    by its clip's native length (so a shot never outruns its footage → no black gap), and the cut
+    lands on a word boundary when one falls in range. Deterministic — no randomness."""
     if not clip_durations:
         raise ValueError("no clips available to cover the scene")
-    chosen: list[int] = []
-    total = 0.0
-    for idx in cycle(range(len(clip_durations))):
-        chosen.append(idx)
-        total += clip_durations[idx]
-        if total >= target:
-            break
-        if len(chosen) > 200:  # safety valve against zero/near-zero durations
-            break
-    return chosen
+    shots: list[tuple[int, float]] = []
+    t, i, guard = 0.0, 0, 0
+    while t < scene_duration - 0.02 and guard < 400:
+        guard += 1
+        native = clip_durations[i % len(clip_durations)]
+        cut = _snap_cut(t, word_gaps)
+        dur = min(cut - t, native, scene_duration - t)
+        if dur < 0.4:  # snapped span collapsed (tiny clip / scene tail) — take what the clip allows
+            dur = min(native, scene_duration - t)
+        shots.append((i % len(clip_durations), round(dur, 3)))
+        t += dur
+        i += 1
+    # Guarantee full coverage: absorb any sub-frame shortfall into the last shot (bounded by its
+    # clip's native length), so the concatenated video is never shorter than the audio ground truth.
+    if shots:
+        shortfall = scene_duration - sum(d for _, d in shots)
+        if shortfall > 0.001:
+            ci, d = shots[-1]
+            shots[-1] = (ci, round(min(d + shortfall, clip_durations[ci]), 3))
+    return shots
 
 
 # Cinema Polish: subtle motion baked into the same encode pass. Effects rotate deterministically
@@ -141,8 +174,13 @@ def build_scene_args(
     branding: Branding | None = None,
     motion_effect: str | None = None,
     color_grade: str | None = None,
+    shot_durations: list[float] | None = None,
 ) -> list[str]:
-    """Build the ffmpeg args (after the `ffmpeg` binary) for one re-encoded scene."""
+    """Build the ffmpeg args (after the `ffmpeg` binary) for one re-encoded scene.
+
+    When `shot_durations` is given, each clip is trimmed to its shot length before scaling — this is
+    what turns a pile of clips into an edited cut rhythm. Omit it (the default) for the legacy
+    play-each-clip-in-full behavior."""
     branding = branding or Branding()
     args: list[str] = []
     for path in clip_paths:
@@ -157,8 +195,9 @@ def build_scene_args(
 
     filters: list[str] = []
     for i in range(len(clip_paths)):
+        trim = f"trim=0:{shot_durations[i]:.3f}," if shot_durations else ""
         filters.append(
-            f"[{i}:v]scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=increase,"
+            f"[{i}:v]{trim}scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=increase,"
             f"crop={TARGET_W}:{TARGET_H},setsar=1,fps={FPS},setpts=PTS-STARTPTS[v{i}]"
         )
     if len(clip_paths) == 1:
@@ -271,6 +310,15 @@ def search_footage(keywords: list[str], api_key: str) -> list:
     return []
 
 
+def prefer_unused(found: list, recent_clip_ids: set[int] | None) -> list:
+    """Stable-reorder a footage pool so clips this channel hasn't used yet come first — the render
+    then draws shots from unused footage before repeating. Fail-open: with nothing to avoid (or a
+    pool that's entirely 'seen'), the order is unchanged, so a render is never blocked."""
+    if not recent_clip_ids:
+        return found
+    return sorted(found, key=lambda c: c.id in recent_clip_ids)  # False (unused) sorts first
+
+
 def _batch_vet_plans(plans: list[dict], vet_batch, path_for, download=None) -> None:
     """Batched Auto-QC footage vetting over prepared scene plans (mutates them in place).
 
@@ -345,6 +393,8 @@ def produce(
     affiliate_url: str | None = None,
     affiliate_label: str | None = None,
     extra_blacklist: set[str] | None = None,
+    recent_clip_ids: set[int] | None = None,
+    motion_seed: int = 0,
     vet_batch=None,
     on_progress=None,
 ) -> RenderResult:
@@ -402,9 +452,11 @@ def produce(
                     raise RuntimeError(f"Scene {si} narration failed the voice check: {problem}")
             d_i = media.probe_duration(audio_path)
 
-            # Footage to cover d_i (with keyword fallback chain).
+            # Footage to cover d_i (with keyword fallback chain). Reorder so footage this channel
+            # hasn't used yet leads — the shot planner then draws from fresh clips first.
             safety_filter.assert_licensed_footage("pexels")
-            found = search_footage(scene.pexels_keywords, pexels_api_key)
+            found = prefer_unused(
+                search_footage(scene.pexels_keywords, pexels_api_key), recent_clip_ids)
             if not found:
                 raise RuntimeError(
                     f"No Pexels footage for scene {si} (keywords={scene.pexels_keywords!r})")
@@ -427,13 +479,18 @@ def produce(
                 path_for=lambda i, k: ws.path(f"scene_{i}_vet_{k}.mp4"),
             )
         durations = [p["d"] for p in plans]
+        used_clip_ids: list[int] = []
 
-        # Phase C — render each scene (captions + motion + grade baked into one encode pass).
+        # Phase C — render each scene (multi-shot cut rhythm + captions + motion + grade in one pass).
         for si, plan in enumerate(plans):
             d_i = plan["d"]
-            picks = select_clips([c.duration for c in plan["found"]], d_i)
+            # Slice the scene into shots (cut ~every 3s on a word boundary); each shot is a clip.
+            word_gaps = [t.end for t in plan["timings"]]
+            shots = plan_shots([c.duration for c in plan["found"]], word_gaps, d_i)
+            picks = [idx for idx, _ in shots]
+            shot_durations = [dur for _, dur in shots]
             # Download each unique clip once (reusing vetted downloads), then expand `picks`
-            # (which may repeat) to file paths.
+            # (which repeats/cycles the pool) to file paths.
             path_by_idx: dict[int, str] = dict(plan["pre"])
             for k, idx in enumerate(dict.fromkeys(picks)):
                 if idx in path_by_idx:
@@ -442,14 +499,17 @@ def produce(
                 pexels.download(plan["found"][idx].download_url, p)
                 path_by_idx[idx] = p
             clip_paths = [path_by_idx[idx] for idx in picks]
+            used_clip_ids += [plan["found"][idx].id for idx in dict.fromkeys(picks)]
 
             ass_path = ws.path(f"scene_{si}.ass")
             build_ass(plan["timings"], ass_path, clip_duration=d_i, style=subtitle_style,
                       theme=caption_theme, accent_hex=branding.tint_color)
             scene_out = ws.path(f"scene_{si}.mp4")
-            effect = MOTION_EFFECTS[si % len(MOTION_EFFECTS)] if motion else None
+            # Motion effect seeded by episode so different episodes don't share an identical rhythm.
+            effect = MOTION_EFFECTS[(motion_seed + si) % len(MOTION_EFFECTS)] if motion else None
             args = build_scene_args(clip_paths, plan["audio"], ass_path, scene_out, d_i, branding,
-                                    motion_effect=effect, color_grade=color_grade)
+                                    motion_effect=effect, color_grade=color_grade,
+                                    shot_durations=shot_durations)
             run_ffmpeg(
                 args, total_duration=d_i,
                 on_progress=lambda p, s=si: report("scenes", 30 + (s + p / 100) / n_scenes * 70),
@@ -483,6 +543,7 @@ def produce(
         duration=sum(durations),
         scene_count=n_scenes,
         branding_applied=branding.active,
+        used_clip_ids=used_clip_ids,
     )
 
 

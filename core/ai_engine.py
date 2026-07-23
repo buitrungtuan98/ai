@@ -114,8 +114,10 @@ class Scene(BaseModel):
     )
     pexels_keywords: list[str] = Field(
         min_length=1, max_length=4,
-        description="Stock-footage search terms, best first — ALWAYS in English regardless of "
-                    "the narration language (stock libraries are indexed in English).",
+        description="Stock-footage search terms, best first — ALWAYS in English regardless of the "
+                    "narration language (stock libraries are indexed in English). Prefer 2-4 terms "
+                    "describing DISTINCT visual concepts (different shots), not synonyms, so the "
+                    "scene can cut between varied footage.",
     )
 
 

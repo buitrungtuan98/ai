@@ -2,12 +2,29 @@
 from __future__ import annotations
 
 
-def test_select_clips_cycles_to_cover():
-    from core.video_factory import select_clips
+def test_plan_shots_covers_and_caps_and_cycles():
+    from core.video_factory import SHOT_MAX_S, plan_shots
 
-    assert select_clips([2.0, 3.0], 4.0) == [0, 1]
-    assert select_clips([10.0], 4.0) == [0]
-    assert select_clips([1.0, 1.0], 3.5) == [0, 1, 0, 1]
+    # One long clip, no word gaps: a 10s scene is sliced into several shots (never one 10s shot),
+    # each capped near the target, cycling the single clip; durations sum to the scene length.
+    shots = plan_shots([30.0], [], 10.0)
+    idxs = [i for i, _ in shots]
+    durs = [d for _, d in shots]
+    assert all(i == 0 for i in idxs) and len(shots) >= 3
+    assert all(d <= SHOT_MAX_S + 0.01 for d in durs)
+    assert abs(sum(durs) - 10.0) < 0.05                 # full coverage, no gap
+
+    # Multiple clips → consecutive shots use different clips (variety).
+    shots2 = plan_shots([5.0, 5.0, 5.0], [], 9.0)
+    assert [i for i, _ in shots2][:3] == [0, 1, 2]
+
+    # A short clip caps its own shot (never outruns its footage → no black gap).
+    shots3 = plan_shots([1.0], [], 3.0)
+    assert all(d <= 1.0 + 0.01 for _, d in shots3) and abs(sum(d for _, d in shots3) - 3.0) < 0.05
+
+    # A cut snaps to a nearby word boundary when one falls in the shot window.
+    snapped = plan_shots([30.0], [2.8, 5.9], 6.0)
+    assert abs(snapped[0][1] - 2.8) < 0.01               # first cut lands on the 2.8s word gap
 
 
 def test_build_scene_args_single_and_branding():
@@ -24,6 +41,34 @@ def test_build_scene_args_single_and_branding():
     # order: mirror -> tint -> overlay -> captions
     assert fc2.index("hflip") < fc2.index("drawbox") < fc2.index("overlay") < fc2.index("ass=")
     assert a2.count("-i") == 4  # 2 clips + audio + watermark
+
+
+def test_build_scene_args_trims_shots():
+    from core.video_factory import build_scene_args
+
+    # With shot durations, each clip is trimmed to its shot length (the edited cut rhythm).
+    a = build_scene_args(["c0.mp4", "c1.mp4"], "a.mp3", "s.ass", "o.mp4", 6.0, None,
+                         shot_durations=[3.0, 3.0])
+    fc = a[a.index("-filter_complex") + 1]
+    assert fc.count("trim=0:3.000") == 2
+    # Without shot durations, the legacy (no-trim) filter is emitted unchanged.
+    b = build_scene_args(["c0.mp4"], "a.mp3", "s.ass", "o.mp4", 6.0, None)
+    assert "trim=" not in b[b.index("-filter_complex") + 1]
+
+
+def test_prefer_unused_reorders_footage():
+    from core.video_factory import prefer_unused
+
+    class C:
+        def __init__(self, cid):
+            self.id = cid
+
+    pool = [C(1), C(2), C(3)]
+    # Clip 1 already used → it drops behind the unused ones, order otherwise stable.
+    assert [c.id for c in prefer_unused(pool, {1})] == [2, 3, 1]
+    # Nothing to avoid → unchanged (fail-open).
+    assert [c.id for c in prefer_unused(pool, None)] == [1, 2, 3]
+    assert [c.id for c in prefer_unused(pool, set())] == [1, 2, 3]
 
 
 def test_voice_check_flags_broken_tts(monkeypatch):

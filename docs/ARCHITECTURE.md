@@ -531,3 +531,26 @@ audio re-encode that already happens at concat. Keeping the timing merge exact w
 captions are built from word offsets, so per-sentence synthesis had to re-base every word onto the
 stitched timeline. New CI-only integration tests push both filter graphs through real ffmpeg (like
 the colour-grade guard) so an invalid `sidechaincompress`/`aevalsrc` option can never ship silently.
+
+### ADR-029 — Edit rhythm: multi-shot scenes, word-aligned cuts, cross-episode footage dedupe
+**Decision:** the encode stops letting one clip fill a whole scene. `plan_shots` slices each scene
+into shots of ~`SHOT_TARGET_S` (capped at `SHOT_MAX_S`), landing each cut on a word boundary when
+one falls in range (the edge-tts word timings we already have), and cycles the scene's clip pool so
+consecutive shots use different footage. `build_scene_args` gained an optional `shot_durations` that
+`trim`s each clip to its shot before the existing scale/crop/motion/grade/caption pass — so this is
+still ONE encode per scene and the concat-copy stitch is untouched. Each shot's length is bounded by
+its clip's native duration (never outruns its footage → no black gap), and a final coverage step
+absorbs any sub-frame shortfall into the last shot, preserving the "video always covers the audio"
+invariant the old overshoot-then-`-t`-trim gave. Motion effect is now seeded by `episode_number` so
+episodes don't share an identical rhythm. Footage variety across episodes is handled by a new
+`ChannelClipUsage` table: the worker loads a channel's recent clip ids, `prefer_unused` floats unused
+clips to the front of each scene's pool, and the ids an episode actually used are recorded afterward.
+`select_clips` is removed — `plan_shots` supersedes it. **Why:** the loudest "auto-generated" tell
+after the script is the visual pacing — a single stock clip drifting under 10 seconds of narration,
+and the *same* clips recurring across a channel's episodes. Cutting on word boundaries makes the edit
+feel intentional; seeding motion per episode kills the identical-rhythm feel; the dedupe table stops
+the recurring-footage tell. All of it is deterministic (seeded by episode/scene index, never random)
+so the render tests stay reproducible, and none of it adds a second encode or a paid service. A
+deliberate omission: dip-to-black transitions between scenes would force re-encoding at the concat
+stage, breaking the stream-copy stitch that is the biggest CPU saver on the ARM box (hard constraint
+1/4) — so transitions were left out rather than pay that cost.

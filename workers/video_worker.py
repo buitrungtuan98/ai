@@ -23,7 +23,7 @@ from core.ai_engine import generate_script
 from core.config import settings
 from core.video_factory import Branding
 from database.db_session import SessionLocal
-from database.models import BufferPoolItem, Campaign, Channel, Task, User
+from database.models import BufferPoolItem, Campaign, ChannelClipUsage, Channel, Task, User
 from database.types import BufferStatus, CampaignStatus, Platform, TaskStatus
 from workers.task_queue import (
     clear_progress,
@@ -33,6 +33,42 @@ from workers.task_queue import (
 )
 
 logger = logging.getLogger(__name__)
+
+_RECENT_CLIP_WINDOW = 400  # remember this many recent clip ids per channel for footage dedupe
+
+
+def _recent_clip_ids(db, channel_id: int) -> set[int]:
+    """Pexels clip ids this channel used recently — handed to produce() so it prefers fresh footage.
+    Fail-open: any error yields an empty set (dedupe is advisory and must never block a render)."""
+    try:
+        rows = db.execute(
+            select(ChannelClipUsage.clip_id)
+            .where(ChannelClipUsage.channel_id == channel_id)
+            .order_by(ChannelClipUsage.id.desc()).limit(_RECENT_CLIP_WINDOW)
+        ).all()
+        return {cid for (cid,) in rows}
+    except Exception:  # noqa: BLE001
+        logger.debug("recent clip-id lookup failed", exc_info=True)
+        return set()
+
+
+def _record_clip_usage(db, channel_id: int, clip_ids: list[int]) -> None:
+    """Persist the clip ids an episode used so later episodes on this channel avoid them. Fail-open
+    and idempotent — existing rows are filtered out first so the unique constraint never trips."""
+    ids = set(clip_ids)
+    if not ids:
+        return
+    try:
+        existing = {cid for (cid,) in db.execute(
+            select(ChannelClipUsage.clip_id).where(
+                ChannelClipUsage.channel_id == channel_id,
+                ChannelClipUsage.clip_id.in_(ids))).all()}
+        for cid in ids - existing:
+            db.add(ChannelClipUsage(channel_id=channel_id, clip_id=cid))
+        db.commit()
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        logger.debug("recording clip usage failed", exc_info=True)
 
 
 # ── Status helper (durable state + coarse Redis mirror) ──────────────────────
@@ -416,6 +452,7 @@ def render_task(task_id: int) -> None:
         _set_status(db, task, TaskStatus.RENDERING, 10)
         output_dir = os.path.join(settings.MEDIA_ROOT, "buffer", str(campaign.id))
         music_path, music_credit = _resolve_music(cfg)
+        recent_clips = _recent_clip_ids(db, channel.id)  # prefer footage this channel hasn't used
 
         vet_batch = None
         if auto_qc:
@@ -446,6 +483,8 @@ def render_task(task_id: int) -> None:
                 title_prefix=cfg.get("title_prefix"),
                 affiliate_url=cfg.get("affiliate_url"),
                 affiliate_label=cfg.get("affiliate_label"),
+                recent_clip_ids=recent_clips,
+                motion_seed=task.episode_number,
                 vet_batch=vet_batch,
                 on_progress=lambda p: set_progress(task_id, 10 + p * 0.8),
             )
@@ -463,6 +502,7 @@ def render_task(task_id: int) -> None:
                             task.episode_number, verdict.score, verdict.issues)
                 _safe_remove(result.master_path, result.thumbnail_path)
         qc_failed = qc_report is not None and not qc_report["passed"]
+        _record_clip_usage(db, channel.id, result.used_clip_ids)  # so future episodes vary footage
         _set_status(db, task, TaskStatus.AUDIO_SYNCED, 88)
 
         # Carry distribution settings into the stored metadata so the publish step (now or after

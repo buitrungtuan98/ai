@@ -54,9 +54,9 @@ def test_scene_render_and_concat_copy(tmp_path):
     assert meta["width"] == 1080 and meta["height"] == 1920  # scaled to vertical
     assert progress and progress[-1] <= 99.0
 
-    # Second identical scene, then concat with -c copy (no re-encode).
+    # Second scene exercises the shot-trim path (edited cut rhythm), then concat with -c copy.
     scene1 = os.path.join(d, "scene1.mp4")
-    run_ffmpeg(build_scene_args([clip], audio, ass, scene1, dur, None))
+    run_ffmpeg(build_scene_args([clip], audio, ass, scene1, dur, None, shot_durations=[dur]))
     list_file = os.path.join(d, "list.txt")
     with open(list_file, "w") as f:
         f.write(f"file '{scene0}'\nfile '{scene1}'\n")

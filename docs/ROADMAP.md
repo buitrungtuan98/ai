@@ -465,6 +465,22 @@ support, stronger QC. Everything stays automation-first and zero-cost (free tier
 - Verified: 147 tests (3 new units — sentence split/pause, paced-concat arg shape, timing-merge; +2
   ffmpeg-gated graph validators that skip without ffmpeg), ruff clean, docs guard green.
 
+## Batch B — Edit rhythm (the "human editor" feel) `DONE`
+- **Multi-shot scenes**: `plan_shots` slices each scene into ~3s shots (cap 4.5s) with cuts landing
+  on word boundaries, cycling the clip pool so consecutive shots differ. No clip sits a whole scene.
+- **Shot trim**: `build_scene_args` gained `shot_durations` — each clip is `trim`med to its shot in
+  the SAME single encode pass (concat-copy stitch untouched). Shot length is bounded by clip native
+  length (no black gap); a coverage step absorbs any sub-frame shortfall into the last shot.
+- **Cross-episode footage dedupe**: new `ChannelClipUsage` table; worker loads recent clip ids,
+  `prefer_unused` floats fresh footage first, and used ids are recorded after render. Fail-open.
+- **Per-episode motion seed**: motion effect indexed by `episode_number` so episodes don't share an
+  identical rhythm. `select_clips` removed (superseded by `plan_shots`). ADR-029 records it.
+- Deliberately omitted dip-to-black transitions — they'd force a re-encode at concat and break the
+  stream-copy stitch (the biggest CPU saver on the ARM box).
+- Verified: 150 tests (4 new — plan_shots coverage/cap/snap, shot-trim args, prefer_unused reorder,
+  worker dedupe round-trip; select_clips test replaced; +trim path added to the ffmpeg integration
+  render), ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

@@ -44,7 +44,7 @@ def search_videos(
         files = video.get("video_files", [])
         if not files:
             continue
-        # A missing/zero duration is unusable for coverage math (it would make select_clips cycle
+        # A missing/zero duration is unusable for coverage math (it would make plan_shots cycle
         # up to its safety valve and build a pathological command). Skip such clips.
         duration = float(video.get("duration", 0) or 0)
         if duration <= 0:
