@@ -644,3 +644,20 @@ every scoped view linkable — and reusing the existing `?channel=` param means 
 on the pages. The global-function injection avoids threading `channels` through every route's context
 or adding request middleware; it costs one cheap read per page render, acceptable on a single-box app,
 and fails open so it can never take a page down.
+
+### ADR-035 — Episodes pipeline list unifies Task Logs + Asset Pool (UI restructure, phase 4)
+**Decision:** a new `/episodes` list shows every episode as one row grouped by lifecycle STAGE
+(Queued / Rendering / Review / Scheduled / Published / Failed), each a friendly bucket over the 9 raw
+task statuses (`_STAGE_STATUSES`). It reuses the Phase-2 filter grammar — stage tabs with counts +
+search + scope + pagination, all URL-driven — and every row links to the Phase-1 `/episodes/{id}`
+detail page. "Episodes" becomes a primary nav item (Content group); Task Logs and Asset Pool stay as
+routes and are linked from the Episodes header ("live render log", "Asset Pool") as the specialized
+live/review views, and the mobile tab bar swaps its Tasks slot for Episodes. The list is
+server-rendered (not the live JS poller) with relative-time stamps that tick client-side. **Why:** the
+fragmentation the operator felt was one episode having no single browsable home — you watched it in
+Task Logs, reviewed it in Asset Pool, and mentally joined the two. Episodes is that home at the list
+level, and it drops onto already-consistent foundations (the detail view from phase 1, the filter
+grammar from phase 2, the scope switcher from phase 3), so it's mostly a query + template, not new
+mechanism. It stays server-rendered because "browse/triage by stage" doesn't need per-second liveness
+(that's what Task Logs is for) — keeping it static means it's just another instance of the one filter
+grammar rather than a second live-polling surface to maintain.

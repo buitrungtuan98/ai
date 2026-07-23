@@ -236,6 +236,32 @@ def test_assets_search(client):
     assert "No items match this filter" in client.get("/assets?q=zzznomatch").text
 
 
+def test_episodes_list_stages_search_and_links(client):
+    """The Episodes pipeline: stage tabs with counts, stage filter + search, rows link to the
+    per-episode detail view."""
+    from database.db_session import SessionLocal
+    from database.models import Campaign, Task
+    from database.types import TaskStatus
+
+    tid, _bid = _make_episode(client)  # ep1, AWAITING_REVIEW (Review stage)
+    db = SessionLocal()
+    cam = db.query(Campaign).order_by(Campaign.id.desc()).first()
+    db.add(Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=2,
+                status=TaskStatus.FAILED, synopsis="broke here"))
+    db.add(Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=3,
+                status=TaskStatus.COMPLETED, synopsis="all done now"))
+    db.commit()
+    db.close()
+
+    r = client.get("/episodes")
+    assert r.status_code == 200
+    assert "Review (1)" in r.text and "Failed (1)" in r.text and "Published (1)" in r.text
+    assert f'href="/episodes/{tid}"' in r.text                       # row → detail view
+    failed = client.get("/episodes?status=failed").text
+    assert "broke here" in failed and "all done now" not in failed   # stage filter
+    assert "all done now" in client.get("/episodes?q=done").text     # search over synopsis
+
+
 def test_scope_switcher_and_scoped_nav(client):
     """The topbar scope switcher appears once channels exist, and an active channel scope is carried
     onto the scope-aware nav links (Campaigns / Asset Pool / Task Logs)."""

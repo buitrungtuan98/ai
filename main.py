@@ -1258,6 +1258,81 @@ def reject_asset(db: DbDep, item=Depends(get_owned_buffer_item), reason: str = F
     )
 
 
+# ── Episodes (the pipeline list — every episode by stage) + the per-episode view ──
+# Lifecycle stage → the task statuses it groups. The Episodes list filters/tabs by stage; a stage is
+# a friendlier bucket than the 9 raw statuses.
+_STAGE_STATUSES: dict[str, tuple[str, ...]] = {
+    "queued": ("PENDING_QUEUE",),
+    "rendering": ("AI_GENERATION", "AUDIO_SYNCED", "RENDERING"),
+    "review": ("AWAITING_REVIEW",),
+    "scheduled": ("SCHEDULED",),
+    "published": ("PUBLISHING", "COMPLETED"),
+    "failed": ("FAILED",),
+}
+_STATUS_TO_STAGE = {st: stage for stage, sts in _STAGE_STATUSES.items() for st in sts}
+_EPISODES_LIST_PER_PAGE = 25
+
+
+@app.get("/episodes", response_class=HTMLResponse)
+def episodes_list(request: Request, user: CurrentUser, db: DbDep,
+                  channel: int | None = None, campaign: int | None = None,
+                  status: str = "", q: str = "", page: int = 1):
+    """The pipeline: every episode as one row, grouped by lifecycle stage — the unified view that
+    merges what used to be split between Task Logs (render) and Asset Pool (review). Row → the
+    Episode detail page. Server-rendered + stage tabs + search + scope + pagination (one grammar)."""
+    scope_conds = [Task.user_id == user.id]
+    if campaign:
+        scope_conds.append(Task.campaign_id == campaign)
+    camp_by_id = {c.id: c for c in db.scalars(select(Campaign).where(Campaign.user_id == user.id)).all()}
+    chan_by_id = {c.id: c for c in db.scalars(select(Channel).where(Channel.user_id == user.id)).all()}
+    if channel:  # scope by channel via the episode's campaign
+        scope_conds.append(Task.campaign_id.in_(
+            [cid for cid, c in camp_by_id.items() if c.channel_id == channel]))
+
+    def joined(stmt, conds):
+        return stmt.select_from(Task).join(Campaign, Task.campaign_id == Campaign.id).where(*conds)
+
+    # Per-stage counts over the scope (search-independent, like the other chip bars).
+    raw_counts = {s.value: n for s, n in db.execute(
+        joined(select(Task.status, func.count()), scope_conds).group_by(Task.status)).all()}
+    stage_counts = {stage: sum(raw_counts.get(st, 0) for st in sts)
+                    for stage, sts in _STAGE_STATUSES.items()}
+    total_all = sum(raw_counts.values())
+
+    stage = status if status in _STAGE_STATUSES else ""
+    q = q.strip()
+    item_conds = list(scope_conds)
+    if stage:
+        item_conds.append(Task.status.in_([TaskStatus(st) for st in _STAGE_STATUSES[stage]]))
+    if q:
+        item_conds.append(or_(Campaign.topic_name.ilike(f"%{q}%"),
+                              Task.synopsis.ilike(f"%{q}%"),
+                              cast(Task.episode_number, String).ilike(f"%{q}%"),
+                              cast(Task.status, String).ilike(f"%{q}%")))
+    total = db.scalar(joined(select(func.count()), item_conds)) or 0
+    pages = max(1, -(-total // _EPISODES_LIST_PER_PAGE))
+    page = min(max(page, 1), pages)
+    episodes = db.scalars(joined(select(Task), item_conds)
+                          .order_by(Task.id.desc())
+                          .limit(_EPISODES_LIST_PER_PAGE)
+                          .offset((page - 1) * _EPISODES_LIST_PER_PAGE)).all()
+
+    chips = [{"label": "All", "value": "", "count": total_all}] + [
+        {"label": stage.replace("_", " ").title(), "value": stage, "count": stage_counts.get(stage, 0)}
+        for stage in _STAGE_STATUSES]
+    scope_hidden = {"campaign": campaign} if campaign else ({"channel": channel} if channel else {})
+    scope_qs = _query_string(**scope_hidden, status=stage, q=q)
+    return templates.TemplateResponse(
+        request, "episodes.html",
+        {"request": request, "user": user, "nav": "episodes", "episodes": episodes,
+         "camp_by_id": camp_by_id, "chan_by_id": chan_by_id, "status_to_stage": _STATUS_TO_STAGE,
+         "chips": chips, "status": stage, "q": q, "total_all": total_all,
+         "scope_hidden": scope_hidden, "scope_qs": scope_qs, "page": page, "pages": pages,
+         "scope_campaign": camp_by_id.get(campaign) if campaign else None,
+         "scope_channel": chan_by_id.get(channel) if channel else None},
+    )
+
+
 # ── Episode view (one home per episode: the whole lifecycle in one place) ────
 _EPISODE_STAGES = ("Queued", "Rendering", "Review", "Scheduled", "Published")
 # Task status → index in _EPISODE_STAGES (None = FAILED, shown off-track).
@@ -1289,7 +1364,7 @@ def episode_view(request: Request, user: CurrentUser, db: DbDep, task_id: int,
     stage_index = _STAGE_INDEX.get(task.status.value)
     return templates.TemplateResponse(
         request, "episode.html",
-        {"request": request, "user": user, "nav": "tasks", "task": task, "campaign": campaign,
+        {"request": request, "user": user, "nav": "episodes", "task": task, "campaign": campaign,
          "channel": channel, "buffer": buffer, "previewable": previewable,
          "stages": _EPISODE_STAGES, "stage_index": stage_index,
          "failed": task.status == TaskStatus.FAILED,

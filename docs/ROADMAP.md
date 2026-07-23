@@ -552,9 +552,16 @@ scope · act where you see. Six phases, each additive (no route renamed/removed,
 - Verified: 164 tests (1 new — switcher appears with channels + active scope carried onto nav links),
   ruff clean, docs guard green; scoped Campaigns view screenshotted.
 
-## Phase 4 — Episodes pipeline list (planned)
-Unified list merging Task Logs + Asset Pool: stage tabs with counts → the Phase-1 detail view;
-nav restructure (Task Logs & Asset Pool demoted to secondary links, routes kept).
+## Phase 4 — Episodes pipeline list `DONE`
+- New `/episodes` list: every episode as one row grouped by lifecycle stage (Queued / Rendering /
+  Review / Scheduled / Published / Failed) — stage tabs with counts + search + scope + pagination,
+  reusing the Phase-2 filter grammar; each row → the Phase-1 detail view. Unifies what was split
+  between Task Logs (render) and Asset Pool (review).
+- "Episodes" is now a primary nav item; Task Logs & Asset Pool kept as routes + linked from the
+  Episodes header as the specialized live/review views; mobile tab bar swaps Tasks → Episodes.
+  Server-rendered (browse/triage doesn't need the live poller). ADR-035.
+- Verified: 165 tests (1 new — stage tabs+counts, stage filter, synopsis search, row→detail links),
+  ruff clean, docs guard green; Episodes list screenshotted.
 
 ## Phase 5 — Planner (planned)
 Actionable calendar: week nav, filled slots link to the episode view, empty-slot + empty-buffer CTA.
