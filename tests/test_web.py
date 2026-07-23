@@ -802,6 +802,33 @@ def test_edit_campaign(client):
     db.close()
 
 
+def test_settings_defaults_prefill_new_campaign(client):
+    """Saved Settings defaults seed a fresh New Campaign form and the dashboard AI budget meter
+    (AI Propose still overrides per campaign)."""
+    # A channel must exist or the form shows the "connect a channel first" state (no fields).
+    client.post("/channels/facebook", data={"channel_name": "P", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    r = client.post("/settings", data={
+        "language": "vi", "video_format": "long", "publish_mode": "review",
+        "total_episodes": "7", "posting_slots": "08:00, 21:00", "ai_daily_budget": "200",
+    }, follow_redirects=False)
+    assert r.status_code == 303
+
+    page = client.get("/campaigns/new").text
+    assert 'value="vi" selected' in page          # language default
+    assert 'value="long" selected' in page        # video-format default
+    assert 'value="7"' in page                     # total-episodes default
+    assert 'value="08:00, 21:00"' in page          # posting-slots default
+    assert 'value="review" selected' in page       # publish-mode → review-first
+
+    # The budget reaches the dashboard quota meter (per-user override).
+    assert client.get("/api/summary").json()["health"]["ai_budget"] == 200
+
+    # Blank fields clear the stored defaults (the form always submits the whole thing).
+    client.post("/settings", data={"language": "", "ai_daily_budget": ""}, follow_redirects=False)
+    assert client.get("/api/summary").json()["health"]["ai_budget"] is None
+
+
 def test_retry_route(client):
     from database.db_session import SessionLocal
     from database.models import Task

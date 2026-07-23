@@ -50,7 +50,7 @@
         </select>
       </div>
       <div class="form-row"><label>Total episodes</label>
-        <input name="total_episodes" type="number" min="1" value="{{ campaign.total_episodes if editing else (source.total_episodes if dup else 10) }}" required></div>
+        <input name="total_episodes" type="number" min="1" value="{{ campaign.total_episodes if editing else (source.total_episodes if dup else (default_episodes|default(10))) }}" required></div>
       <div class="form-row"><label>Target language</label>
         <select name="language">
           {% for code, name in [('vi','Vietnamese'), ('en','English'), ('es','Spanish')] %}

@@ -756,3 +756,21 @@ linkable URL — preserving the "shareable, back-button-correct, no-hidden-state
 dashboard is built on — while the extraction into shared partials/context kills the copy-paste between
 the global and per-campaign episode lists. No functionality was removed; the render concurrency, port,
 secrets and CPU-only constraints are untouched (front-end + routing only).
+
+### ADR-041 — Per-user Settings page: preferences vs secrets
+**Decision:** add a `/settings` page (under **Setup**, beside Credentials) holding per-user
+*preferences* — distinct from Credentials, which holds *secrets*. v1 stores two groups in a new
+additive `users.settings_json` column (JSON; migrated by the existing `_COLUMN_UPGRADES` shim, the
+same pattern as `gemini_model`; no new env var, no secret): (1) **new-campaign defaults** — language,
+video format, publish mode, total episodes, posting slots — which seed a fresh New Campaign form via
+`_new_campaign_defaults()` (returns a cfg-shaped dict the form already reads through `cfg.get(...)`,
+so the template needs no new plumbing; AI Propose and per-campaign edits still override); and (2) the
+**AI daily budget**, which moves `GEMINI_DAILY_BUDGET` from an env-only constant to a per-user value
+(env stays as the fallback) surfaced on the dashboard quota meter (`_system_health(db, user)`) and the
+Telegram heartbeat (per-user in `scheduler.py`). The form submits whole — a blank field clears that
+default — and every value is whitelisted/validated exactly as the campaign form does. **Why:** the
+app had nowhere to express "this is how I usually set up a campaign", so every new campaign restated
+the same choices, and the one tunable that behaves like a preference (the AI budget) was frozen in
+`.env` where a non-operator can't reach it. Splitting preferences (Settings) from secrets
+(Credentials) keeps the encrypted-at-rest boundary clean while giving the common defaults a home; a
+plain JSON column keeps it schema-light and additive, honoring the single-box KISS/YAGNI rules.

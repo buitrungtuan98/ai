@@ -251,11 +251,13 @@ _WORKING_STATUSES = [
 ]
 
 
-def _system_health(db) -> dict:
+def _system_health(db, user=None) -> dict:
     """Live infrastructure signals for the dashboard health strip. Never raises — a dead Redis
-    should show as red, not take the page down."""
+    should show as red, not take the page down. The AI daily budget is the user's Settings value
+    when set, else the app-wide GEMINI_DAILY_BUDGET fallback."""
+    budget = (user.settings_json or {}).get("ai_daily_budget") if user is not None else None
     health = {"redis": False, "worker": False, "queue_depth": None, "buffer_ready": 0,
-              "disk_pct": None, "ai_calls": 0, "ai_budget": settings.GEMINI_DAILY_BUDGET}
+              "disk_pct": None, "ai_calls": 0, "ai_budget": budget or settings.GEMINI_DAILY_BUDGET}
     try:
         health["redis"] = bool(task_queue.conn.ping())
         health["worker"] = task_queue.worker_alive()
@@ -431,7 +433,7 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
         {
             "request": request, "user": user, "channels": channels, "campaigns": campaigns,
             "tasks": tasks, "nav": "dashboard",
-            "health": _system_health(db),
+            "health": _system_health(db, user),
             "counts": _task_counts(db, user.id),
             "attention_failed": attention_failed, "attention_review": attention_review,
             "review_ids": review_ids,
@@ -628,6 +630,9 @@ def campaign_new_form(request: Request, user: CurrentUser, db: DbDep,
             ctx["source"] = source
             ctx["cfg"] = source.config_json or {}
             sel_channel = source.channel_id  # Duplicate targets the source's channel by default
+    else:  # a fresh form starts from the user's saved new-campaign defaults (Settings page)
+        ctx["cfg"] = _new_campaign_defaults(user)
+        ctx["default_episodes"] = (user.settings_json or {}).get("total_episodes") or 10
     if sel_channel is None and channel is not None:  # follow the scoped channel if the user owns it
         ch = db.get(Channel, channel)
         if ch is not None and ch.user_id == user.id:
@@ -1054,6 +1059,67 @@ def save_credentials(
     db.add(user)
     db.commit()
     return RedirectResponse("/credentials", status_code=303)
+
+
+# ── Settings (per-user preferences — NOT secrets; keys live on Credentials) ──
+_SETTINGS_LANGS = ("vi", "en", "es")
+
+
+def _new_campaign_defaults(user) -> dict:
+    """Seed a fresh New-Campaign form from the user's saved defaults (Settings page). Returns a
+    cfg-shaped dict the template already reads via `cfg.get(...)`, so no form surgery is needed.
+    AI Propose still overrides anything the operator asks it to design."""
+    s = user.settings_json or {}
+    cfg: dict = {}
+    if s.get("language") in _SETTINGS_LANGS:
+        cfg["language"] = s["language"]
+    if s.get("video_format") in ("short", "long"):
+        cfg["video_format"] = s["video_format"]
+    if s.get("publish_mode") in ("auto", "review"):
+        cfg["auto_publish"] = s["publish_mode"] != "review"
+    if isinstance(s.get("posting_slots"), list) and s["posting_slots"]:
+        cfg["posting_slots"] = s["posting_slots"]
+    return cfg
+
+
+@app.get("/settings", response_class=HTMLResponse)
+def settings_page(request: Request, user: CurrentUser):
+    """Per-user preferences: the defaults a new campaign starts from + the AI daily budget shown on
+    the dashboard quota meter. Credentials (secrets) stay on their own page."""
+    return templates.TemplateResponse(
+        request, "settings.html",
+        {"request": request, "user": user, "nav": "settings", "s": user.settings_json or {}},
+    )
+
+
+@app.post("/settings")
+def save_settings(user: CurrentUser, db: DbDep, language: str = Form(""),
+                  video_format: str = Form(""), publish_mode: str = Form(""),
+                  posting_slots: str = Form(""), total_episodes: str = Form(""),
+                  ai_daily_budget: str = Form("")):
+    """Save the whole preferences form (a blank field clears that default — the form always submits
+    every field). Values are whitelisted/validated exactly like the campaign form does."""
+    import re
+
+    s: dict = {}
+    if language in _SETTINGS_LANGS:
+        s["language"] = language
+    if video_format in ("short", "long"):
+        s["video_format"] = video_format
+    if publish_mode in ("auto", "review"):
+        s["publish_mode"] = publish_mode
+    slots = [x.strip() for x in posting_slots.split(",")
+             if re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", x.strip())]
+    if slots:
+        s["posting_slots"] = slots
+    if total_episodes.strip().isdigit() and int(total_episodes) > 0:
+        s["total_episodes"] = int(total_episodes)
+    if ai_daily_budget.strip().isdigit() and int(ai_daily_budget) > 0:
+        s["ai_daily_budget"] = int(ai_daily_budget)
+    user.settings_json = s or None
+    db.add(user)
+    db.commit()
+    return RedirectResponse("/settings", status_code=303)
 
 
 # ── Asset Pool Cache (+ preview & review) ────────────────────────────────────
@@ -1673,7 +1739,7 @@ def api_summary(user: CurrentUser, db: DbDep):
     active = db.scalar(
         select(func.count()).select_from(Campaign).where(
             Campaign.user_id == user.id, Campaign.status == CampaignStatus.active)) or 0
-    return {"health": _system_health(db), "counts": _task_counts(db, user.id),
+    return {"health": _system_health(db, user), "counts": _task_counts(db, user.id),
             "channels": channels, "active_campaigns": active}
 
 

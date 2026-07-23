@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block title %}Settings · AI Video Factory{% endblock %}
+{% block content %}
+{% call ui.page_head('Settings', 'Your defaults and preferences. These are not secrets — API keys live on the Credentials page.') %}
+  <a class="btn ghost" href="/credentials">Credentials ↗</a>
+{% endcall %}
+
+<form method="post" action="/settings">
+<div class="grid-12">
+  <div class="col-6">
+    <div class="card">
+      <h3>New-campaign defaults</h3>
+      <p class="subtitle">What a fresh New Campaign form starts from. AI Propose still overrides these when you use it, and every field stays editable per campaign.</p>
+
+      {% call ui.field('Language', for_id='set-language') %}
+      <select name="language" id="set-language">
+        <option value="" {{ 'selected' if s.get('language') not in ['vi','en','es'] }}>— No default —</option>
+        {% for code, name in [('vi','Vietnamese'), ('en','English'), ('es','Spanish')] %}
+        <option value="{{ code }}" {{ 'selected' if s.get('language') == code }}>{{ name }}</option>
+        {% endfor %}
+      </select>
+      {% endcall %}
+
+      {% call ui.field('Video format', for_id='set-format') %}
+      <select name="video_format" id="set-format">
+        <option value="" {{ 'selected' if s.get('video_format') not in ['short','long'] }}>— No default (Short) —</option>
+        <option value="short" {{ 'selected' if s.get('video_format') == 'short' }}>Short — vertical 9:16, ≤3 min</option>
+        <option value="long" {{ 'selected' if s.get('video_format') == 'long' }}>Long — horizontal 16:9, 3–15 min</option>
+      </select>
+      {% endcall %}
+
+      {% call ui.field('Publishing', for_id='set-publish') %}
+      <select name="publish_mode" id="set-publish">
+        <option value="" {{ 'selected' if s.get('publish_mode') not in ['auto','review'] }}>— No default (Auto-publish) —</option>
+        <option value="auto" {{ 'selected' if s.get('publish_mode') == 'auto' }}>Auto-publish (hands-off)</option>
+        <option value="review" {{ 'selected' if s.get('publish_mode') == 'review' }}>Review first — approve each video</option>
+      </select>
+      {% endcall %}
+
+      {% call ui.field('Total episodes', hint='Default episode count for a new campaign (1 or more).', for_id='set-episodes') %}
+      <input name="total_episodes" id="set-episodes" type="number" min="1" placeholder="10"
+             value="{{ s.get('total_episodes') or '' }}">
+      {% endcall %}
+
+      {% call ui.field('Posting slots', hint='Daily publish times, HH:MM comma-separated (e.g. 07:30, 21:00). Leave blank for none.', for_id='set-slots') %}
+      <input name="posting_slots" id="set-slots" placeholder="21:00"
+             value="{{ (s.get('posting_slots') or [])|join(', ') }}">
+      {% endcall %}
+    </div>
+  </div>
+
+  <div class="col-6">
+    <div class="card">
+      <h3>AI usage</h3>
+      <p class="subtitle">Powers the dashboard quota meter and the Telegram heartbeat warnings.</p>
+      {% call ui.field('Gemini daily budget', hint='Your model’s free-tier requests/day (see the AI Studio Rate limits page). The dashboard meter turns amber at 80%. Leave blank to just count calls.', for_id='set-budget') %}
+      <input name="ai_daily_budget" id="set-budget" type="number" min="1" placeholder="e.g. 200"
+             value="{{ s.get('ai_daily_budget') or '' }}">
+      {% endcall %}
+      <p class="hint">The model chain itself is chosen on the <a href="/credentials">Credentials</a> page.</p>
+    </div>
+  </div>
+</div>
+
+<div class="savebar">
+  <button class="btn" type="submit">Save settings</button>
+  <span class="grow"></span>
+  <span class="hint">Applies to new campaigns and the dashboard — existing campaigns are unchanged.</span>
+</div>
+</form>
+{% endblock %}

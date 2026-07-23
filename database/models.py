@@ -61,6 +61,9 @@ class User(Base):
     # Gemini model chain chosen in the UI (comma-separated, first = primary, rest = fallbacks).
     # NULL = use the server default (GEMINI_MODEL in .env). A model id is not a secret.
     gemini_model: Mapped[str | None] = mapped_column(String(200))
+    # Per-user preferences (NOT secrets): new-campaign defaults + AI daily budget. Set on the
+    # Settings page; NULL = fall back to the app defaults. See main.py `_new_campaign_defaults`.
+    settings_json: Mapped[dict | None] = mapped_column(JSON)
 
     channels: Mapped[list["Channel"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"

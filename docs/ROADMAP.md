@@ -649,6 +649,27 @@ see. All additive — no route renamed/removed, Task Logs & Asset Pool kept as s
   ruff clean, docs guard green; all three tabs, the pending-campaign Start action, and the decluttered
   card list verified in a browser at 1280px and 375px.
 
+## Campaign UX bugfixes + Settings page `DONE`
+- **Bugfixes** (all reproduced in a browser): the New Campaign form follows the scoped channel
+  (`?channel=`) and preselects in new mode (was edit-only); **Duplicate** preselects the source
+  campaign's channel; the mobile save bar no longer hides under the bottom tab bar; **"Create &
+  Start" actually starts** (the busy-state handler disabled the clicked button before the browser
+  serialized it, dropping `start_now` — now carried through as a hidden field); Channels'
+  "Add a Facebook Page" is a collapsed `<details>` (no button-plus-open-form); starting from a
+  campaign hub stays on the hub.
+- **Polish**: hub Episodes badge shows only the awaiting-review count (amber); ⌘K campaign results
+  open the hub; the "Review" rename reaches the last labels (Episodes' "Review ↗", the Review
+  breadcrumb, the channel card's "Review →"); Cancel on Settings returns to the hub; creating a
+  campaign lands on its new hub; hub tabs scroll sideways on mobile instead of wrapping.
+- **Settings page** (`/settings`, under Setup): per-user preferences in a new additive
+  `users.settings_json` column — new-campaign defaults (language / video format / publish mode /
+  total episodes / posting slots) that seed the New Campaign form, and the AI daily budget (moved
+  from env-only to per-user, env fallback kept) shown on the dashboard quota meter + Telegram
+  heartbeat. Preferences vs secrets: keys stay on Credentials. ADR-041.
+- Verified: 174 tests (1 new — Settings save → new-campaign prefill + dashboard budget + clear),
+  ruff clean, docs guard green; Settings save/prefill/quota-chip and all bugfixes verified in a
+  browser at 1280px and 375px.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download
