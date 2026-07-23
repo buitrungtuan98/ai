@@ -35,7 +35,7 @@
         <p class="nav-group">Monitor</p>
         <a href="/" title="Dashboard" class="{{ 'active' if nav=='dashboard' else '' }}"><span class="ico">▚</span> <span class="nav-text">Dashboard</span></a>
         <a href="/tasks{{ scope_q }}" title="Task Logs" class="{{ 'active' if nav=='tasks' else '' }}"><span class="ico">≣</span> <span class="nav-text">Task Logs</span> <span class="nav-badge" data-badge="failed" hidden></span></a>
-        <a href="/calendar" title="Calendar" class="{{ 'active' if nav=='calendar' else '' }}"><span class="ico">▧</span> <span class="nav-text">Calendar</span></a>
+        <a href="/calendar{{ scope_q }}" title="Calendar" class="{{ 'active' if nav=='calendar' else '' }}"><span class="ico">▧</span> <span class="nav-text">Calendar</span></a>
         <p class="nav-group">Content</p>
         <a href="/episodes{{ scope_q }}" title="Episodes" class="{{ 'active' if nav=='episodes' else '' }}"><span class="ico">🎬</span> <span class="nav-text">Episodes</span></a>
         <a href="/campaigns{{ scope_q }}" title="Campaigns" class="{{ 'active' if nav=='campaigns' else '' }}"><span class="ico">▤</span> <span class="nav-text">Campaigns</span></a>

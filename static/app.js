@@ -7,6 +7,7 @@
   var filterEl = document.getElementById("task-filter");
   var pagerEl = document.getElementById("task-pager");
   var scopeCampaign = tbody.dataset.scopeCampaign || "";
+  var scopeChannel = tbody.dataset.scopeChannel || "";
 
   var page = 1;
   var query = "";
@@ -142,6 +143,7 @@
     var p = ["page=" + page];
     if (query) p.push("q=" + encodeURIComponent(query));
     if (scopeCampaign) p.push("campaign=" + encodeURIComponent(scopeCampaign));
+    if (scopeChannel) p.push("channel=" + encodeURIComponent(scopeChannel));
     return "/api/tasks?" + p.join("&");
   }
   function poll() {

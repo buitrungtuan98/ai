@@ -689,3 +689,23 @@ to the right home (a campaign → its Episodes, an episode → its detail view).
 request-sequence guard and the textContent-only build means it inherits the app's correctness and
 security conventions rather than inventing new ones; keeping the endpoint read-only and per-type-capped
 keeps it cheap on the single box.
+
+### ADR-038 — Scope switcher: honest filtering + sticky persistence (bugfix on ADR-034)
+**Decision:** the channel scope switcher (ADR-034) had two gaps — some scope-aware surfaces carried
+`?channel=` on their nav link but ignored it server-side, and the selection reset whenever you visited
+a page that doesn't scope. Fixed: (1) `/tasks` + `/api/tasks` and `/calendar` now truly filter by
+`?channel=` (via the channel's campaigns), so the live feed and calendar match what the switcher shows;
+(2) the switcher's onchange now MERGES `channel` into the current query string (keeping an active
+`status`/`q`, resetting `page`) instead of replacing it; (3) the choice is remembered in localStorage,
+so on any page `ui.js` reflects it in the dropdown and rewrites the scope-aware nav links
+(/episodes /campaigns /assets /tasks /calendar) to carry it — an explicit `?channel=` in the URL always
+wins, and picking "🌐 All channels" clears the memory. The Dashboard and the setup pages
+(Channels/Credentials) deliberately stay factory-wide: the health strip, AI-quota meter and scorecard
+are machine/all-channel metrics (and `/api/summary` shares those helpers), so scoping them per-channel
+would be wrong — persistence keeps the switcher from *resetting* there without pretending those pages
+are channel-specific. **Why:** a switcher that shows a channel selected while the page ignores it is
+worse than no switcher — it lies. Real server-side filtering makes the promise honest; keeping the
+scope in the URL (authoritative) with localStorage only as a convenience layer preserves the
+"linkable, no-hidden-state" property of ADR-034 while making the scope feel persistent as you click
+around. Merging rather than replacing the query string means switching channel doesn't silently blow
+away the filter you were using.

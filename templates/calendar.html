@@ -3,13 +3,18 @@
 {% block title %}Calendar · AI Video Factory{% endblock %}
 {% block content %}
 {% call ui.page_head('Content Calendar', 'Posting slots per week. Each row is computed in its own campaign timezone; header dates use the server timezone.') %}
+  {% set cq = ('&channel=' ~ scope_cid) if scope_cid else '' %}
   <div class="week-nav">
-    <a class="btn ghost sm" href="/calendar?week={{ week - 1 }}">‹ Prev</a>
+    <a class="btn ghost sm" href="/calendar?week={{ week - 1 }}{{ cq }}">‹ Prev</a>
     <span class="meta nowrap">{{ week_label }}</span>
-    {% if week != 0 %}<a class="btn ghost sm" href="/calendar">Today</a>{% endif %}
-    <a class="btn ghost sm" href="/calendar?week={{ week + 1 }}">Next ›</a>
+    {% if week != 0 %}<a class="btn ghost sm" href="/calendar{{ '?channel=' ~ scope_cid if scope_cid else '' }}">Today</a>{% endif %}
+    <a class="btn ghost sm" href="/calendar?week={{ week + 1 }}{{ cq }}">Next ›</a>
   </div>
 {% endcall %}
+
+{% if scope_channel %}
+<p class="scope-note">Calendar for channel <b>{{ scope_channel.channel_name }}</b>. <a href="/calendar">Show all →</a></p>
+{% endif %}
 
 {% if slotted %}
 <div class="card">

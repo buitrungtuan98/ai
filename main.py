@@ -1456,14 +1456,18 @@ def upcoming_slot_cells(campaign: Campaign, days: int = 7, week: int = 0) -> lis
 
 
 @app.get("/calendar", response_class=HTMLResponse)
-def calendar_page(request: Request, user: CurrentUser, db: DbDep, week: int = 0):
+def calendar_page(request: Request, user: CurrentUser, db: DbDep, week: int = 0,
+                  channel: int | None = None):
     from datetime import timedelta
 
     from workers.scheduler import local_now
 
     week = max(-8, min(week, 12))  # bound the navigation to a sane range
-    campaigns = db.scalars(select(Campaign).where(
-        Campaign.user_id == user.id, Campaign.status == CampaignStatus.active)).all()
+    camp_q = select(Campaign).where(
+        Campaign.user_id == user.id, Campaign.status == CampaignStatus.active)
+    if channel:  # scope to one channel (from the workspace scope switcher)
+        camp_q = camp_q.where(Campaign.channel_id == channel)
+    campaigns = db.scalars(camp_q).all()
     ready_counts = dict(db.execute(
         select(BufferPoolItem.campaign_id, func.count())
         .where(BufferPoolItem.status == BufferStatus.ready)
@@ -1488,21 +1492,29 @@ def calendar_page(request: Request, user: CurrentUser, db: DbDep, week: int = 0)
         request, "calendar.html",
         {"request": request, "user": user, "nav": "calendar", "slotted": slotted,
          "unslotted": unslotted, "day_headers": day_headers,
-         "week": week, "week_label": label},
+         "week": week, "week_label": label, "scope_cid": channel,
+         "scope_channel": db.get(Channel, channel) if channel else None},
     )
 
 
 # ── Real-Time Task Logs ──────────────────────────────────────────────────────
 @app.get("/tasks", response_class=HTMLResponse)
-def tasks_page(request: Request, user: CurrentUser, db: DbDep, campaign: int | None = None):
+def tasks_page(request: Request, user: CurrentUser, db: DbDep,
+               campaign: int | None = None, channel: int | None = None):
     scope = None
-    if campaign:  # drill-down scope from a campaign (client-side filter over the live feed)
+    if campaign:  # drill-down scope from a campaign
         scope = db.get(Campaign, campaign)
         if scope is not None and scope.user_id != user.id:
             scope = None
+    scope_channel = None
+    if channel:  # scope the live feed to one channel (its api/tasks poll is filtered server-side)
+        scope_channel = db.get(Channel, channel)
+        if scope_channel is not None and scope_channel.user_id != user.id:
+            scope_channel = None
     return templates.TemplateResponse(
         request, "tasks.html",
-        {"request": request, "user": user, "nav": "tasks", "scope_campaign": scope})
+        {"request": request, "user": user, "nav": "tasks",
+         "scope_campaign": scope, "scope_channel": scope_channel})
 
 
 _TASKS_PER_PAGE = 25
@@ -1510,12 +1522,15 @@ _TASKS_PER_PAGE = 25
 
 @app.get("/api/tasks")
 def api_tasks(user: CurrentUser, db: DbDep,
-              page: int = 1, q: str = "", campaign: int | None = None):
-    # Full task history, newest first, paginated — page 1 carries the live/active jobs. Scope (?campaign)
-    # and search (?q) run in SQL so they span ALL history, not just the page currently in the browser.
+              page: int = 1, q: str = "", campaign: int | None = None, channel: int | None = None):
+    # Full task history, newest first, paginated — page 1 carries the live/active jobs. Scope
+    # (?campaign / ?channel) and search (?q) run in SQL so they span ALL history, not just the page.
     base = select(Task).where(Task.user_id == user.id)
     if campaign:
         base = base.where(Task.campaign_id == campaign)
+    if channel:  # scope by the episode's campaign's channel
+        base = base.where(Task.campaign_id.in_(
+            select(Campaign.id).where(Campaign.user_id == user.id, Campaign.channel_id == channel)))
     q = q.strip()
     if q:
         like = f"%{q}%"

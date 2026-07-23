@@ -936,6 +936,70 @@ def test_api_tasks_pagination_and_search(client):
     assert client.get("/api/tasks?campaign=999999").json()["total"] == 0
 
 
+def test_tasks_channel_scope(client):
+    """The scope switcher's ?channel= truly filters the live Task Logs feed (not just the nav link)."""
+    from database.db_session import SessionLocal
+    from database.models import Campaign, Channel, Task
+    from database.types import CampaignStatus, TaskStatus
+
+    client.post("/channels/facebook", data={"channel_name": "ChA", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    client.post("/channels/facebook", data={"channel_name": "ChB", "page_id": "2", "page_access_token": "t"},
+                follow_redirects=False)
+    db = SessionLocal()
+    chans = db.query(Channel).order_by(Channel.id).all()
+    uid = chans[0].user_id
+    ca = Campaign(user_id=uid, channel_id=chans[0].id, topic_name="CampA", total_episodes=3,
+                  status=CampaignStatus.active)
+    cb = Campaign(user_id=uid, channel_id=chans[1].id, topic_name="CampB", total_episodes=3,
+                  status=CampaignStatus.active)
+    db.add_all([ca, cb])
+    db.commit()
+    db.refresh(ca)
+    db.refresh(cb)
+    db.add(Task(campaign_id=ca.id, user_id=uid, episode_number=1, status=TaskStatus.COMPLETED))
+    db.add(Task(campaign_id=cb.id, user_id=uid, episode_number=1, status=TaskStatus.COMPLETED))
+    db.commit()
+    cha_id = chans[0].id
+    db.close()
+
+    assert client.get("/api/tasks").json()["total"] == 2
+    scoped = client.get(f"/api/tasks?channel={cha_id}").json()
+    assert scoped["total"] == 1 and scoped["tasks"][0]["topic"] == "CampA"
+    # The page carries the scope so the poller sends it, and shows a channel scope note.
+    page = client.get(f"/tasks?channel={cha_id}").text
+    assert f'data-scope-channel="{cha_id}"' in page and "Render jobs for channel" in page
+
+
+def test_calendar_channel_scope(client):
+    """The calendar filters to one channel and keeps ?channel on its week-navigation links."""
+    from database.db_session import SessionLocal
+    from database.models import Campaign, Channel
+    from database.types import CampaignStatus
+    from workers.scheduler import WEEKDAY_KEYS, local_now
+
+    client.post("/channels/facebook", data={"channel_name": "ChX", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    client.post("/channels/facebook", data={"channel_name": "ChY", "page_id": "2", "page_access_token": "t"},
+                follow_redirects=False)
+    db = SessionLocal()
+    chans = db.query(Channel).order_by(Channel.id).all()
+    today = WEEKDAY_KEYS[local_now().weekday()]
+    cfg = {"posting_slots": ["21:00"], "posting_days": [today]}
+    db.add(Campaign(user_id=chans[0].user_id, channel_id=chans[0].id, topic_name="OnlyX",
+                    total_episodes=3, status=CampaignStatus.active, config_json=cfg))
+    db.add(Campaign(user_id=chans[1].user_id, channel_id=chans[1].id, topic_name="OnlyY",
+                    total_episodes=3, status=CampaignStatus.active, config_json=cfg))
+    db.commit()
+    chx = chans[0].id
+    db.close()
+
+    scoped = client.get(f"/calendar?channel={chx}").text
+    assert "OnlyX" in scoped and "OnlyY" not in scoped
+    # week-nav keeps the scope (& is HTML-escaped to &amp; in the attribute)
+    assert f'href="/calendar?week=1&amp;channel={chx}"' in scoped
+
+
 def test_api_summary_snapshot(client):
     """The live snapshot feeding the header attention badge + dashboard auto-refresh reuses the
     dashboard helpers, so its counts match a full reload."""
