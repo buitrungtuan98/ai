@@ -266,6 +266,34 @@ def test_propose_campaign_drops_invalid_voice(monkeypatch):
     assert ai.propose_campaign(topic="t", language="en", api_key="k").voice == "en-US-AriaNeural"
 
 
+def test_propose_campaign_long_format_forced_and_clamped(monkeypatch):
+    """A Long proposal comes back genuinely long-form: the operator's format wins over the model's,
+    durations are clamped into the long range + auto-ordered, and the prompt is designed for long."""
+    import core.ai_engine as ai
+
+    seen = {}
+    # The model tries to answer 'short' with a 40/20s clip even though the operator asked for long.
+    payload = {
+        "topic_name": "T", "language": "en", "total_episodes": 8, "persona": "P",
+        "continuity": "none", "caption_theme": "highlight", "color_grade": "cinematic",
+        "music_mode": "auto", "voice": "en-US-AriaNeural", "video_format": "short",
+        "duration_min_s": 40, "duration_max_s": 20,
+    }
+    monkeypatch.setattr(ai, "_call_gemini",
+                        lambda **k: (seen.update(k), json.dumps(payload))[1])
+    p = ai.propose_campaign(topic="t", language="en", video_format="long", api_key="k")
+    assert p.video_format == "long"                                  # operator's choice wins
+    assert 60 <= p.duration_min_s <= 900 and 60 <= p.duration_max_s <= 900  # clamped to long range
+    assert p.duration_min_s <= p.duration_max_s                      # auto-ordered
+    assert "16:9" in seen["prompt"]                                  # prompt designed for long-form
+
+    # Short (the default) keeps the ≤180s ceiling.
+    payload["video_format"], payload["duration_min_s"], payload["duration_max_s"] = "long", 30, 300
+    monkeypatch.setattr(ai, "_call_gemini", lambda **k: json.dumps(payload))
+    ps = ai.propose_campaign(topic="t", language="en", video_format="short", api_key="k")
+    assert ps.video_format == "short" and ps.duration_max_s <= 180
+
+
 def test_parse_valid(monkeypatch):
     import core.ai_engine as ai
     from core.ai_engine import VideoScript, generate_structured

@@ -312,14 +312,16 @@ def send_daily_heartbeat(db, now: datetime | None = None) -> int:
     if not user_ids:
         return 0
     calls = ai_calls_today()
-    budget = settings.GEMINI_DAILY_BUDGET
-    quota_bit = f"{calls}/{budget}" if budget else str(calls)
     disk = disk_usage_pct(settings.MEDIA_ROOT)
     sent = 0
     for uid in user_ids:
         user = db.get(User, uid)
         if user is None:
             continue
+        # Budget is the user's Settings value when set, else the app-wide fallback (matches the
+        # dashboard quota meter in main.py `_system_health`).
+        budget = (user.settings_json or {}).get("ai_daily_budget") or settings.GEMINI_DAILY_BUDGET
+        quota_bit = f"{calls}/{budget}" if budget else str(calls)
         counts = dict(db.execute(
             select(Task.status, func.count()).where(
                 Task.user_id == uid, Task.finished_at >= cutoff

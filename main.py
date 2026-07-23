@@ -251,11 +251,13 @@ _WORKING_STATUSES = [
 ]
 
 
-def _system_health(db) -> dict:
+def _system_health(db, user=None) -> dict:
     """Live infrastructure signals for the dashboard health strip. Never raises — a dead Redis
-    should show as red, not take the page down."""
+    should show as red, not take the page down. The AI daily budget is the user's Settings value
+    when set, else the app-wide GEMINI_DAILY_BUDGET fallback."""
+    budget = (user.settings_json or {}).get("ai_daily_budget") if user is not None else None
     health = {"redis": False, "worker": False, "queue_depth": None, "buffer_ready": 0,
-              "disk_pct": None, "ai_calls": 0, "ai_budget": settings.GEMINI_DAILY_BUDGET}
+              "disk_pct": None, "ai_calls": 0, "ai_budget": budget or settings.GEMINI_DAILY_BUDGET}
     try:
         health["redis"] = bool(task_queue.conn.ping())
         health["worker"] = task_queue.worker_alive()
@@ -431,7 +433,7 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
         {
             "request": request, "user": user, "channels": channels, "campaigns": campaigns,
             "tasks": tasks, "nav": "dashboard",
-            "health": _system_health(db),
+            "health": _system_health(db, user),
             "counts": _task_counts(db, user.id),
             "attention_failed": attention_failed, "attention_review": attention_review,
             "review_ids": review_ids,
@@ -613,16 +615,29 @@ def campaigns_page(request: Request, user: CurrentUser, db: DbDep, channel: int 
 
 
 @app.get("/campaigns/new", response_class=HTMLResponse)
-def campaign_new_form(request: Request, user: CurrentUser, db: DbDep, from_id: int | None = None):
+def campaign_new_form(request: Request, user: CurrentUser, db: DbDep,
+                      from_id: int | None = None, channel: int | None = None):
     """New-campaign form. With ?from_id=<campaign>, prefills from an owned campaign (Duplicate —
-    e.g. same horror persona in another language to another channel)."""
+    e.g. same horror persona in another language to another channel). With ?channel=<id> (carried
+    from the scoped list), preselects that channel. A fresh form seeds its defaults from the user's
+    Settings (new-campaign defaults) so the common choices are already right."""
     channels = db.scalars(select(Channel).where(Channel.user_id == user.id)).all()
     ctx: dict = {"request": request, "user": user, "channels": channels, "nav": "campaigns"}
+    sel_channel: int | None = None
     if from_id is not None:
         source = db.get(Campaign, from_id)
         if source is not None and source.user_id == user.id:
             ctx["source"] = source
             ctx["cfg"] = source.config_json or {}
+            sel_channel = source.channel_id  # Duplicate targets the source's channel by default
+    else:  # a fresh form starts from the user's saved new-campaign defaults (Settings page)
+        ctx["cfg"] = _new_campaign_defaults(user)
+        ctx["default_episodes"] = (user.settings_json or {}).get("total_episodes") or 10
+    if sel_channel is None and channel is not None:  # follow the scoped channel if the user owns it
+        ch = db.get(Channel, channel)
+        if ch is not None and ch.user_id == user.id:
+            sel_channel = channel
+    ctx["sel_channel"] = sel_channel
     return templates.TemplateResponse(request, "campaign_new.html", ctx)
 
 
@@ -681,9 +696,12 @@ def preview_script(
 
 
 @app.post("/campaigns/propose")
-def propose_campaign_route(user: CurrentUser, topic: str = Form(""), language: str = Form("")):
+def propose_campaign_route(user: CurrentUser, topic: str = Form(""), language: str = Form(""),
+                           video_format: str = Form("short")):
     """AI-design a whole campaign config from a title (or from scratch). Returns JSON the New
-    Campaign form fills in for review — nothing is saved until the user clicks Create."""
+    Campaign form fills in for review — nothing is saved until the user clicks Create. The form's
+    video_format is an explicit constraint: the designer builds for it (short vs long) and it is
+    forced onto the result, so choosing Long no longer gets silently reset to a short."""
     import random
 
     from core import ai_engine
@@ -693,9 +711,10 @@ def propose_campaign_route(user: CurrentUser, topic: str = Form(""), language: s
         return JSONResponse({"error": "Add a Gemini API key first (Credentials page or .env)."},
                             status_code=400)
     lang = language if language in ("en", "vi", "es") else None
+    fmt = "long" if video_format == "long" else "short"
     try:
         proposal = ai_engine.propose_campaign(
-            topic=topic.strip() or None, language=lang, api_key=key,
+            topic=topic.strip() or None, language=lang, video_format=fmt, api_key=key,
             model=user.gemini_model or settings.GEMINI_MODEL,
             nonce=random.randint(1, 1_000_000),
         )
@@ -871,6 +890,14 @@ def _campaigns_redirect(channel_id) -> RedirectResponse:
                             status_code=303)
 
 
+def _campaign_return(return_to: str) -> str | None:
+    """Safe internal campaign-hub path (`/campaigns/<digits>` or `/campaigns/<digits>/<tab>`) if
+    `return_to` is one, else None — lets a hub action land back on the hub instead of the list."""
+    import re
+
+    return return_to if re.fullmatch(r"/campaigns/\d+(?:/[a-z]+)?", return_to or "") else None
+
+
 @app.post("/campaigns")
 def create_campaign(user: CurrentUser, db: DbDep, form: dict = Depends(_campaign_form),
                     start_now: str = Form("")):
@@ -889,7 +916,9 @@ def create_campaign(user: CurrentUser, db: DbDep, form: dict = Depends(_campaign
         campaign.status = CampaignStatus.active
         db.commit()
         video_worker.hydrate_buffers(db)
-    return _campaigns_redirect(campaign.channel_id)  # land beside the new campaign's channel
+    # Land on the new campaign's hub — you see what you just made (and, if started, it rendering)
+    # instead of hunting for it in the list.
+    return RedirectResponse(f"/campaigns/{campaign.id}", status_code=303)
 
 
 @app.get("/campaigns/{campaign_id}/settings", response_class=HTMLResponse)
@@ -901,6 +930,7 @@ def campaign_settings(request: Request, user: CurrentUser, db: DbDep,
         request, "campaign_new.html",
         {"request": request, "user": user, "channels": channels, "nav": "campaigns",
          "campaign": campaign, "cfg": campaign.config_json or {}, "hub_active": "settings",
+         "sel_channel": campaign.channel_id,
          "channel": db.get(Channel, campaign.channel_id),
          "asset_count": _buffer_counts(db, user.id).get(campaign.id, {"ready": 0, "awaiting_review": 0})},
     )
@@ -928,10 +958,13 @@ def update_campaign(user: CurrentUser, db: DbDep, campaign=Depends(get_owned_cam
 
 @app.post("/campaigns/{campaign_id}/start")
 def start_campaign(campaign=Depends(get_owned_campaign), db=Depends(get_db),
-                   scope_channel: str = Form("")):
+                   scope_channel: str = Form(""), return_to: str = Form("")):
     campaign.status = CampaignStatus.active
     db.commit()
     video_worker.hydrate_buffers(db)  # queue the first episodes immediately
+    dest = _campaign_return(return_to)  # started from the hub → stay on the hub and watch it render
+    if dest is not None:
+        return RedirectResponse(dest, status_code=303)
     return _campaigns_redirect(scope_channel.strip() or None)
 
 
@@ -1030,6 +1063,67 @@ def save_credentials(
     db.add(user)
     db.commit()
     return RedirectResponse("/credentials", status_code=303)
+
+
+# ── Settings (per-user preferences — NOT secrets; keys live on Credentials) ──
+_SETTINGS_LANGS = ("vi", "en", "es")
+
+
+def _new_campaign_defaults(user) -> dict:
+    """Seed a fresh New-Campaign form from the user's saved defaults (Settings page). Returns a
+    cfg-shaped dict the template already reads via `cfg.get(...)`, so no form surgery is needed.
+    AI Propose still overrides anything the operator asks it to design."""
+    s = user.settings_json or {}
+    cfg: dict = {}
+    if s.get("language") in _SETTINGS_LANGS:
+        cfg["language"] = s["language"]
+    if s.get("video_format") in ("short", "long"):
+        cfg["video_format"] = s["video_format"]
+    if s.get("publish_mode") in ("auto", "review"):
+        cfg["auto_publish"] = s["publish_mode"] != "review"
+    if isinstance(s.get("posting_slots"), list) and s["posting_slots"]:
+        cfg["posting_slots"] = s["posting_slots"]
+    return cfg
+
+
+@app.get("/settings", response_class=HTMLResponse)
+def settings_page(request: Request, user: CurrentUser):
+    """Per-user preferences: the defaults a new campaign starts from + the AI daily budget shown on
+    the dashboard quota meter. Credentials (secrets) stay on their own page."""
+    return templates.TemplateResponse(
+        request, "settings.html",
+        {"request": request, "user": user, "nav": "settings", "s": user.settings_json or {}},
+    )
+
+
+@app.post("/settings")
+def save_settings(user: CurrentUser, db: DbDep, language: str = Form(""),
+                  video_format: str = Form(""), publish_mode: str = Form(""),
+                  posting_slots: str = Form(""), total_episodes: str = Form(""),
+                  ai_daily_budget: str = Form("")):
+    """Save the whole preferences form (a blank field clears that default — the form always submits
+    every field). Values are whitelisted/validated exactly like the campaign form does."""
+    import re
+
+    s: dict = {}
+    if language in _SETTINGS_LANGS:
+        s["language"] = language
+    if video_format in ("short", "long"):
+        s["video_format"] = video_format
+    if publish_mode in ("auto", "review"):
+        s["publish_mode"] = publish_mode
+    slots = [x.strip() for x in posting_slots.split(",")
+             if re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", x.strip())]
+    if slots:
+        s["posting_slots"] = slots
+    if total_episodes.strip().isdigit() and int(total_episodes) > 0:
+        s["total_episodes"] = int(total_episodes)
+    if ai_daily_budget.strip().isdigit() and int(ai_daily_budget) > 0:
+        s["ai_daily_budget"] = int(ai_daily_budget)
+    user.settings_json = s or None
+    db.add(user)
+    db.commit()
+    return RedirectResponse("/settings", status_code=303)
 
 
 # ── Asset Pool Cache (+ preview & review) ────────────────────────────────────
@@ -1649,7 +1743,7 @@ def api_summary(user: CurrentUser, db: DbDep):
     active = db.scalar(
         select(func.count()).select_from(Campaign).where(
             Campaign.user_id == user.id, Campaign.status == CampaignStatus.active)) or 0
-    return {"health": _system_health(db), "counts": _task_counts(db, user.id),
+    return {"health": _system_health(db, user), "counts": _task_counts(db, user.id),
             "channels": channels, "active_campaigns": active}
 
 
@@ -1670,7 +1764,7 @@ def api_search(user: CurrentUser, db: DbDep, q: str = ""):
             Campaign.user_id == user.id, Campaign.topic_name.ilike(like))
             .order_by(Campaign.id.desc()).limit(6)):
         results.append({"type": "Campaign", "label": c.topic_name,
-                        "sub": c.status.value, "href": f"/episodes?campaign={c.id}"})
+                        "sub": c.status.value, "href": f"/campaigns/{c.id}"})
     camp_names = {c.id: c.topic_name for c in db.scalars(
         select(Campaign).where(Campaign.user_id == user.id))}
     for t in db.scalars(select(Task).where(

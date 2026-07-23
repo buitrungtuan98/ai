@@ -364,7 +364,7 @@ def test_api_search_across_types(client):
     tid, _bid = _make_episode(client)  # campaign "Space" + ep1 synopsis "A test episode"
     assert client.get("/api/search?q=a").json()["results"] == []  # <2 chars → nothing
     camp_hits = client.get("/api/search?q=Space").json()["results"]
-    assert any(r["type"] == "Campaign" and r["href"].startswith("/episodes?campaign=")
+    assert any(r["type"] == "Campaign" and r["href"].startswith("/campaigns/")
                for r in camp_hits)
     ep_hits = client.get("/api/search?q=test").json()["results"]
     assert any(r["type"] == "Episode" and r["href"] == f"/episodes/{tid}" for r in ep_hits)
@@ -713,6 +713,28 @@ def test_propose_campaign_needs_key(client, monkeypatch):
     assert r.status_code == 400 and "Gemini" in r.json()["error"]
 
 
+def test_propose_campaign_forwards_video_format(client, monkeypatch):
+    """The form's video_format reaches the designer so a Long campaign is designed long-form."""
+    from core import ai_engine
+    from core.ai_engine import CampaignProposal
+    from core.config import settings
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "k")
+    captured = {}
+
+    def fake_propose(**kwargs):
+        captured.update(kwargs)
+        return CampaignProposal(topic_name="T", language="en", total_episodes=8, persona="P",
+                                video_format=kwargs.get("video_format", "short"))
+
+    monkeypatch.setattr(ai_engine, "propose_campaign", lambda **k: fake_propose(**k))
+    j = client.post("/campaigns/propose", data={"topic": "docs", "video_format": "long"}).json()
+    assert captured["video_format"] == "long" and j["video_format"] == "long"
+    # An unknown value falls back to short (whitelisted).
+    client.post("/campaigns/propose", data={"topic": "docs", "video_format": "bogus"})
+    assert captured["video_format"] == "short"
+
+
 def _seed_campaign(client):
     from database.db_session import SessionLocal
     from database.models import Campaign, Channel
@@ -800,6 +822,33 @@ def test_edit_campaign(client):
     assert cam2.topic_name == "Deep Space" and cam2.total_episodes == 8
     assert cam2.config_json["language"] == "vi" and cam2.config_json["auto_publish"] is True
     db.close()
+
+
+def test_settings_defaults_prefill_new_campaign(client):
+    """Saved Settings defaults seed a fresh New Campaign form and the dashboard AI budget meter
+    (AI Propose still overrides per campaign)."""
+    # A channel must exist or the form shows the "connect a channel first" state (no fields).
+    client.post("/channels/facebook", data={"channel_name": "P", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    r = client.post("/settings", data={
+        "language": "vi", "video_format": "long", "publish_mode": "review",
+        "total_episodes": "7", "posting_slots": "08:00, 21:00", "ai_daily_budget": "200",
+    }, follow_redirects=False)
+    assert r.status_code == 303
+
+    page = client.get("/campaigns/new").text
+    assert 'value="vi" selected' in page          # language default
+    assert 'value="long" selected' in page        # video-format default
+    assert 'value="7"' in page                     # total-episodes default
+    assert 'value="08:00, 21:00"' in page          # posting-slots default
+    assert 'value="review" selected' in page       # publish-mode → review-first
+
+    # The budget reaches the dashboard quota meter (per-user override).
+    assert client.get("/api/summary").json()["health"]["ai_budget"] == 200
+
+    # Blank fields clear the stored defaults (the form always submits the whole thing).
+    client.post("/settings", data={"language": "", "ai_daily_budget": ""}, follow_redirects=False)
+    assert client.get("/api/summary").json()["health"]["ai_budget"] is None
 
 
 def test_retry_route(client):

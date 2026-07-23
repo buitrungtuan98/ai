@@ -3,7 +3,7 @@
 {% block title %}Campaigns · AI Video Factory{% endblock %}
 {% block content %}
 {% call ui.page_head('Campaigns', 'Each campaign is mapped to a connected channel and runs episodic content.') %}
-  <a class="btn" href="/campaigns/new">+ New Campaign</a>
+  <a class="btn" href="/campaigns/new{{ '?channel=' ~ scope_channel.id if scope_channel else '' }}">+ New Campaign</a>
 {% endcall %}
 
 {% if scope_channel %}
@@ -53,6 +53,6 @@
 <div class="empty" style="padding:var(--sp-8)">No campaigns match this filter. <a href="/campaigns?{{ query_string(**scope_hidden) }}">Show all →</a></div>
 {% endif %}
 {% else %}
-{% call ui.empty('▤', 'No campaigns yet', 'Create your first campaign and map it to a channel — the AI can propose the whole thing from a topic.', '/campaigns/new', '+ New Campaign') %}{% endcall %}
+{% call ui.empty('▤', 'No campaigns yet', 'Create your first campaign and map it to a channel — the AI can propose the whole thing from a topic.', '/campaigns/new' ~ ('?channel=' ~ scope_channel.id if scope_channel else ''), '+ New Campaign') %}{% endcall %}
 {% endif %}
 {% endblock %}

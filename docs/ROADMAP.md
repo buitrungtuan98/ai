@@ -649,6 +649,40 @@ see. All additive — no route renamed/removed, Task Logs & Asset Pool kept as s
   ruff clean, docs guard green; all three tabs, the pending-campaign Start action, and the decluttered
   card list verified in a browser at 1280px and 375px.
 
+## Campaign UX bugfixes + Settings page `DONE`
+- **Bugfixes** (all reproduced in a browser): the New Campaign form follows the scoped channel
+  (`?channel=`) and preselects in new mode (was edit-only); **Duplicate** preselects the source
+  campaign's channel; the mobile save bar no longer hides under the bottom tab bar; **"Create &
+  Start" actually starts** (the busy-state handler disabled the clicked button before the browser
+  serialized it, dropping `start_now` — now carried through as a hidden field); Channels'
+  "Add a Facebook Page" is a collapsed `<details>` (no button-plus-open-form); starting from a
+  campaign hub stays on the hub.
+- **Polish**: hub Episodes badge shows only the awaiting-review count (amber); ⌘K campaign results
+  open the hub; the "Review" rename reaches the last labels (Episodes' "Review ↗", the Review
+  breadcrumb, the channel card's "Review →"); Cancel on Settings returns to the hub; creating a
+  campaign lands on its new hub; hub tabs scroll sideways on mobile instead of wrapping.
+- **Settings page** (`/settings`, under Setup): per-user preferences in a new additive
+  `users.settings_json` column — new-campaign defaults (language / video format / publish mode /
+  total episodes / posting slots) that seed the New Campaign form, and the AI daily budget (moved
+  from env-only to per-user, env fallback kept) shown on the dashboard quota meter + Telegram
+  heartbeat. Preferences vs secrets: keys stay on Credentials. ADR-041.
+- Verified: 174 tests (1 new — Settings save → new-campaign prefill + dashboard budget + clear),
+  ruff clean, docs guard green; Settings save/prefill/quota-chip and all bugfixes verified in a
+  browser at 1280px and 375px.
+
+## AI Propose designs long-form too `DONE`
+- AI Propose was shorts-only — and choosing **Long** then proposing silently reset to Short (the
+  response's `video_format` overwrote the form). Fixed end to end: the form sends `video_format`
+  with the request; the route forwards it (whitelisted); `propose_campaign` designs FOR the format
+  (short vs long prompt guidance) and **forces** the operator's choice onto the result; the proposal
+  schema's duration ceiling widens `le=180 → le=900` and durations are clamped to the format range
+  (60–900 long / 10–180 short) + auto-ordered — matching the create-time clamp. The form's
+  video-length inputs are now format-aware (min/max/placeholder), with matching validation. One AI
+  call, unchanged. ADR-042.
+- Verified: 176 tests (2 new — route forwards video_format incl. bogus→short; propose forces long +
+  clamps durations + prompt designed for long), ruff clean, docs guard green; the format-aware inputs
+  and the `video_format=long` propose request verified in a browser.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

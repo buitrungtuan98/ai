@@ -44,12 +44,13 @@
       <div class="form-row"><label>Topic name</label>
         <input name="topic_name" required placeholder="Amazing space facts" value="{{ campaign.topic_name if editing else (source.topic_name if dup else '') }}"></div>
       <div class="form-row"><label>Target channel</label>
+        {% set sel_channel = sel_channel if sel_channel is defined else None %}
         <select name="channel_id" required>
-          {% for c in channels %}<option value="{{ c.id }}" {{ 'selected' if editing and campaign.channel_id == c.id }}>{{ c.channel_name }} ({{ c.platform.value }})</option>{% endfor %}
+          {% for c in channels %}<option value="{{ c.id }}" {{ 'selected' if c.id == sel_channel }}>{{ c.channel_name }} ({{ c.platform.value }})</option>{% endfor %}
         </select>
       </div>
       <div class="form-row"><label>Total episodes</label>
-        <input name="total_episodes" type="number" min="1" value="{{ campaign.total_episodes if editing else (source.total_episodes if dup else 10) }}" required></div>
+        <input name="total_episodes" type="number" min="1" value="{{ campaign.total_episodes if editing else (source.total_episodes if dup else (default_episodes|default(10))) }}" required></div>
       <div class="form-row"><label>Target language</label>
         <select name="language">
           {% for code, name in [('vi','Vietnamese'), ('en','English'), ('es','Spanish')] %}
@@ -289,7 +290,7 @@
     <button class="btn" type="submit" name="start_now" value="1" id="save-start">▶ Create &amp; Start</button>
     <button class="btn ghost" type="submit" id="save-campaign">Create only</button>
     {% endif %}
-    <a class="btn ghost" href="/campaigns">Cancel</a>
+    <a class="btn ghost" href="{{ '/campaigns/' ~ campaign.id if editing else '/campaigns' }}">Cancel</a>
     <span class="grow"></span>
     <span class="hint" id="save-hint">{{ 'Save your changes.' if editing else '“Create & Start” begins rendering now; “Create only” saves it as pending.' }}</span>
   </div>
@@ -334,6 +335,23 @@
   }
   fillVoices();
   if (langSel) langSel.addEventListener("change", function () { fillVoices(""); });
+
+  // Format-aware video-length inputs: Short caps at 180s, Long allows up to 900s (15 min). Keeps
+  // the min/max/placeholder honest so the hints match what the server will accept for the format.
+  const fmtSel = document.querySelector('select[name="video_format"]');
+  function applyFormatConstraints() {
+    const long = fmtSel && fmtSel.value === "long";
+    const lo = document.querySelector('input[name="duration_min_s"]');
+    const hi = document.querySelector('input[name="duration_max_s"]');
+    const setBounds = (el, ph) => {
+      if (!el) return;
+      el.min = long ? 60 : 10; el.max = long ? 900 : 180; el.placeholder = ph;
+    };
+    setBounds(lo, long ? "min, e.g. 300" : "min, e.g. 30");
+    setBounds(hi, long ? "max, e.g. 600" : "max, e.g. 60");
+  }
+  applyFormatConstraints();
+  if (fmtSel) fmtSel.addEventListener("change", applyFormatConstraints);
 
   // 🎬 Live campaign "identity card": a plain-language summary of what you're about to create.
   const idText = document.getElementById("identity-text");
@@ -416,6 +434,9 @@
           const body = new URLSearchParams();
           body.set("topic", (form.elements["topic_name"].value || "").trim());
           body.set("language", form.elements["language"].value || "");
+          // The chosen format is a constraint the designer must honor (short vs long), not something
+          // it may override — send it so a Long campaign is designed long-form.
+          body.set("video_format", form.elements["video_format"].value || "short");
           const r = await fetch("/campaigns/propose", { method: "POST", body });
           const p = await r.json();
           if (!r.ok) throw new Error(p.error || "AI proposal failed");
@@ -431,6 +452,7 @@
           setVal("continuity", p.continuity);
           setVal("script_depth", p.script_depth);
           setVal("video_format", p.video_format);
+          applyFormatConstraints();  // sync the duration input bounds to the proposed format
           fillVoices("");            // rebuild the voice list for the proposed language first
           setVal("voice", p.voice);  // the proposal's voice is always in that language's catalog
           setVal("rate_pct", p.rate_pct);
@@ -493,6 +515,16 @@
       const dmin = val("duration_min_s"), dmax = val("duration_max_s");
       if ((dmin && !dmax) || (dmax && !dmin)) { e.preventDefault(); return fail("Set BOTH video-length fields or leave both blank.", "core", el(dmin ? "duration_max_s" : "duration_min_s")); }
       if (dmin && dmax && Number(dmin) > Number(dmax)) { e.preventDefault(); return fail("Minimum video length can't exceed the maximum.", "core", el("duration_min_s")); }
+      // Range depends on format: short 10–180s, long 60–900s (matches the server clamp).
+      const longFmt = el("video_format") && el("video_format").value === "long";
+      const rlo = longFmt ? 60 : 10, rhi = longFmt ? 900 : 180;
+      for (const nm of ["duration_min_s", "duration_max_s"]) {
+        const v = val(nm);
+        if (v && (Number(v) < rlo || Number(v) > rhi)) {
+          e.preventDefault();
+          return fail("Video length for " + (longFmt ? "long" : "short") + " must be " + rlo + "–" + rhi + " seconds.", "core", el(nm));
+        }
+      }
       // Posting-slot format (Distribution tab)
       const slots = val("posting_slots");
       if (slots && !slots.split(",").map(s => s.trim()).filter(Boolean).every(s => /^([01]?\d|2[0-3]):[0-5]\d$/.test(s))) {
@@ -500,6 +532,13 @@
       }
       // Valid → busy state on whichever button was clicked (persists through the navigation).
       const submitter = e.submitter;
+      // A disabled submit button is NOT serialized, so its name/value (e.g. start_now=1) would be
+      // dropped when we disable it below — carry the click through as a hidden field first.
+      if (submitter && submitter.name) {
+        const carry = document.createElement("input");
+        carry.type = "hidden"; carry.name = submitter.name; carry.value = submitter.value;
+        campaignForm.appendChild(carry);
+      }
       [saveBtn, document.getElementById("save-start")].forEach(function (b) { if (b) b.disabled = true; });
       const active = submitter || saveBtn;
       if (active) active.textContent = (submitter && submitter.name === "start_now")

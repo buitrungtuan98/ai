@@ -11,7 +11,7 @@
   {{ ui.pill(campaign.status.value) }}
   {% if campaign.status.value in ['pending','failed'] %}
   <form method="post" action="/campaigns/{{ campaign.id }}/start">
-    <input type="hidden" name="scope_channel" value="{{ campaign.channel_id }}">
+    <input type="hidden" name="return_to" value="/campaigns/{{ campaign.id }}">
     <button class="btn sm" type="submit">▶ Start</button></form>
   {% endif %}
   <a class="btn ghost sm" href="/campaigns/new?from_id={{ campaign.id }}" title="Copy this campaign (e.g. another language/channel)">⧉ Duplicate</a>
@@ -21,9 +21,11 @@
     <button class="btn danger sm" type="submit">Delete</button></form>
 {% endcall %}
 
-{% set _ec = (asset_count.ready + asset_count.awaiting_review) if asset_count else 0 %}
+{# Badge = episodes awaiting YOUR review (the actionable number), not the whole buffer — so it can't
+   disagree with the Episodes tab's own "Review (N)" chip. #}
+{% set _rev = asset_count.awaiting_review if asset_count else 0 %}
 <div class="hub-tabs">
   <a class="hub-tab {{ 'active' if hub_active == 'overview' }}" href="/campaigns/{{ campaign.id }}">📊 Overview</a>
-  <a class="hub-tab {{ 'active' if hub_active == 'episodes' }}" href="/campaigns/{{ campaign.id }}/episodes">🎬 Episodes{% if _ec %} ({{ _ec }}){% endif %}</a>
+  <a class="hub-tab {{ 'active' if hub_active == 'episodes' }}" href="/campaigns/{{ campaign.id }}/episodes">🎬 Episodes{% if _rev %} <span class="pill AWAITING_REVIEW">{{ _rev }}</span>{% endif %}</a>
   <a class="hub-tab {{ 'active' if hub_active == 'settings' }}" href="/campaigns/{{ campaign.id }}/settings">⚙ Settings</a>
 </div>

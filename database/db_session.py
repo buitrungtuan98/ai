@@ -81,6 +81,7 @@ _COLUMN_UPGRADES: dict[str, dict[str, str]] = {
     },
     "users": {
         "gemini_model": "VARCHAR(200)",
+        "settings_json": "TEXT",
     },
 }
 
