@@ -510,6 +510,12 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 /* Now & next strip: reuse .stats tiles but with a smaller number (values are short text, not big
    counts) so "Ep 6 · 62%" / "Thu 21:00" fit on one line. */
 .nn-strip .n { font-size: var(--fs-lg); }
+/* Data-driven campaign verdict (autopilot classification). */
+.verdict { font-weight: var(--fw-medium); }
+.verdict.winner { color: var(--st-success); }
+.verdict.healthy { color: var(--st-working); }
+.verdict.underperforming { color: var(--st-review); }
+
 /* Dashboard "Running now" — one operational row per active campaign. */
 .run-list { list-style: none; margin: 0; padding: 0; }
 .run-row { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-3) 0;

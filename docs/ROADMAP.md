@@ -714,6 +714,19 @@ and macros `sched_facts` / `now_next` feed all four surfaces. ADR-043.
   planner checked in a browser.
 - Verified overall: 176 tests, ruff clean, docs guard green.
 
+## Channel autopilot — manage each channel on the data, zero-cost `WIP`
+Opt-in, per-channel. Deterministic rules decide WHEN, AI decides WHAT, the operator picks HOW MUCH
+autonomy (Off / Copilot / Autopilot). Judged against each channel's own retention baseline. Runs in
+the existing scheduler daemon on a per-channel cadence (default 3h, configurable). ADR-044.
+- **Phase I — classification engine** `DONE`: `core/autopilot.py` labels each campaign
+  winner / healthy / underperforming / too-early vs its channel baseline (`channel_baseline`,
+  `classify_campaigns`) — pure, read-only, no AI calls. Surfaced as a verdict chip on the campaign
+  cards and the hub Overview scorecard. Verified: 178 tests (2 new — classification vs baseline,
+  and the no-baseline guard), ruff clean, docs guard green; chip checked in a browser.
+- Phase II — the hands (AI review / auto-reject low scores / retry / catch-up publish) `TODO`
+- Phase III — the brain: Copilot proposals inbox (create / extend / wind down / trim / adopt) `TODO`
+- Phase IV — full-auto + weekly strategist call + guardrails `TODO`
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

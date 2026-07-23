@@ -39,6 +39,7 @@ from auth.dependencies import (
     get_owned_campaign,
     get_owned_channel,
 )
+from core import autopilot
 from core.config import settings
 from core.tts import VOICE_CHOICES
 from database.db_session import get_db, init_db
@@ -653,6 +654,7 @@ def campaigns_page(request: Request, user: CurrentUser, db: DbDep, channel: int 
         "campaigns.html",
         {"request": request, "user": user, "campaigns": campaigns, "channels": channels, "nav": "campaigns",
          "ops": _campaign_ops(db, user.id, campaigns),
+         "cls": autopilot.classify_campaigns(db, campaigns),  # data-driven performance verdict
          "scope_channel": channels.get(channel) if channel else None,
          "chips": chips, "status": status, "q": q, "total_all": total_all,
          "scope_hidden": {"channel": channel} if channel else {}},
@@ -1608,6 +1610,8 @@ def campaign_overview(request: Request, user: CurrentUser, db: DbDep,
          "best_ret": best.stats_json.get("avg_pct_viewed") if best else None,
          "measured_count": len(measured), "variants": ab_variant_summary(episodes),
          "op": _campaign_ops(db, user.id, [campaign])[campaign.id],  # Now & next strip
+         "cls": autopilot.classify_campaigns(db, [campaign]).get(campaign.id),  # performance verdict
+         "autopilot_min": autopilot.MIN_MEASURED,
          "hub_active": "overview", **_hub_context(db, user, campaign)},
     )
 

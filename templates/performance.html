@@ -32,6 +32,12 @@
   {{ ui.stat(measured_count, 'Measured', 'work' if measured_count else '') }}
   {% if best_ret is not none %}{{ ui.stat('🏆 ' ~ best_ret ~ '%', 'Best retention', 'ok') }}{% else %}{{ ui.stat('—', 'Best retention') }}{% endif %}
 </div>
+{% if cls and cls.label not in ['unmeasured', 'too_early'] %}
+<p class="verdict {{ cls.label }} mt-sm">{{ cls.icon }} <b>{{ cls.name }}</b> — this campaign averages
+  {{ cls.retention }}% retention{% if cls.baseline %} against the {{ cls.baseline }}% channel average{% endif %}.</p>
+{% elif cls and cls.label == 'too_early' %}
+<p class="hint mt-sm">🌱 Too early to judge — needs {{ autopilot_min }} measured episodes (has {{ cls.measured }}).</p>
+{% endif %}
 
 {# ── Learning & results — playbook + A/B variants + retention trend, one card, one empty state ── #}
 {% set ns = namespace(vals=[]) %}

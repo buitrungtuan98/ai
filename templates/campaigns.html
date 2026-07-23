@@ -31,6 +31,10 @@
     </div>
     {{ ui.progress(pct, 'done' if c.status.value == 'completed' else ('work' if c.status.value == 'active' else '')) }}
     {{ ui.now_next(op, c.status.value, c.config_json) }}
+    {% set v = cls.get(c.id) if cls else none %}
+    {% if v and v.label not in ['unmeasured', 'too_early'] %}
+    <p class="hint verdict {{ v.label }}">{{ v.icon }} {{ v.name }} · {{ v.retention }}% retention{% if v.baseline %} vs {{ v.baseline }}% channel avg{% endif %}</p>
+    {% endif %}
     {% if op and op.awaiting_review %}<p class="hint">🔴 {{ op.awaiting_review }} awaiting your review</p>{% endif %}
     <div class="row-actions mt">
       {% set sc = scope_channel.id if scope_channel else '' %}
