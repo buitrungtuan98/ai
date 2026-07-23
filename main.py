@@ -1661,6 +1661,48 @@ def upcoming_slot_cells(campaign: Campaign, days: int = 7, week: int = 0) -> lis
     return cells
 
 
+def _calendar_row_cells(campaign: Campaign, ready_eps: list[int], week: int = 0,
+                        days: int = 7) -> list[dict] | None:
+    """Richer calendar cells for the week planner: per day, per slot, what will HAPPEN — not just
+    the time. Assigns the campaign's ready buffer episodes (lowest-numbered first, the scheduler's
+    real rule) to upcoming slots in chronological order; slots past that are 'missed' (buffer will be
+    empty). Past slots render for reference. Returns per-day {gate, slots:[{t,state,ep}]} or None
+    (non-slotted). The episode projection assumes the buffer doesn't change — honest caveat in the UI."""
+    from datetime import timedelta
+
+    from workers.scheduler import WEEKDAY_KEYS, local_now
+
+    cfg = campaign.config_json or {}
+    slots = sorted(cfg.get("posting_slots") or [])
+    if not slots or not cfg.get("auto_publish", True):
+        return None
+    allowed = cfg.get("posting_days") or []
+    now_l = local_now(cfg.get("timezone"))
+    start = now_l + timedelta(days=week * 7)
+    pool = list(ready_eps)  # lowest episode number first (mutated as slots consume it)
+    rows: list[dict] = []
+    for d in range(days):
+        day = start + timedelta(days=d)
+        if allowed and WEEKDAY_KEYS[day.weekday()] not in allowed:
+            rows.append({"gate": True, "slots": []})
+            continue
+        cells = []
+        for s in slots:
+            try:
+                hh, mm = (int(x) for x in s.split(":"))
+            except ValueError:
+                continue
+            slot_dt = day.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if slot_dt < now_l:
+                cells.append({"t": s, "state": "past", "ep": None})
+            elif pool:
+                cells.append({"t": s, "state": "filled", "ep": pool.pop(0)})
+            else:
+                cells.append({"t": s, "state": "missed", "ep": None})
+        rows.append({"gate": False, "slots": cells})
+    return rows
+
+
 @app.get("/calendar", response_class=HTMLResponse)
 def calendar_page(request: Request, user: CurrentUser, db: DbDep, week: int = 0,
                   channel: int | None = None):
@@ -1674,15 +1716,20 @@ def calendar_page(request: Request, user: CurrentUser, db: DbDep, week: int = 0,
     if channel:  # scope to one channel (from the workspace scope switcher)
         camp_q = camp_q.where(Campaign.channel_id == channel)
     campaigns = db.scalars(camp_q).all()
-    ready_counts = dict(db.execute(
-        select(BufferPoolItem.campaign_id, func.count())
-        .where(BufferPoolItem.status == BufferStatus.ready)
-        .group_by(BufferPoolItem.campaign_id)
-    ).all())
+    chan_by_id = {c.id: c for c in db.scalars(select(Channel).where(Channel.user_id == user.id)).all()}
+    # Ready buffer episode numbers per campaign (lowest first) — the pool the planner assigns to slots.
+    ready_by_camp: dict[int, list[int]] = {}
+    for cid, epn in db.execute(
+            select(BufferPoolItem.campaign_id, BufferPoolItem.episode_number)
+            .where(BufferPoolItem.status == BufferStatus.ready)
+            .order_by(BufferPoolItem.episode_number)).all():
+        ready_by_camp.setdefault(cid, []).append(epn)
     slotted, unslotted = [], []
     for c in campaigns:
-        cells = upcoming_slot_cells(c, week=week)
-        entry = {"campaign": c, "ready": ready_counts.get(c.id, 0),
+        cells = _calendar_row_cells(c, ready_by_camp.get(c.id, []), week=week)
+        entry = {"campaign": c, "ready": len(ready_by_camp.get(c.id, [])),
+                 "channel": chan_by_id.get(c.channel_id),
+                 "fmt": (c.config_json or {}).get("video_format", "short"),
                  "tz": (c.config_json or {}).get("timezone") or settings.TIMEZONE,
                  "mode": "review" if not (c.config_json or {}).get("auto_publish", True) else "continuous"}
         if cells is not None:
@@ -1691,7 +1738,9 @@ def calendar_page(request: Request, user: CurrentUser, db: DbDep, week: int = 0,
         else:
             unslotted.append(entry)
     base = local_now() + timedelta(days=week * 7)
-    day_headers = [(base + timedelta(days=d)).strftime("%a %d/%m") for d in range(7)]
+    # Header cells carry a `today` flag so the current day's column is highlighted (only week 0, d 0).
+    day_headers = [{"label": (base + timedelta(days=d)).strftime("%a %d/%m"),
+                    "today": week == 0 and d == 0} for d in range(7)]
     label = "This week" if week == 0 else (f"In {week} week{'s' if week != 1 else ''}" if week > 0
                                            else f"{-week} week{'s' if week != -1 else ''} ago")
     return templates.TemplateResponse(

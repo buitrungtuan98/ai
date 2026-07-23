@@ -334,6 +334,23 @@ tr.win-row { background: var(--st-success-bg); }
 .runway.ok { color: var(--st-success); } .runway.low { color: var(--st-review); }
 .runway.none { color: var(--st-failed); }
 
+/* Content-calendar week planner: per-slot fill state, today highlight, weekday gate. */
+.cal-table { width: 100%; border-collapse: collapse; }
+.cal-table th, .cal-table td { padding: var(--sp-2) var(--sp-3); text-align: left; vertical-align: top;
+  border-bottom: 1px solid var(--border); font-size: var(--fs-sm); }
+.cal-table th { color: var(--muted); font-weight: var(--fw-semibold); }
+.cal-table th.cell, .cal-table td.cell { text-align: center; min-width: 78px; }
+.cal-table td.gate { background: var(--surface-2); }
+.cal-table .today { background: var(--primary-weak); }
+.cal-table th.today { color: var(--text); }
+.slot { white-space: nowrap; padding: 2px 0; }
+.slot.filled { color: var(--st-working); font-weight: var(--fw-medium); }
+.slot.missed { color: var(--st-review); font-weight: var(--fw-medium); }
+.slot.past { color: var(--text-subtle); }
+.cal-ep { color: var(--muted); font-size: var(--fs-xs); }
+.slot-key.filled { color: var(--st-working); }
+.slot-key.missed { color: var(--st-review); }
+
 /* ── 14. Media ─────────────────────────────────────────────────────────────── */
 video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm); background: #000;
   margin-top: var(--sp-3); display: block; }

@@ -660,8 +660,8 @@ def test_calendar_page_and_slot_cells(client):
 
     page = client.get("/calendar")
     assert page.status_code == 200 and "CalCam" in page.text and "21:00" in page.text
-    # The campaign name links to its episodes (act-from-the-calendar).
-    assert f'href="/episodes?campaign={cam.id}"' in page.text
+    # The campaign name links to its hub (act-from-the-calendar).
+    assert f'href="/campaigns/{cam.id}"' in page.text
 
     # Week navigation: labels + bounded range, and the "Today" reset appears only when off-week.
     assert "This week" in page.text and "Today" not in page.text

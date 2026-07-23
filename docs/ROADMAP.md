@@ -683,7 +683,7 @@ see. All additive — no route renamed/removed, Task Logs & Asset Pool kept as s
   clamps durations + prompt designed for long), ruff clean, docs guard green; the format-aware inputs
   and the `video_format=long` propose request verified in a browser.
 
-## Operational visibility — show "now / next", not just "how it went" `WIP`
+## Operational visibility — show "now / next", not just "how it went" `DONE`
 Reorder the operator-facing surfaces to answer ① what needs me → ② what's happening now →
 ③ what happens next → ④ how it's going. Shared read-only helpers `_next_slot` / `_campaign_ops`
 and macros `sched_facts` / `now_next` feed all four surfaces. ADR-043.
@@ -705,6 +705,14 @@ and macros `sched_facts` / `now_next` feed all four surfaces. ADR-043.
   in the scorecard runway). Reading order: health → needs-attention → Running now → stat tiles →
   scorecard → activity. `/api/summary` JSON keys unchanged. Verified: 176 tests, ruff clean;
   dashboard checked in a browser.
+- **Batch H — calendar is a week planner**: each cell shows what will HAPPEN, not just the time —
+  `_calendar_row_cells` assigns ready buffer episodes (lowest-numbered first, the scheduler's real
+  rule) to upcoming slots, so a cell reads ● 21:00 Ep 8 (will publish) / ○ 18:00 (empty buffer —
+  will be missed, amber) / dimmed past / — gate. Today's column is highlighted; rows gained channel
+  + format and link to the hub; a legend explains the marks. Honest caveat: episode projections
+  assume the buffer doesn't change. Verified: 176 tests (calendar link assertion → hub), ruff clean;
+  planner checked in a browser.
+- Verified overall: 176 tests, ruff clean, docs guard green.
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation

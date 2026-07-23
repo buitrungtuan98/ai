@@ -24,32 +24,46 @@
         <tr>
           <th>Campaign</th>
           <th class="col-runway">Runway</th>
-          {% for h in day_headers %}<th class="cell">{{ h }}</th>{% endfor %}
+          {% for h in day_headers %}<th class="cell{{ ' today' if h.today }}">{{ h.label }}</th>{% endfor %}
         </tr>
       </thead>
       <tbody>
         {% for row in slotted %}
         <tr>
           <td class="nowrap">
-            <b><a href="/episodes?campaign={{ row.campaign.id }}">{{ row.campaign.topic_name }}</a></b><br>
-            <span class="hint">{{ row.tz }} · Ep {{ row.campaign.current_episode }}/{{ row.campaign.total_episodes }}</span>
+            <b><a href="/campaigns/{{ row.campaign.id }}">{{ row.campaign.topic_name }}</a></b><br>
+            <span class="hint">{% if row.channel %}{{ row.channel.channel_name }} · {% endif %}{{ '▬ Long' if row.fmt == 'long' else '▮ Short' }} · Ep {{ row.campaign.current_episode }}/{{ row.campaign.total_episodes }}</span>
           </td>
           <td>
             {% set rw = 'none' if row.ready == 0 else ('low' if row.ready <= 1 else 'ok') %}
             <span class="runway {{ rw }}"><span class="dot2 {{ 'bad' if rw == 'none' else 'ok' }}"></span>{{ row.ready }} ready</span>
-            {% if row.ready == 0 %}<br><a class="hint" href="/episodes?campaign={{ row.campaign.id }}" style="color:var(--st-failed)">⚠ buffer empty — check episodes →</a>{% endif %}
+            {% if row.ready == 0 %}<br><a class="hint" href="/campaigns/{{ row.campaign.id }}/episodes" style="color:var(--st-failed)">⚠ buffer empty →</a>{% endif %}
           </td>
-          {% for times in row.cells %}
-          <td class="cell{{ ' gate' if not times }}">{{ times|join(', ') if times else '—' }}</td>
+          {% for day in row.cells %}
+          <td class="cell{{ ' gate' if day.gate }}{{ ' today' if day_headers[loop.index0].today }}">
+            {% if day.gate %}<span class="hint">—</span>
+            {% else %}
+              {% for cell in day.slots %}
+              <div class="slot {{ cell.state }}">
+                {% if cell.state == 'filled' %}● {{ cell.t }} <span class="cal-ep">Ep {{ cell.ep }}</span>
+                {% elif cell.state == 'missed' %}○ {{ cell.t }}
+                {% else %}{{ cell.t }}{% endif %}
+              </div>
+              {% endfor %}
+            {% endif %}
+          </td>
           {% endfor %}
         </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
-  <p class="hint mt-sm">A slot publishes only if a pre-rendered episode is ready — the <b>Runway</b> column
-    shows how many episodes are buffered. — = weekday gate (no publishing that day). Click a campaign to
-    see its episodes.</p>
+  <p class="hint mt-sm">
+    <b class="slot-key filled">●</b> will publish (the next buffered episode) ·
+    <b class="slot-key missed">○</b> slot with an empty buffer — <b>will be missed</b> ·
+    <b>—</b> weekday gate. The current day's column is highlighted; past slots are dimmed. Upcoming
+    episode numbers assume the buffer doesn't change — the <b>Runway</b> column shows how many are buffered.
+  </p>
 </div>
 {% endif %}
 
@@ -57,7 +71,7 @@
 <div class="card mt">
   <h3>Not slot-scheduled</h3>
   {% for row in unslotted %}
-  <p class="meta">{{ row.campaign.topic_name }} — {{ 'Review mode: episodes wait in the Asset Pool for your approval'
+  <p class="meta"><a href="/campaigns/{{ row.campaign.id }}">{{ row.campaign.topic_name }}</a> — {{ 'Review mode: episodes wait in the Review queue for your approval'
     if row.mode == 'review' else 'Continuous mode: publishes immediately after each render' }}.</p>
   {% endfor %}
 </div>
