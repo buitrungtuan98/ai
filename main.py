@@ -1051,12 +1051,32 @@ def asset_thumb(request: Request, item=Depends(get_owned_buffer_item)):
     return _ranged_file_response(item.thumbnail_path, request, "image/jpeg")
 
 
+def _episode_return(return_to: str) -> str | None:
+    """Return a safe internal episode path (`/episodes/<digits>`) if `return_to` is one, else None.
+    Lets asset/task actions posted from the Episode view redirect back to it instead of /assets."""
+    tail = (return_to or "").removeprefix("/episodes/")
+    return return_to if return_to.startswith("/episodes/") and tail.isdigit() else None
+
+
+def _action_redirect(return_to: str, flash: str, default: str, flash_reason: str = "") -> RedirectResponse:
+    """Redirect an asset/task action to its Episode view (when it came from there) or the default
+    /assets URL (unchanged behavior when no return path is supplied)."""
+    ep = _episode_return(return_to)
+    if ep is None:
+        return RedirectResponse(default, status_code=303)
+    qs = f"?flash={flash}" if flash else ""
+    if flash_reason:
+        from urllib.parse import quote
+        qs += f"&flash_reason={quote(flash_reason)}"
+    return RedirectResponse(ep + qs, status_code=303)
+
+
 @app.post("/assets/{item_id}/approve")
-def approve_asset(db: DbDep, item=Depends(get_owned_buffer_item)):
+def approve_asset(db: DbDep, item=Depends(get_owned_buffer_item), return_to: str = Form("")):
     if item.status != BufferStatus.awaiting_review:
         raise HTTPException(400, "Only items awaiting review can be approved")
     if not (item.video_path and os.path.exists(item.video_path)):
-        return RedirectResponse("/assets?flash=missing", status_code=303)
+        return _action_redirect(return_to, "missing", "/assets?flash=missing")
     task = db.scalar(select(Task).where(
         Task.campaign_id == item.campaign_id, Task.episode_number == item.episode_number))
     if task is not None:
@@ -1064,22 +1084,22 @@ def approve_asset(db: DbDep, item=Depends(get_owned_buffer_item)):
         task.error_message = None
         db.commit()
     task_queue.enqueue_publish(item.id)
-    return RedirectResponse("/assets", status_code=303)
+    return _action_redirect(return_to, "publish", "/assets")
 
 
 @app.post("/assets/{item_id}/publish-now")
-def publish_asset_now(db: DbDep, item=Depends(get_owned_buffer_item)):
+def publish_asset_now(db: DbDep, item=Depends(get_owned_buffer_item), return_to: str = Form("")):
     """Skip the posting slot: publish a pre-rendered (`ready`) episode immediately."""
     if item.status != BufferStatus.ready:
         raise HTTPException(400, "Only pre-rendered (ready) items can be published now")
     if not (item.video_path and os.path.exists(item.video_path)):
-        return RedirectResponse("/assets?flash=missing", status_code=303)
+        return _action_redirect(return_to, "missing", "/assets?flash=missing")
     task_queue.enqueue_publish(item.id)
-    return RedirectResponse("/assets?flash=publish", status_code=303)
+    return _action_redirect(return_to, "publish", "/assets?flash=publish")
 
 
 @app.post("/assets/{item_id}/rerender")
-def rerender_asset(db: DbDep, item=Depends(get_owned_buffer_item)):
+def rerender_asset(db: DbDep, item=Depends(get_owned_buffer_item), return_to: str = Form("")):
     """Discard a rendered episode (delete its files) and immediately queue a fresh render of the
     same episode — for when a render is wrong (bad footage, missing subtitles, …) but the episode
     itself should still exist."""
@@ -1103,11 +1123,12 @@ def rerender_asset(db: DbDep, item=Depends(get_owned_buffer_item)):
     db.commit()
     task.rq_job_id = task_queue.enqueue_render(task.id)
     db.commit()
-    return RedirectResponse("/assets?flash=rerender", status_code=303)
+    return _action_redirect(return_to, "rerender", "/assets?flash=rerender")
 
 
 @app.post("/assets/{item_id}/reject")
-def reject_asset(db: DbDep, item=Depends(get_owned_buffer_item), reason: str = Form("")):
+def reject_asset(db: DbDep, item=Depends(get_owned_buffer_item), reason: str = Form(""),
+                 return_to: str = Form("")):
     if item.status != BufferStatus.awaiting_review:
         raise HTTPException(400, "Only items awaiting review can be rejected")
     for path in (item.video_path, item.thumbnail_path):
@@ -1133,11 +1154,54 @@ def reject_asset(db: DbDep, item=Depends(get_owned_buffer_item), reason: str = F
             learning["reject_reasons"] = reasons + [reason]
             campaign.learning_json = learning
     db.commit()
+    ep = _episode_return(return_to)
+    if ep is not None:
+        return _action_redirect(return_to, "rejected", "/assets", flash_reason=reason)
     from urllib.parse import quote
 
     return RedirectResponse(
         "/assets?flash=rejected" + (f"&flash_reason={quote(reason)}" if reason else ""),
         status_code=303,
+    )
+
+
+# ── Episode view (one home per episode: the whole lifecycle in one place) ────
+_EPISODE_STAGES = ("Queued", "Rendering", "Review", "Scheduled", "Published")
+# Task status → index in _EPISODE_STAGES (None = FAILED, shown off-track).
+_STAGE_INDEX = {
+    "PENDING_QUEUE": 0, "AI_GENERATION": 1, "AUDIO_SYNCED": 1, "RENDERING": 1,
+    "AWAITING_REVIEW": 2, "SCHEDULED": 3, "PUBLISHING": 4, "COMPLETED": 4,
+}
+
+
+@app.get("/episodes/{task_id}", response_class=HTMLResponse)
+def episode_view(request: Request, user: CurrentUser, db: DbDep, task_id: int,
+                 flash: str = "", flash_reason: str = ""):
+    """One episode's whole story in one page: lifecycle timeline, preview, stage-aware actions,
+    render/QC history and (once live) published stats — so an episode has a single home instead of
+    being scattered across Task Logs / Asset Pool / Calendar / Performance."""
+    task = db.get(Task, task_id)
+    if task is None or task.user_id != user.id:
+        raise HTTPException(404, "Episode not found")
+    campaign = db.get(Campaign, task.campaign_id)
+    channel = db.get(Channel, campaign.channel_id) if campaign else None
+    # The live buffer row for this episode (newest first), if one exists.
+    buffer = db.scalar(select(BufferPoolItem).where(
+        BufferPoolItem.campaign_id == task.campaign_id,
+        BufferPoolItem.episode_number == task.episode_number,
+    ).order_by(BufferPoolItem.id.desc()))
+    previewable = bool(
+        buffer and buffer.status in (BufferStatus.ready, BufferStatus.awaiting_review)
+        and buffer.video_path and os.path.exists(buffer.video_path))
+    stage_index = _STAGE_INDEX.get(task.status.value)
+    return templates.TemplateResponse(
+        request, "episode.html",
+        {"request": request, "user": user, "nav": "tasks", "task": task, "campaign": campaign,
+         "channel": channel, "buffer": buffer, "previewable": previewable,
+         "stages": _EPISODE_STAGES, "stage_index": stage_index,
+         "failed": task.status == TaskStatus.FAILED,
+         "flash": flash if flash in ("publish", "rerender", "rejected", "missing") else "",
+         "flash_reason": flash_reason[:200]},
     )
 
 
@@ -1337,9 +1401,12 @@ def api_summary(user: CurrentUser, db: DbDep):
 
 
 @app.post("/api/tasks/{task_id}/retry")
-def retry_task(task_id: int, user: CurrentUser, db: DbDep):
+def retry_task(task_id: int, user: CurrentUser, db: DbDep, return_to: str = Form("")):
     """Retry a failed episode. If the rendered file still exists (e.g. the upload failed or the
-    item was awaiting review), only the publish step is retried — no re-render."""
+    item was awaiting review), only the publish step is retried — no re-render.
+
+    Returns JSON for the Task Logs poller (fetch, no `return_to`); a form POST from the Episode view
+    passes `return_to` and gets a 303 back to that page instead."""
     task = db.get(Task, task_id)
     if task is None or task.user_id != user.id:
         raise HTTPException(404, "Task not found")
@@ -1357,8 +1424,10 @@ def retry_task(task_id: int, user: CurrentUser, db: DbDep):
     if buf is not None and buf.video_path and os.path.exists(buf.video_path):
         db.commit()
         task_queue.enqueue_publish(buf.id)
-        return {"ok": True, "mode": "publish"}
+        return _action_redirect(return_to, "rerender", "") if _episode_return(return_to) \
+            else {"ok": True, "mode": "publish"}
     db.commit()
     task.rq_job_id = task_queue.enqueue_render(task.id)
     db.commit()
-    return {"ok": True, "mode": "render"}
+    return _action_redirect(return_to, "rerender", "") if _episode_return(return_to) \
+        else {"ok": True, "mode": "render"}

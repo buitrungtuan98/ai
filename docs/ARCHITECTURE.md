@@ -593,3 +593,20 @@ detectors beat a handful of fuzzy ones: caption-overflow and "hook-present" were
 out — the former needs a render-and-measure pass (not deterministic from the master), and the latter is
 already enforced upstream by the script prompt + critic, so adding flaky versions here would only
 produce false rejects (YAGNI).
+
+### ADR-032 — Episode view: one home per episode (UI restructure, phase 1)
+**Decision:** a new `/episodes/{task_id}` page gathers an episode's whole lifecycle into one place —
+a Queued→Rendering→Review→Scheduled→Published timeline (current step derived from the task status),
+the video preview, metadata + Auto-QC verdict, render/retry history, stage-aware actions, and (once
+live) published stats. Every other surface links to it (Task Logs rows, Performance episode rows;
+Asset Pool/Dashboard follow in later phases). The action buttons POST to the EXISTING shared routes
+(`/assets/{id}/approve|reject|rerender|publish-now`, `/api/tasks/{id}/retry`) with a `return_to`
+form field; a small `_episode_return` guard accepts only `/episodes/<digits>` and redirects there,
+otherwise the routes behave exactly as before (default `/assets` redirects unchanged). **Why:** the
+operator's real pain was *tracking* — one episode's story was smeared across Task Logs (render), Asset
+Pool (review), Calendar (slot) and Performance (stats), and the human did the join. Giving an episode
+a single URL is the highest-leverage fix, and it's almost entirely a read + link layer over data that
+already exists (Task ⋈ BufferPoolItem by campaign+episode), so it ships without touching the render or
+publish pipeline. Reusing the existing action routes via `return_to` (rather than duplicating them)
+keeps one definition of each action and one set of tests; the allowlist guard means a crafted
+`return_to` can only ever bounce within the app, never to an external host.

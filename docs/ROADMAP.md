@@ -515,6 +515,41 @@ committed with tests green + docs. Still automation-first and zero-cost (free ti
 render-concurrency-1 lock and CPU-only constraints are untouched. Follow-ups noted inline: per-user
 Gemini budget setting (awaiting go), and multi-call chaptered generation for very long videos.
 
+# UI/UX restructure — "one episode, one home"
+
+Fixes the fragmentation where one episode's story is scattered across Task Logs / Asset Pool /
+Calendar / Performance. North star: one episode = one home · one filter language · one persistent
+scope · act where you see. Six phases, each additive (no route renamed/removed, tests stay green).
+
+## Phase 1 — Episode view `DONE`
+- New `/episodes/{task_id}` page: lifecycle timeline (Queued→Rendering→Review→Scheduled→Published,
+  current step from task status), video preview, metadata + Auto-QC verdict, render/retry history,
+  stage-aware actions, and published stats (retention/views/likes) once live.
+- Actions reuse the existing shared routes (approve/reject/rerender/publish-now/retry) via a
+  `return_to` form field guarded to `/episodes/<digits>` only; default `/assets` redirects unchanged.
+- Linked from Task Logs rows and Performance episode rows (Asset Pool/Dashboard in later phases).
+  ADR-032 records it.
+- Verified: 160 tests (3 new — episode view renders lifecycle+actions, 404 guard, return_to redirect
+  incl. hostile-path rejection), ruff clean, docs guard green; review/failed/published states
+  screenshotted at 1280px + mobile.
+
+## Phase 2 — One filter grammar (planned)
+Shared filter-bar macro (status chips + true counts · server search · scope × clear) on Campaigns,
+Channels, Asset Pool, Task Logs — all server-side + URL-driven.
+
+## Phase 3 — Persistent scope switcher (planned)
+Topbar channel→campaign dropdown carried across Dashboard / Episodes / Calendar / lists.
+
+## Phase 4 — Episodes pipeline list (planned)
+Unified list merging Task Logs + Asset Pool: stage tabs with counts → the Phase-1 detail view;
+nav restructure (Task Logs & Asset Pool demoted to secondary links, routes kept).
+
+## Phase 5 — Planner (planned)
+Actionable calendar: week nav, filled slots link to the episode view, empty-slot + empty-buffer CTA.
+
+## Phase 6 — Global search ⌘K (planned)
+One palette + read-only endpoint across channels/campaigns/episodes.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

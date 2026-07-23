@@ -130,6 +130,66 @@ def test_video_format_config_and_duration_bounds(client):
     db.close()
 
 
+def _make_episode(client):
+    """A campaign + one AWAITING_REVIEW task and its buffer item — the raw material for the
+    Episode view and its stage-aware actions."""
+    from database.db_session import SessionLocal
+    from database.models import BufferPoolItem, Campaign, Task
+    from database.types import BufferStatus, TaskStatus
+
+    _seed_campaign(client)
+    db = SessionLocal()
+    cam = db.query(Campaign).order_by(Campaign.id.desc()).first()  # the campaign just created
+    t = Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=1,
+             status=TaskStatus.AWAITING_REVIEW, synopsis="A test episode")
+    db.add(t)
+    db.commit()
+    db.refresh(t)
+    b = BufferPoolItem(campaign_id=cam.id, channel_id=cam.channel_id, episode_number=1,
+                       video_path="/nonexistent/v.mp4", status=BufferStatus.awaiting_review,
+                       metadata_json={"title": "My Episode Title", "qc": {"passed": True, "score": 8}})
+    db.add(b)
+    db.commit()
+    ids = (t.id, b.id)
+    db.close()
+    return ids
+
+
+def test_episode_view_renders_lifecycle_and_actions(client):
+    tid, bid = _make_episode(client)
+    r = client.get(f"/episodes/{tid}")
+    assert r.status_code == 200
+    body = r.text
+    assert "Lifecycle" in body and "My Episode Title" in body
+    assert f"/assets/{bid}/approve" in body                       # stage-aware action present
+    assert 'name="return_to" value="/episodes/%d"' % tid in body  # actions return to this page
+
+
+def test_episode_view_404(client):
+    assert client.get("/episodes/999999").status_code == 404
+
+
+def test_asset_action_return_to_episode(client):
+    """An action posted from the Episode view redirects back there; without return_to the classic
+    Asset Pool redirect is unchanged."""
+    tid, bid = _make_episode(client)
+    r = client.post(f"/assets/{bid}/reject",
+                    data={"reason": "slow open", "return_to": f"/episodes/{tid}"},
+                    follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"].startswith(f"/episodes/{tid}?flash=rejected")
+
+    tid2, bid2 = _make_episode(client)
+    r2 = client.post(f"/assets/{bid2}/reject", data={"reason": "x"}, follow_redirects=False)
+    assert r2.headers["location"].startswith("/assets?flash=rejected")  # unchanged default
+
+    # A hostile return_to is ignored (only /episodes/<digits> is honored).
+    tid3, bid3 = _make_episode(client)
+    r3 = client.post(f"/assets/{bid3}/reject",
+                     data={"reason": "x", "return_to": "https://evil.example/steal"},
+                     follow_redirects=False)
+    assert r3.headers["location"].startswith("/assets?flash=rejected")
+
+
 def test_ownership_guard_404(client):
     assert client.post("/campaigns/99999/delete", follow_redirects=False).status_code == 404
 

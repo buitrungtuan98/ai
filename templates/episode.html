@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block title %}Ep {{ task.episode_number }} · {{ campaign.topic_name if campaign else '' }} · AI Video Factory{% endblock %}
+{% block content %}
+{% if channel and campaign %}
+{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': channel.channel_name, 'href': '/campaigns?channel=' ~ channel.id}, {'label': campaign.topic_name, 'href': '/campaigns/' ~ campaign.id ~ '/performance'}, {'label': 'Ep ' ~ task.episode_number}]) }}
+{% endif %}
+
+{% if flash == 'publish' %}
+{% call ui.banner('success') %}⏳ <b>Publish queued.</b> This episode uploads as soon as the worker is free. It flips to <i>Published</i> with a link once it's live.{% endcall %}
+{% elif flash == 'rerender' %}
+{% call ui.banner() %}⏳ <b>Re-render queued.</b> A fresh render starts as soon as the worker is free.{% endcall %}
+{% elif flash == 'rejected' %}
+{% call ui.banner() %}🗑 <b>Rejected.</b> The render was deleted{% if flash_reason %} and the AI was told to avoid: “{{ flash_reason }}”{% endif %}.{% endcall %}
+{% elif flash == 'missing' %}
+{% call ui.banner('danger') %}⚠️ <b>The video file is no longer on disk</b>, so it can't be published. Use <b>Re-render</b> below to produce it again.{% endcall %}
+{% endif %}
+
+{% call ui.page_head('Ep ' ~ task.episode_number ~ ' · ' ~ (campaign.topic_name if campaign else ''), (task.synopsis or '')) %}
+  {% if campaign %}<a class="btn ghost" href="/campaigns/{{ campaign.id }}/performance">Performance ↗</a>{% endif %}
+  <a class="btn ghost" href="/tasks">Task Logs ↗</a>
+{% endcall %}
+
+{# ── Lifecycle timeline — where this episode is in its journey ── #}
+<div class="card">
+  <div class="card-head"><h3>Lifecycle</h3>{{ ui.pill(task.status.value, task.status.value.replace('_',' ')|title) }}</div>
+  {% if failed %}
+  <div class="loop-note mt-sm" style="border-color:var(--st-failed-bd);background:var(--st-failed-bg)">
+    ⛔ <b>Failed.</b> {{ task.error_message or 'This episode failed to render.' }}
+  </div>
+  {% else %}
+  <ol class="timeline mt">
+    {% for s in stages %}
+    <li class="tl-step {{ 'done' if stage_index is not none and loop.index0 < stage_index else ('now' if loop.index0 == stage_index else 'todo') }}">
+      <span class="tl-dot"></span><span class="tl-label">{{ s }}</span>
+    </li>
+    {% endfor %}
+  </ol>
+  {% endif %}
+  <p class="hint mt-sm">
+    {% if task.ab_variant %}Variant {{ task.ab_variant }} · {% endif %}
+    {% if task.retry_count %}{{ task.retry_count }} retr{{ 'y' if task.retry_count == 1 else 'ies' }} · {% endif %}
+    {% if task.started_at %}started {{ task.started_at.strftime('%Y-%m-%d %H:%M') }} UTC{% endif %}
+    {% if task.finished_at %} · finished {{ task.finished_at.strftime('%H:%M') }} UTC{% endif %}
+  </p>
+</div>
+
+{# ── Preview + metadata ── #}
+<div class="card mt">
+  <div class="grid cols-2">
+    <div>
+      {% if previewable %}
+      <video class="preview" controls preload="metadata"
+             {% if buffer.thumbnail_path %}poster="/assets/{{ buffer.id }}/thumb"{% endif %}
+             src="/assets/{{ buffer.id }}/video"></video>
+      {% elif task.status.value == 'COMPLETED' %}
+      <div class="empty" style="padding:var(--sp-6)">Published — local file cleaned up.</div>
+      {% else %}
+      <div class="empty" style="padding:var(--sp-6)">No preview yet — it appears once this episode has rendered.</div>
+      {% endif %}
+    </div>
+    <div>
+      {% set meta = buffer.metadata_json if buffer else {} %}
+      <h3 style="margin-top:0">{{ meta.get('title') if buffer else (task.synopsis or 'Ep ' ~ task.episode_number) }}</h3>
+      <p class="meta">{{ task.synopsis or '—' }}</p>
+      {% set qc = meta.get('qc') if buffer else none %}
+      {% if qc %}
+      <p class="hint">{% if qc.get('passed') %}🟢 Auto-QC passed{% else %}🔴 Auto-QC FAILED{% endif %}{% if qc.get('score') is not none %} · score {{ qc.get('score') }}/10{% endif %}{% if qc.get('attempts', 1) > 1 %} · {{ qc.get('attempts') }} attempts{% endif %}{% if qc.get('issues') %} · {{ qc.get('issues')|join('; ') }}{% endif %}</p>
+      {% endif %}
+
+      {# ── Stage-aware actions (post to the shared asset/task routes, return here) ── #}
+      {% if buffer and buffer.status.value == 'awaiting_review' %}
+      <div class="row-actions mt">
+        <form method="post" action="/assets/{{ buffer.id }}/approve">
+          <input type="hidden" name="return_to" value="/episodes/{{ task.id }}">
+          <button class="btn sm" type="submit">✓ Approve &amp; publish</button></form>
+        <form method="post" action="/assets/{{ buffer.id }}/rerender"
+              data-confirm="Discard this render and re-render the episode?">
+          <input type="hidden" name="return_to" value="/episodes/{{ task.id }}">
+          <button class="btn ghost sm" type="submit">🗑 Re-render</button></form>
+      </div>
+      <form method="post" action="/assets/{{ buffer.id }}/reject" class="mt"
+            data-confirm="Reject and delete this render? The reason teaches the AI what to avoid.">
+        <input type="hidden" name="return_to" value="/episodes/{{ task.id }}">
+        <div class="field-inline">
+          <input name="reason" placeholder="Why? (teaches the AI — e.g. 'mở đầu chậm quá')" class="grow">
+          <button class="btn danger sm nowrap" type="submit">✕ Reject</button>
+        </div>
+      </form>
+      {% elif buffer and buffer.status.value == 'ready' %}
+      <div class="row-actions mt">
+        <form method="post" action="/assets/{{ buffer.id }}/publish-now"
+              data-confirm="Publish this episode right now, skipping the posting slot?">
+          <input type="hidden" name="return_to" value="/episodes/{{ task.id }}">
+          <button class="btn sm" type="submit">▶ Publish now</button></form>
+        <form method="post" action="/assets/{{ buffer.id }}/rerender"
+              data-confirm="Discard this render and re-render the episode?">
+          <input type="hidden" name="return_to" value="/episodes/{{ task.id }}">
+          <button class="btn danger sm" type="submit">🗑 Discard &amp; re-render</button></form>
+      </div>
+      {% elif failed %}
+      <form method="post" action="/api/tasks/{{ task.id }}/retry" class="mt">
+        <input type="hidden" name="return_to" value="/episodes/{{ task.id }}">
+        <button class="btn sm" type="submit">↻ Retry</button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{# ── Published stats (once live) ── #}
+{% if task.published_url or task.stats_json %}
+<div class="card mt">
+  <div class="card-head"><h3>Published</h3>{% if task.published_url %}<a href="{{ task.published_url }}" target="_blank" rel="noopener">View on platform ↗</a>{% endif %}</div>
+  {% if task.stats_json %}
+  <div class="stats mt">
+    {{ ui.stat((task.stats_json.get('avg_pct_viewed', '—')|string) ~ '%', 'Retention') }}
+    {{ ui.stat(task.stats_json.get('views', '—'), 'Views') }}
+    {{ ui.stat(task.stats_json.get('likes', '—'), 'Likes') }}
+  </div>
+  {% else %}
+  <p class="hint">Stats refresh daily for videos 2–30 days old.</p>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}
