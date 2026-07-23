@@ -521,6 +521,14 @@ def test_calendar_page_and_slot_cells(client):
 
     page = client.get("/calendar")
     assert page.status_code == 200 and "CalCam" in page.text and "21:00" in page.text
+    # The campaign name links to its episodes (act-from-the-calendar).
+    assert f'href="/episodes?campaign={cam.id}"' in page.text
+
+    # Week navigation: labels + bounded range, and the "Today" reset appears only when off-week.
+    assert "This week" in page.text and "Today" not in page.text
+    nxt = client.get("/calendar?week=1")
+    assert nxt.status_code == 200 and "In 1 week" in nxt.text and ">Today<" in nxt.text
+    assert client.get("/calendar?week=999").status_code == 200  # clamped, never errors
 
 
 def test_propose_campaign_route(client, monkeypatch):

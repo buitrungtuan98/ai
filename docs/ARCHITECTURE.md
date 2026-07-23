@@ -661,3 +661,16 @@ grammar from phase 2, the scope switcher from phase 3), so it's mostly a query +
 mechanism. It stays server-rendered because "browse/triage by stage" doesn't need per-second liveness
 (that's what Task Logs is for) — keeping it static means it's just another instance of the one filter
 grammar rather than a second live-polling surface to maintain.
+
+### ADR-036 — Planner: an actionable calendar (UI restructure, phase 5)
+**Decision:** the calendar gains week navigation (`?week=<offset>`, clamped to −8..+12) with
+Prev/Today/Next controls and a "This week / in N weeks" label; `upcoming_slot_cells` takes the same
+`week` offset. Each campaign row's name links to its scoped Episodes list, and a row whose ready
+buffer is 0 shows an inline "⚠ buffer empty — check episodes" link. Runway indicators and the
+per-campaign-timezone slot computation are unchanged. **Why:** the calendar was a read-only poster of
+the next 7 days — you couldn't look ahead or act from it. Week navigation (URL-driven, like every
+other stateful view) makes it a planning tool, and linking rows to the Episodes list turns "this slot
+won't fill" into a one-click path to the episodes that need attention. A "render now" button was
+deliberately NOT added: forcing an out-of-band render would mean a new queue-enqueue endpoint and
+interact with the single-render lock / daily-cap logic — higher risk than this frontend-only phase
+warrants — so the empty-buffer case links to where the operator already has the controls instead.

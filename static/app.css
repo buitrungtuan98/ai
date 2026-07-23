@@ -431,6 +431,7 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 
 /* Filter / reason chips + keyboard-review highlight */
 .filter-bar { display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center; margin-bottom: var(--sp-5); }
+.week-nav { display: flex; align-items: center; gap: var(--sp-2); }
 .filter-search { margin-left: auto; margin-bottom: 0; }
 .filter-search .search { margin-bottom: 0; }
 .chip { background: var(--surface-2); border: 1px solid var(--border); color: var(--muted);

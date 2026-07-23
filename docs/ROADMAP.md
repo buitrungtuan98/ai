@@ -563,8 +563,15 @@ scope · act where you see. Six phases, each additive (no route renamed/removed,
 - Verified: 165 tests (1 new — stage tabs+counts, stage filter, synopsis search, row→detail links),
   ruff clean, docs guard green; Episodes list screenshotted.
 
-## Phase 5 — Planner (planned)
-Actionable calendar: week nav, filled slots link to the episode view, empty-slot + empty-buffer CTA.
+## Phase 5 — Planner (actionable calendar) `DONE`
+- Week navigation (`?week=` offset, clamped −8..+12) with Prev/Today/Next + a week label;
+  `upcoming_slot_cells` takes the same offset.
+- Campaign rows link to their scoped Episodes list; a zero-runway row shows an inline "⚠ buffer
+  empty → check episodes" link. Runway + per-campaign-timezone slots unchanged. ADR-036.
+- "Render now" deliberately omitted (would need a new queue-enqueue endpoint touching the single-
+  render lock / daily cap — beyond this frontend phase); empty-buffer links to where controls exist.
+- Verified: 165 tests (calendar test extended — campaign→episodes link, week labels, Today reset,
+  clamped out-of-range week), ruff clean, docs guard green; Planner screenshotted.
 
 ## Phase 6 — Global search ⌘K (planned)
 One palette + read-only endpoint across channels/campaigns/episodes.

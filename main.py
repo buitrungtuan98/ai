@@ -1434,9 +1434,9 @@ def reset_learning(db: DbDep, campaign=Depends(get_owned_campaign)):
 
 
 # ── Content calendar ─────────────────────────────────────────────────────────
-def upcoming_slot_cells(campaign: Campaign, days: int = 7) -> list[list[str]] | None:
-    """Per-day slot times for the next `days` days in the campaign's own timezone, honoring its
-    posting_days. None = the campaign doesn't slot-publish (continuous or review mode)."""
+def upcoming_slot_cells(campaign: Campaign, days: int = 7, week: int = 0) -> list[list[str]] | None:
+    """Per-day slot times for `days` days starting `week` weeks from now, in the campaign's own
+    timezone, honoring its posting_days. None = the campaign doesn't slot-publish (continuous/review)."""
     from datetime import timedelta
 
     from workers.scheduler import WEEKDAY_KEYS, local_now
@@ -1446,7 +1446,7 @@ def upcoming_slot_cells(campaign: Campaign, days: int = 7) -> list[list[str]] | 
     if not slots or not cfg.get("auto_publish", True):
         return None
     allowed = cfg.get("posting_days") or []
-    start = local_now(cfg.get("timezone"))
+    start = local_now(cfg.get("timezone")) + timedelta(days=week * 7)
     cells: list[list[str]] = []
     for d in range(days):
         day = start + timedelta(days=d)
@@ -1456,11 +1456,12 @@ def upcoming_slot_cells(campaign: Campaign, days: int = 7) -> list[list[str]] | 
 
 
 @app.get("/calendar", response_class=HTMLResponse)
-def calendar_page(request: Request, user: CurrentUser, db: DbDep):
+def calendar_page(request: Request, user: CurrentUser, db: DbDep, week: int = 0):
     from datetime import timedelta
 
     from workers.scheduler import local_now
 
+    week = max(-8, min(week, 12))  # bound the navigation to a sane range
     campaigns = db.scalars(select(Campaign).where(
         Campaign.user_id == user.id, Campaign.status == CampaignStatus.active)).all()
     ready_counts = dict(db.execute(
@@ -1470,7 +1471,7 @@ def calendar_page(request: Request, user: CurrentUser, db: DbDep):
     ).all())
     slotted, unslotted = [], []
     for c in campaigns:
-        cells = upcoming_slot_cells(c)
+        cells = upcoming_slot_cells(c, week=week)
         entry = {"campaign": c, "ready": ready_counts.get(c.id, 0),
                  "tz": (c.config_json or {}).get("timezone") or settings.TIMEZONE,
                  "mode": "review" if not (c.config_json or {}).get("auto_publish", True) else "continuous"}
@@ -1479,12 +1480,15 @@ def calendar_page(request: Request, user: CurrentUser, db: DbDep):
             slotted.append(entry)
         else:
             unslotted.append(entry)
-    base = local_now()
+    base = local_now() + timedelta(days=week * 7)
     day_headers = [(base + timedelta(days=d)).strftime("%a %d/%m") for d in range(7)]
+    label = "This week" if week == 0 else (f"In {week} week{'s' if week != 1 else ''}" if week > 0
+                                           else f"{-week} week{'s' if week != -1 else ''} ago")
     return templates.TemplateResponse(
         request, "calendar.html",
         {"request": request, "user": user, "nav": "calendar", "slotted": slotted,
-         "unslotted": unslotted, "day_headers": day_headers},
+         "unslotted": unslotted, "day_headers": day_headers,
+         "week": week, "week_label": label},
     )
 
 
