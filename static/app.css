@@ -50,7 +50,11 @@
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   --fs-xs: 12px; --fs-sm: 13px; --fs-base: 15px; --fs-md: 16px;
-  --fs-lg: 18px; --fs-xl: 22px; --fs-2xl: 28px; --fs-3xl: 34px;
+  /* Larger sizes scale fluidly with the viewport (adaptive, no breakpoints) */
+  --fs-lg: clamp(16px, 15px + .3vw, 18px);
+  --fs-xl: clamp(19px, 17px + .6vw, 24px);
+  --fs-2xl: clamp(23px, 20px + 1vw, 30px);
+  --fs-3xl: clamp(27px, 22px + 1.6vw, 38px);
   --lh-tight: 1.2; --lh: 1.5;
   --fw-medium: 500; --fw-semibold: 600; --fw-bold: 700;
 
@@ -69,7 +73,8 @@
   --ring: 0 0 0 3px #6d8bff59;
 
   /* Layout */
-  --container: 1200px;
+  --container: 1400px;                     /* content column cap; centered on wide screens */
+  --main-pad: clamp(16px, 4vw, 48px);      /* fluid page gutter */
   --sidebar-w: 248px;
   --topbar-h: 56px;
 
@@ -118,7 +123,7 @@ code { font-family: var(--font-mono); font-size: .92em; background: var(--surfac
 .skip-link { position: absolute; left: -999px; top: 0; z-index: 999;
   background: var(--primary); color: var(--primary-ink); padding: var(--sp-2) var(--sp-4);
   border-radius: 0 0 var(--radius) 0; font-weight: var(--fw-semibold); }
-.skip-link:focus { left: 0; }
+.skip-link:focus-visible { left: 0; }  /* keyboard only — never reveals on a mobile tap */
 
 /* ── 3. Shell + responsive nav ─────────────────────────────────────────────── */
 .layout { display: flex; min-height: 100vh; }
@@ -147,7 +152,8 @@ code { font-family: var(--font-mono); font-size: .92em; background: var(--surfac
 .nav-backdrop { display: none; }
 
 /* Main */
-.main { flex: 1; min-width: 0; padding: var(--sp-8) var(--sp-10); max-width: var(--container); }
+.main { flex: 1; min-width: 0; max-width: var(--container); margin-inline: auto;
+  padding: var(--sp-8) var(--main-pad); }  /* grows to fill, caps at --container, auto-centres the rest */
 .page-head { display: flex; align-items: flex-start; justify-content: space-between;
   gap: var(--sp-4); margin-bottom: var(--sp-6); flex-wrap: wrap; }
 .page-head h1 { font-size: var(--fs-2xl); margin: 0; font-weight: var(--fw-bold); }
@@ -289,7 +295,9 @@ details.disclosure .disclosure-body { padding: 0 var(--sp-4) var(--sp-2); }
 .banner.success { background: var(--st-success-bg); border-color: var(--st-success-bd); color: var(--st-success); }
 
 /* ── 12. Tables ────────────────────────────────────────────────────────────── */
-.table-wrap { overflow-x: auto; }
+/* Container context: tables inside adapt to the wrapper's width, not the viewport — so a table
+   in a narrow column stacks even on a wide screen (see the @container rule in §18). */
+.table-wrap { overflow-x: auto; container-type: inline-size; }
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: var(--sp-3) var(--sp-3); border-bottom: 1px solid var(--border);
   font-size: var(--fs-sm); vertical-align: middle; }
@@ -459,7 +467,7 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
   display: inline-flex; align-items: center; justify-content: center; font-weight: var(--fw-bold); }
 
 /* Factory scorecard (dashboard trajectory) */
-.scorecard { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-5); }
+.scorecard { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--sp-5); }
 .sc-cell .l { color: var(--muted); font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .4px; }
 .sc-cell .n { font-size: var(--fs-xl); font-weight: var(--fw-bold); margin-top: 4px; }
 .sc-cell .n.muted { color: var(--muted); }
@@ -509,12 +517,46 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 .tabbar { display: none; }
 
 /* ── 18. Responsive ────────────────────────────────────────────────────────── */
+/* Adaptive first: type/spacing (clamp), stat/scorecard/card grids (auto-fit) and the centred main
+   column all flex continuously — no breakpoints. The rules below handle only genuine MODE changes:
+   how a table lays out (container query) and how navigation is shaped (three shell tiers). */
+
+/* Tables stack into cards when THEIR wrapper is narrow — even in a narrow column on a wide screen.
+   Browsers without container-query support fall back to horizontal scroll (.table-wrap overflow). */
+@container (max-width: 720px) {
+  .stack-table thead { display: none; }
+  .stack-table tbody tr { display: block; border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--surface-2); margin-bottom: var(--sp-3); padding: var(--sp-2) var(--sp-3); }
+  .stack-table tbody td { display: flex; justify-content: space-between; align-items: center; gap: var(--sp-4);
+    border: none; padding: 7px 0; }
+  .stack-table tbody td::before { content: attr(data-label); color: var(--muted); font-size: var(--fs-xs);
+    text-transform: uppercase; letter-spacing: .4px; font-weight: var(--fw-semibold); flex-shrink: 0; }
+  .stack-table tbody td:empty { display: none; }
+  .stack-table .progress { min-width: 100px; }
+}
+
 @media (max-width: 900px) {
-  .main { padding: var(--sp-6); }
   .grid-12 .col-4, .grid-12 .col-6, .grid-12 .col-8 { grid-column: span 12; }
 }
+
+/* Shell tier 2 — tablet: a compact icon rail (721–1024px). Full labels return above 1024px. */
+@media (min-width: 721px) and (max-width: 1024px) {
+  .sidebar { width: 72px; padding: var(--sp-5) var(--sp-2); align-items: center; }
+  .sidebar .brand { justify-content: center; font-size: 0; gap: 0; margin: 0 0 var(--sp-5); }
+  .nav-text, .nav-group { display: none; }
+  .nav a { justify-content: center; padding: 12px 0; gap: 0; position: relative; }
+  .nav a .ico { width: auto; font-size: 20px; }
+  .nav a .nav-badge { position: absolute; top: 3px; right: 13px; margin: 0; }
+  .sidebar-tools .btn { font-size: 0; padding: 10px 0; }
+  .sidebar-tools .btn::before { content: "◐"; font-size: 16px; }
+  .sidebar-foot { flex-direction: column; gap: var(--sp-2); }
+  .sidebar-foot .who { display: none; }
+  .sidebar-foot .btn { font-size: 0; padding: 8px 0; width: 100%; }
+  .sidebar-foot .btn::before { content: "⏻"; font-size: 15px; }
+}
+
+/* Shell tier 3 — phone: top bar + off-canvas drawer + bottom tab bar (≤720px). */
 @media (max-width: 720px) {
-  /* Top bar + off-canvas drawer nav */
   .topbar { display: flex; align-items: center; gap: var(--sp-3); position: sticky; top: 0;
     height: var(--topbar-h); z-index: var(--z-topbar); background: var(--surface);
     border-bottom: 1px solid var(--border); padding: 0 var(--sp-4); }
@@ -531,9 +573,8 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
     background: rgba(0, 0, 0, .55); opacity: 0; pointer-events: none; transition: opacity .22s ease; }
   body.nav-open .nav-backdrop { opacity: 1; pointer-events: auto; }
   body.nav-open { overflow: hidden; }
-  .main { padding: var(--sp-5) var(--sp-4) 84px; max-width: none; }  /* bottom pad clears the tab bar */
+  .main { padding-bottom: 84px; }  /* clear the bottom tab bar */
   .page-head h1 { font-size: var(--fs-xl); }
-  .scorecard { grid-template-columns: repeat(2, 1fr); }
 
   /* Bottom tab bar — one-thumb access to the busiest destinations */
   .tabbar { display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: var(--z-topbar);
@@ -550,18 +591,8 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
   input, select, textarea { min-height: 44px; font-size: var(--fs-md); }
   input[type="checkbox"], input[type="radio"], input[type="range"] { min-height: 0; }
 
-  /* Tables that stack into cards (opt-in via .stack-table) */
-  .stack-table thead { display: none; }
-  .stack-table tbody tr { display: block; border: 1px solid var(--border); border-radius: var(--radius);
-    background: var(--surface-2); margin-bottom: var(--sp-3); padding: var(--sp-2) var(--sp-3); }
-  .stack-table tbody td { display: flex; justify-content: space-between; align-items: center; gap: var(--sp-4);
-    border: none; padding: 7px 0; }
-  .stack-table tbody td::before { content: attr(data-label); color: var(--muted); font-size: var(--fs-xs);
-    text-transform: uppercase; letter-spacing: .4px; font-weight: var(--fw-semibold); flex-shrink: 0; }
-  .stack-table tbody td:empty { display: none; }
-  .stack-table .progress { min-width: 100px; }
-  .savebar { border-radius: var(--radius) var(--radius) 0 0; margin-left: calc(-1 * var(--sp-4));
-    margin-right: calc(-1 * var(--sp-4)); }
+  .savebar { border-radius: var(--radius) var(--radius) 0 0; margin-left: calc(-1 * var(--main-pad));
+    margin-right: calc(-1 * var(--main-pad)); }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }

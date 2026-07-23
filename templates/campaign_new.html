@@ -13,7 +13,7 @@
 {% if not channels %}
 {% call ui.empty('◉', 'Connect a channel first', 'Every campaign publishes to a channel — add one to get started.', '/channels', 'Add a channel') %}{% endcall %}
 {% else %}
-<form method="post" action="{{ '/campaigns/' ~ campaign.id ~ '/edit' if editing else '/campaigns' }}" novalidate>
+<form method="post" id="campaign-form" action="{{ '/campaigns/' ~ campaign.id ~ '/edit' if editing else '/campaigns' }}" novalidate>
   <div class="tabs">
     <button type="button" class="tab-btn active" data-tab="core">Core &amp; AI Strategy</button>
     <button type="button" class="tab-btn" data-tab="audio">Aesthetics &amp; Audio</button>
@@ -316,7 +316,7 @@
   const CAPTIONS = { highlight: "highlight captions", classic: "clean captions", boxed: "boxed captions", neon: "neon captions" };
   const GRADES = { cinematic: "cinematic grade", warm: "warm grade", cool: "cool grade", vivid: "vivid grade", noir: "noir grade" };
   function updateIdentity() {
-    const form = document.querySelector("form");
+    const form = document.getElementById("campaign-form");
     if (!idText || !form) return;
     const g = (n) => { const el = form.elements[n]; return el ? (el.value || "").trim() : ""; };
     const persona = g("persona"), topic = g("topic_name");
@@ -339,7 +339,7 @@
     idText.textContent = parts.filter(Boolean).join(" · ");
   }
   updateIdentity();
-  const idForm = document.querySelector("form");
+  const idForm = document.getElementById("campaign-form");
   if (idForm) { idForm.addEventListener("input", updateIdentity); idForm.addEventListener("change", updateIdentity); }
 
   // 📝 Script preview: dry-run the scriptwriter with the current form values (nothing saved).
@@ -440,7 +440,7 @@
 
   // ✅ Inline validation + submit busy state. Native POST navigates on success, so the busy
   // label persists until the new page loads — clear feedback that the save is in flight.
-  const campaignForm = document.querySelector('form[action$="/campaigns"], form[action*="/edit"]');
+  const campaignForm = document.getElementById("campaign-form");
   if (campaignForm) {
     const saveBtn = document.getElementById("save-campaign");
     const hint = document.getElementById("save-hint");
