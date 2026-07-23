@@ -239,9 +239,20 @@
     stopSummary();
     (function loop() { summaryTimer = setTimeout(function () { pollSummary(); loop(); }, 6000); })();
   }
+  // Topbar scope switcher: pick a channel → reload the current page scoped to it (or clear to All).
+  function initScopeSwitcher() {
+    var sel = document.getElementById("scope-switcher");
+    if (!sel) return;
+    sel.addEventListener("change", function () {
+      var base = window.location.pathname;
+      window.location.href = sel.value ? base + "?channel=" + encodeURIComponent(sel.value) : base;
+    });
+  }
+
   function init() {
     initTheme();
     initNav();
+    initScopeSwitcher();
     initConfirmForms();
     initRelTimes();
     pollSummary();

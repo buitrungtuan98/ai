@@ -224,14 +224,36 @@ def test_channels_filter_and_search(client):
                 follow_redirects=False)
     r = client.get("/channels")
     assert "All (2)" in r.text
-    assert "Alpha Page" in client.get("/channels?q=alpha").text
-    assert "Beta Page" not in client.get("/channels?q=alpha").text
+    # Assert on the channel CARD heading (the scope switcher lists every channel name, so a raw
+    # substring check would always see both).
+    filtered = client.get("/channels?q=alpha").text
+    assert "<h3>Alpha Page</h3>" in filtered and "<h3>Beta Page</h3>" not in filtered
 
 
 def test_assets_search(client):
     _make_episode(client)  # campaign "Space" with an awaiting-review buffer item
     assert "asset-card" in client.get("/assets?q=Space").text
     assert "No items match this filter" in client.get("/assets?q=zzznomatch").text
+
+
+def test_scope_switcher_and_scoped_nav(client):
+    """The topbar scope switcher appears once channels exist, and an active channel scope is carried
+    onto the scope-aware nav links (Campaigns / Asset Pool / Task Logs)."""
+    assert 'id="scope-switcher"' not in client.get("/").text  # no channels → no switcher
+    client.post("/channels/facebook", data={"channel_name": "Chan A", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    from database.db_session import SessionLocal
+    from database.models import Channel
+
+    db = SessionLocal()
+    cid = db.query(Channel).first().id
+    db.close()
+
+    home = client.get("/").text
+    assert 'id="scope-switcher"' in home and "Chan A" in home
+    scoped = client.get(f"/campaigns?channel={cid}").text
+    assert f'href="/assets?channel={cid}"' in scoped and f'href="/tasks?channel={cid}"' in scoped
+    assert f'value="{cid}" selected' in scoped  # the active channel is marked in the switcher
 
 
 def test_ownership_guard_404(client):

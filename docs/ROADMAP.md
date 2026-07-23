@@ -543,8 +543,14 @@ scope · act where you see. Six phases, each additive (no route renamed/removed,
 - Verified: 163 tests (3 new — campaigns filter+search+chip counts, channels search, assets search
   incl. no-match), ruff clean, docs guard green; campaigns filter bar screenshotted.
 
-## Phase 3 — Persistent scope switcher (planned)
-Topbar channel→campaign dropdown carried across Dashboard / Episodes / Calendar / lists.
+## Phase 3 — Persistent scope switcher `DONE`
+- Sidebar channel `<select>` (desktop + mobile drawer) scopes the workspace to one channel, populated
+  by a best-effort `nav_channels(request)` global (reuses auth resolution, fails open).
+- Scope lives in the URL (`?channel=<id>` — the existing drill-down param), so it's shareable +
+  back-button correct; the scope-aware nav links (Campaigns / Asset Pool / Task Logs) carry it, and
+  scoped pages compute chip counts within the scope. ADR-034.
+- Verified: 164 tests (1 new — switcher appears with channels + active scope carried onto nav links),
+  ruff clean, docs guard green; scoped Campaigns view screenshotted.
 
 ## Phase 4 — Episodes pipeline list (planned)
 Unified list merging Task Logs + Asset Pool: stage tabs with counts → the Phase-1 detail view;

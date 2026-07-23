@@ -627,3 +627,20 @@ one URL convention means every list filters the same way, every filtered view is
 back-button correct (same principle as the pagination ADRs), and the server sends only the rows it
 means to show. Keeping chip counts scope-based rather than search-filtered avoids the confusing
 "counts jump around as I type" behavior and keeps the empty-vs-no-match distinction honest.
+
+### ADR-034 — Persistent channel scope switcher (UI restructure, phase 3)
+**Decision:** a channel `<select>` in the sidebar (visible on desktop, reachable in the mobile drawer)
+scopes the operator's whole workspace to one channel. It's populated by a `nav_channels(request)`
+template global — a best-effort, self-contained helper that reuses the auth user-resolution and opens
+its own short-lived session, returning [] on any failure so `base.html` always renders. The active
+scope lives in the URL (`?channel=<id>`, the same drill-down param the list pages already accept), so
+it is shareable and back-button correct; the switcher's onchange just reloads the current path with
+(or without) that param, and the scope-aware nav links (Campaigns / Asset Pool / Task Logs) carry the
+active `?channel=` so the scope follows you across them. Scoped pages already show a breadcrumb +
+"show all" escape and now compute their chip counts within the scope. **Why:** a channel operator was
+re-drilling from scratch on every navigation because scope didn't persist. Keeping the scope in the
+URL (rather than a cookie/session) matches every other stateful thing in this app — no hidden state,
+every scoped view linkable — and reusing the existing `?channel=` param means zero new query plumbing
+on the pages. The global-function injection avoids threading `channels` through every route's context
+or adding request middleware; it costs one cheap read per page render, acceptable on a single-box app,
+and fails open so it can never take a page down.

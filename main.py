@@ -92,6 +92,31 @@ def _query_string(**params: object) -> str:
 templates.env.globals["query_string"] = _query_string
 
 
+def _nav_channels(request: Request) -> list[dict]:
+    """The current user's channels, for the topbar scope switcher. Best-effort: any failure (no
+    session, DB hiccup) returns [] so `base.html` always renders. Reuses the auth user-resolution
+    so solo and multi-tenant modes behave identically."""
+    try:
+        from auth.dependencies import SOLO_UID, get_or_create_user
+        from database.db_session import SessionLocal
+
+        with SessionLocal() as db:
+            if not settings.MULTI_TENANT_MODE:
+                user = get_or_create_user(db, firebase_uid=SOLO_UID, is_admin=True)
+            else:
+                uid = request.session.get("uid") if "session" in request.scope else None
+                if not uid:
+                    return []
+                user = get_or_create_user(db, firebase_uid=uid)
+            return [{"id": c.id, "name": c.channel_name}
+                    for c in db.scalars(select(Channel).where(Channel.user_id == user.id))]
+    except Exception:  # noqa: BLE001 — the switcher is a convenience; never break page render
+        return []
+
+
+templates.env.globals["nav_channels"] = _nav_channels
+
+
 _asset_versions: dict[str, str] = {}
 
 
