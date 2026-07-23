@@ -87,6 +87,14 @@
               <option value="off" {{ 'selected' if cfg.get('self_critique')=='off' }}>Off — first draft goes straight to render</option>
             </select>
           </div>
+          <div class="form-row"><label>Script depth</label>
+            <select name="script_depth">
+              <option value="standard" {{ 'selected' if cfg.get('script_depth','standard')!='deep' }}>Standard — one-pass script (fast, best for punchy facts)</option>
+              <option value="deep" {{ 'selected' if cfg.get('script_depth')=='deep' }}>Deep — research brief first, then script (fact-rich storytelling)</option>
+            </select>
+            <p class="hint">Deep mode adds one research pass per episode (real names/dates/numbers + a
+              hook→build→payoff→cliffhanger arc) before writing — richer stories, one extra AI call.</p>
+          </div>
           <div class="form-row"><label>Custom system prompt (optional)</label>
             <textarea name="system_prompt" placeholder="Tone, style, constraints for the scriptwriter…">{{ cfg.get('system_prompt') or '' }}</textarea></div>
         </div>
@@ -405,6 +413,7 @@
           setVal("catchphrase_open", p.catchphrase_open);
           setVal("catchphrase_close", p.catchphrase_close);
           setVal("continuity", p.continuity);
+          setVal("script_depth", p.script_depth);
           fillVoices("");            // rebuild the voice list for the proposed language first
           setVal("voice", p.voice);  // the proposal's voice is always in that language's catalog
           setVal("rate_pct", p.rate_pct);

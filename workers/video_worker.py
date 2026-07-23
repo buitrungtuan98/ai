@@ -404,6 +404,7 @@ def render_task(task_id: int) -> None:
             duration_min_s=cfg.get("duration_min_s"),
             duration_max_s=cfg.get("duration_max_s"),
             rate_pct=int(cfg.get("rate_pct", 0)),
+            script_depth=cfg.get("script_depth", "standard"),
             model=gemini_model,
         )
         # Episode memory must NEVER be empty after a successful generation — an episode without a

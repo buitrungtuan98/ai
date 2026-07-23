@@ -492,3 +492,22 @@ searches everything, not the 25 rows currently loaded; doing it in SQL also hand
 topic text the operator actually types. The request-sequence guard is the one piece a static paginated
 page doesn't need — on a table that also refreshes itself every few seconds, without it a background
 poll racing a pager click would snap the user back to the wrong page.
+
+### ADR-027 — Script depth (research brief) + deterministic AI-cliché gate
+**Decision:** two additions attack the "a bot wrote this" quality of scripts at the source. (1) An
+optional per-campaign `script_depth` (`standard` default | `deep`): in deep mode, `generate_brief`
+runs one research pass producing an `EpisodeBrief` (3-8 concrete facts — real names/dates/numbers —
+plus a hook→build→payoff→cliffhanger arc), and the script-generation prompt is conditioned on it, so
+the narration carries specific substance instead of generic filler. (2) A per-language AI-cliché
+blacklist (`AI_CLICHES`) with a pure `find_cliches()` detector, wired three ways: injected into the
+script prompt (generator avoids the phrases), injected into the critic prompt (critic flags them),
+and a free deterministic post-draft gate that forces exactly one targeted rewrite naming the phrases
+if any survive. Both are fail-open and default to today's behavior (`standard`, no brief; a clean
+draft triggers no rewrite). **Why:** one-shot generation with no research tends to waffle, and models
+reliably reach for the same tells ("delve into", "hãy cùng tìm hiểu"). A brief gives the generator
+real material to work from — the single biggest lever on content quality — while deep mode stays opt-in
+because it costs one extra Gemini call per episode (counted against the same daily budget meter). The
+cliché gate follows the codebase's established "cheap deterministic gate before/after the expensive
+step" pattern (voice_check, the length-fit rewrite): free, testable, and it catches the tells the
+model ignores instructions about. Neither is detection evasion (ADR-006) — the goal is natural spoken
+language, and operators still follow platform synthetic-content disclosure rules.

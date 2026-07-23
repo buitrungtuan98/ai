@@ -632,6 +632,7 @@ def _build_campaign_config(
     persona: str, style_examples: str, catchphrase_open: str, catchphrase_close: str,
     continuity: str, timezone: str,
     motion: str = "on", caption_theme: str = "highlight", self_critique: str = "on",
+    script_depth: str = "standard",
     music_mode: str = "none", music_mood: str = "",
     color_grade: str = "", auto_qc: str = "on",
     max_per_day: str = "", min_per_day: str = "",
@@ -666,6 +667,8 @@ def _build_campaign_config(
         "motion": "off" if motion == "off" else "on",
         "caption_theme": caption_theme if caption_theme in ("classic", "highlight", "boxed", "neon") else "highlight",
         "self_critique": "off" if self_critique == "off" else "on",
+        # Script depth: "deep" adds a research/brief Gemini pass for fact-rich storytelling.
+        "script_depth": "deep" if script_depth == "deep" else "standard",
         # Music: none | auto (random CC0 by mood, per episode) | file (operator-supplied path).
         "music_mode": music_mode if music_mode in ("none", "auto", "file") else "none",
         "music_mood": music_mood.strip() or None,
@@ -735,6 +738,7 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
     motion: str = Form("on"),
     caption_theme: str = Form("highlight"),
     self_critique: str = Form("on"),
+    script_depth: str = Form("standard"),
     music_mode: str = Form("none"),
     music_mood: str = Form(""),
     color_grade: str = Form(""),
@@ -759,6 +763,7 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
             persona=persona, style_examples=style_examples, catchphrase_open=catchphrase_open,
             catchphrase_close=catchphrase_close, continuity=continuity, timezone=timezone,
             motion=motion, caption_theme=caption_theme, self_critique=self_critique,
+            script_depth=script_depth,
             music_mode=music_mode, music_mood=music_mood,
             color_grade=color_grade, auto_qc=auto_qc,
             max_per_day=max_per_day, min_per_day=min_per_day,

@@ -433,6 +433,25 @@ measured at TTS time (audio remains ground truth). Proposed by the AI designer.
   FAILED task (which lives on page 2) from page 1, and the pager collapsed on single-page results;
   screenshotted at 375px & 1280px.
 
+# Pipeline v2 — realism & long-format (backend)
+
+Multi-batch upgrade to the video pipeline: better scripts, more human editing/sound, long-video
+support, stronger QC. Everything stays automation-first and zero-cost (free tiers only). Order: A → C
+→ B → D → E.
+
+## Batch A — Script depth & humanization `DONE`
+- **Research brief (deep mode)**: optional per-campaign `script_depth` (`standard` default | `deep`).
+  Deep mode runs `generate_brief` → `EpisodeBrief` (3-8 concrete facts + hook→build→payoff→cliffhanger
+  arc) and conditions the script prompt on it, so narration carries real substance not filler. One
+  extra Gemini call per episode (against the same daily budget meter); fail-open.
+- **AI-cliché gate**: per-language blacklist (`AI_CLICHES`) + pure `find_cliches()`; injected into the
+  script prompt and the critic prompt, and a free deterministic post-draft check forces one targeted
+  rewrite if any tell survives (e.g. "delve into", "hãy cùng tìm hiểu"). Clean drafts add no call.
+- Wired end-to-end: worker passes `script_depth`; campaign form has a standard/deep selector; the AI
+  designer proposes a depth. ADR-027 records it.
+- Verified: 144 tests (4 new — cliché detection, prompt injection, deep-mode brief call, one-rewrite
+  gate), ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

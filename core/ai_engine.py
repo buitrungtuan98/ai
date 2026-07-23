@@ -148,6 +148,19 @@ class MetadataSet(BaseModel):
     metadata_variations: list[MetadataVariation] = Field(min_length=3, max_length=3)
 
 
+class EpisodeBrief(BaseModel):
+    """A research/creative brief for ONE episode — the specific substance a script is built on, so
+    narration carries real detail instead of generic filler. Generated only in 'deep' mode."""
+    angle: str = Field(min_length=1, max_length=200,
+                       description="The single sharpest angle/hook idea for THIS episode.")
+    facts: list[str] = Field(min_length=3, max_length=8,
+                             description="Concrete, specific facts — real names, dates, numbers, "
+                                         "places — the narration must use. No vague generalities.")
+    arc: str = Field(min_length=1, max_length=600,
+                     description="Emotional beat map in a few sentences: hook → build → payoff → "
+                                 "cliffhanger.")
+
+
 class GeminiBlockedError(RuntimeError):
     """Gemini refused the request (finish_reason SAFETY/RECITATION)."""
 
@@ -333,6 +346,11 @@ class CampaignProposal(BaseModel):
     catchphrase_open: str = ""
     catchphrase_close: str = ""
     continuity: Literal["none", "no_repeat", "serial"] = "none"
+    script_depth: Literal["standard", "deep"] = Field(
+        default="standard",
+        description="'deep' adds a research/brief pass for fact-rich storytelling (one extra call "
+                    "per episode); 'standard' is one-pass. Prefer 'deep' for narrative/history/"
+                    "story channels, 'standard' for quick punchy facts.")
     voice: str = ""
     rate_pct: int = Field(default=0, ge=-20, le=20)
     subtitle_style: Literal["word", "line"] = "word"
@@ -397,7 +415,9 @@ def propose_campaign(
         "slightly slowed, so prefer -8..-3 for storytelling personas and 0 only for fast-paced "
         "formats; a sensible total_episodes; one daily posting slot as HH:MM; a continuity mode; "
         "a spoken length range in seconds fitting the format (e.g. 25-45 for punchy facts, "
-        "60-120 for stories); and a short call-to-action. "
+        "60-120 for stories); a script_depth ('deep' for narrative/history/story channels that "
+        "benefit from a research pass, 'standard' for quick punchy facts); and a short "
+        "call-to-action. "
         f"Variation seed {nonce}: make this proposal clearly different from any previous one. "
         "Include a one-sentence 'rationale' for the creative angle."
     )
@@ -468,6 +488,43 @@ NATURAL_STYLE_RULES = (
     "a year). Avoid parentheses and quote-heavy constructions — they read badly aloud."
 )
 
+# Deterministic AI-cliché blacklist per language: the phrases that most loudly mark narration as
+# machine-written. They steer generation (injected into the script + critic prompts) AND back a free
+# post-draft check (find_cliches) that can force ONE targeted rewrite — the same "cheap gate before
+# expensive work" pattern as voice_check and the length-fit check. Not detection evasion (ADR-006):
+# the point is natural spoken language; operators still follow platform synthetic-content disclosure.
+AI_CLICHES: dict[str, list[str]] = {
+    "en": [
+        "let's dive in", "let's dive into", "dive into the world", "in this video",
+        "in today's video", "delve into", "delve deeper", "buckle up", "game-changer",
+        "game changer", "unleash", "unlock the secrets", "in conclusion", "to sum up",
+        "without further ado", "little did they know", "but that's not all",
+        "the possibilities are endless", "it's important to note", "needless to say",
+    ],
+    "vi": [
+        "hãy cùng tìm hiểu", "hãy cùng khám phá", "chúng ta hãy cùng",
+        "trong video này chúng ta sẽ", "trong video hôm nay", "trong bài viết này",
+        "không thể phủ nhận rằng", "không thể không nhắc đến", "đừng quên like và subscribe",
+        "một điều thú vị là", "nói tóm lại", "có thể nói rằng", "đầu tiên phải kể đến",
+    ],
+    "es": [
+        "vamos a sumergirnos", "en este video", "en el video de hoy", "sin más preámbulos",
+        "en conclusión", "para resumir", "no se puede negar que", "es importante destacar",
+        "sumérgete en", "pero eso no es todo",
+    ],
+}
+
+
+def find_cliches(text: str, language: str) -> list[str]:
+    """Return the AI-cliché phrases present in `text` (case-insensitive, order-preserving).
+    Deterministic and free — steers generation and gates one targeted rewrite when hits remain."""
+    low = text.lower()
+    seen: list[str] = []
+    for phrase in AI_CLICHES.get(language, AI_CLICHES["en"]):
+        if phrase in low and phrase not in seen:
+            seen.append(phrase)
+    return seen
+
 
 def compose_system_prompt(
     language: str,
@@ -516,6 +573,44 @@ def compose_system_prompt(
     return "\n\n".join(parts)
 
 
+_BRIEF_SYSTEM = (
+    "You are a meticulous researcher and story producer for a short-form video channel. You surface "
+    "the SPECIFIC, verifiable substance a great episode is built on — real names, dates, numbers, "
+    "places, cause-and-effect — and shape it into a tight emotional arc. Never pad with generic "
+    "filler; if unsure of a fact, choose one you are confident is real rather than inventing."
+)
+
+
+def generate_brief(
+    *,
+    topic: str,
+    language: str,
+    episode: int,
+    total_episodes: int,
+    api_key: str,
+    persona: str | None = None,
+    continuity: str = "none",
+    previous_synopses: list[str] | None = None,
+    model: str = DEFAULT_MODEL,
+) -> EpisodeBrief:
+    """One research call turning a series topic into a fact-rich, arc-shaped brief for THIS episode.
+    Deep mode conditions the script call on it so narration carries real detail, not waffle."""
+    prev = [s for s in (previous_synopses or []) if s]
+    prev_line = ("\n\nAlready covered — pick a DIFFERENT angle and facts:\n"
+                 + "\n".join(f"- {s}" for s in prev[-10:])) if prev else ""
+    persona_line = f"Persona/voice for context: {persona}\n" if persona else ""
+    prompt = (
+        f"Research episode {episode} of {total_episodes} for a short-form series about: '{topic}'. "
+        f"Target language: {language}.\n{persona_line}"
+        "Produce: the single sharpest angle for this one episode; 3-8 concrete facts (real names, "
+        "dates, numbers, places) it should be built on; and a short emotional arc "
+        "(hook → build → payoff → cliffhanger). Be specific, never generic."
+        + prev_line
+    )
+    return generate_structured(prompt=prompt, schema=EpisodeBrief, api_key=api_key,
+                               system_prompt=_BRIEF_SYSTEM, model=model, temperature=0.6)
+
+
 def build_script_prompt(
     topic: str,
     language: str,
@@ -527,6 +622,7 @@ def build_script_prompt(
     duration_min_s: int | None = None,
     duration_max_s: int | None = None,
     rate_pct: int = 0,
+    brief: EpisodeBrief | None = None,
 ) -> str:
     length_line = ""
     if duration_min_s and duration_max_s:
@@ -558,6 +654,16 @@ def build_script_prompt(
         f"voice. End with 3-5 hashtags: relevant topical ones plus #Shorts and EXACTLY this series "
         f"hashtag: {series_hashtag(topic)} (fans find the whole series through it)."
     )
+    banned = AI_CLICHES.get(language, AI_CLICHES["en"])
+    base += ("\nBANNED PHRASES — never use these AI-tell clichés or close variants anywhere "
+             "(narration, titles, description): " + "; ".join(f"'{b}'" for b in banned) + ".")
+    if brief is not None:
+        facts = "\n".join(f"- {f}" for f in brief.facts)
+        base += (
+            "\n\nRESEARCH BRIEF — build the script ONLY from this specific substance; weave the "
+            "facts in naturally as spoken narration (do not list them):\n"
+            f"Angle: {brief.angle}\nFacts:\n{facts}\nArc to follow: {brief.arc}"
+        )
     prev = [s for s in (previous_synopses or []) if s]
     if continuity == "no_repeat" and prev:
         listing = "\n".join(f"- {s}" for s in prev)
@@ -598,6 +704,7 @@ def generate_script(
     duration_min_s: int | None = None,
     duration_max_s: int | None = None,
     rate_pct: int = 0,
+    script_depth: str = "standard",
     model: str = DEFAULT_MODEL,
 ) -> VideoScript:
     system = compose_system_prompt(
@@ -611,10 +718,23 @@ def generate_script(
         best_examples=best_examples,
         avoid=avoid,
     )
+    # Deep mode: one research pass first, so the script is built from specific facts + a real arc
+    # instead of one-shot waffle. Optional and fail-open — a brief failure never blocks the episode.
+    brief = None
+    if script_depth == "deep":
+        try:
+            brief = generate_brief(
+                topic=topic, language=language, episode=episode, total_episodes=total_episodes,
+                api_key=api_key, persona=persona, continuity=continuity,
+                previous_synopses=previous_synopses, model=model,
+            )
+        except Exception:  # noqa: BLE001 — the brief is an enhancement, not a gate
+            logger.warning("Episode brief generation failed — proceeding without it.")
     prompt = build_script_prompt(
         topic, language, total_episodes, episode,
         continuity=continuity, previous_synopses=previous_synopses,
         duration_min_s=duration_min_s, duration_max_s=duration_max_s, rate_pct=rate_pct,
+        brief=brief,
     )
     temperature = 0.85 if continuity != "none" else 0.7
     script = generate_structured(
@@ -665,6 +785,23 @@ def generate_script(
                 )
             except Exception:  # noqa: BLE001
                 logger.warning("Length-fix rewrite failed — keeping the current draft.")
+
+    # Deterministic AI-cliché gate (free): if the final draft still contains blacklisted phrases,
+    # force ONE targeted rewrite naming them. Fail-open — a rewrite failure keeps the draft.
+    hits = find_cliches(" ".join(s.narration for s in script.scenes), language)
+    if hits:
+        logger.info("Draft contains AI clichés %s — requesting one targeted rewrite", hits)
+        try:
+            script = generate_structured(
+                prompt=prompt + "\n\nYour draft used these banned AI-tell phrases: "
+                       + "; ".join(f"'{h}'" for h in hits)
+                       + ". Rewrite fully in natural spoken language, removing them and any close "
+                         "variant while keeping the same premise, persona and quality.",
+                schema=VideoScript, api_key=api_key, system_prompt=system,
+                model=model, temperature=temperature,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("Cliché-fix rewrite failed — keeping the current draft.")
     return script
 
 
@@ -820,10 +957,12 @@ def critique_script(
     model: str = DEFAULT_MODEL,
 ) -> ScriptCritique:
     prev = "\n".join(f"- {s}" for s in (previous_synopses or [])[-15:]) or "(none)"
+    banned = "; ".join(f"'{b}'" for b in AI_CLICHES.get(script.language, AI_CLICHES["en"]))
     prompt = (
         f"Review this short-form video script:\n{script.model_dump_json()}\n\n"
         f"Persona it must embody: {persona or '(none set)'}\n"
-        f"Previous episodes (must not repeat): {prev}"
+        f"Previous episodes (must not repeat): {prev}\n"
+        f"Banned AI-tell phrases — verdict 'rewrite' if ANY appear (or a close variant): {banned}"
     )
     return generate_structured(prompt=prompt, schema=ScriptCritique, api_key=api_key,
                                system_prompt=_CRITIC_SYSTEM, model=model, temperature=0.2)
