@@ -262,6 +262,83 @@ def test_episodes_list_stages_search_and_links(client):
     assert "all done now" in client.get("/episodes?q=done").text     # search over synopsis
 
 
+def test_episodes_pager_reflects_filter(client):
+    """The pager counts the FILTERED total (not the whole scope) and builds well-formed URLs."""
+    from database.db_session import SessionLocal
+    from database.models import Campaign, Task
+    from database.types import TaskStatus
+
+    _seed_campaign(client)
+    db = SessionLocal()
+    cam = db.query(Campaign).order_by(Campaign.id.desc()).first()
+    for ep in range(1, 31):  # 30 published → two pages under the "published" stage
+        db.add(Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=ep,
+                    status=TaskStatus.COMPLETED))
+    db.add(Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=99,
+                status=TaskStatus.FAILED))
+    db.commit()
+    db.close()
+
+    r = client.get("/episodes?status=published").text
+    assert "of 2 · 30 matches" in r          # filtered count, not the 31 total
+    assert "?&" not in r                       # no malformed pager/href
+    assert "status=published" in r and "page=2" in r
+
+
+def test_episode_timeline_completed_vs_in_progress(client):
+    """A COMPLETED episode shows every step done (no glowing 'now'); an in-progress one has a 'now'."""
+    from database.db_session import SessionLocal
+    from database.models import Campaign, Task
+    from database.types import TaskStatus
+
+    _seed_campaign(client)
+    db = SessionLocal()
+    cam = db.query(Campaign).order_by(Campaign.id.desc()).first()
+    done = Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=1, status=TaskStatus.COMPLETED)
+    live = Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=2, status=TaskStatus.RENDERING)
+    db.add_all([done, live])
+    db.commit()
+    db.refresh(done)
+    db.refresh(live)
+    did, lid = done.id, live.id
+    db.close()
+
+    assert "tl-step now" not in client.get(f"/episodes/{did}").text     # fully done
+    assert "tl-step now" in client.get(f"/episodes/{lid}").text         # rendering = current step
+
+
+def test_retry_publish_vs_render_flash(client, tmp_path):
+    """Retrying a failed episode whose file still exists re-publishes (flash=publish); with no file
+    it re-renders (flash=rerender). The Episode view banner must match the actual action."""
+    from database.db_session import SessionLocal
+    from database.models import BufferPoolItem, Campaign, Task
+    from database.types import BufferStatus, TaskStatus
+
+    _seed_campaign(client)
+    db = SessionLocal()
+    cam = db.query(Campaign).order_by(Campaign.id.desc()).first()
+    vid = tmp_path / "v.mp4"
+    vid.write_bytes(b"x" * 16)
+    t_pub = Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=1, status=TaskStatus.FAILED)
+    t_ren = Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=2, status=TaskStatus.FAILED)
+    db.add_all([t_pub, t_ren])
+    db.commit()
+    db.refresh(t_pub)
+    db.refresh(t_ren)
+    db.add(BufferPoolItem(campaign_id=cam.id, channel_id=cam.channel_id, episode_number=1,
+                          video_path=str(vid), status=BufferStatus.awaiting_review, metadata_json={}))
+    db.commit()
+    pid, rid = t_pub.id, t_ren.id
+    db.close()
+
+    r1 = client.post(f"/api/tasks/{pid}/retry", data={"return_to": f"/episodes/{pid}"},
+                     follow_redirects=False)
+    assert r1.headers["location"] == f"/episodes/{pid}?flash=publish"   # file exists → re-publish
+    r2 = client.post(f"/api/tasks/{rid}/retry", data={"return_to": f"/episodes/{rid}"},
+                     follow_redirects=False)
+    assert r2.headers["location"] == f"/episodes/{rid}?flash=rerender"  # no file → re-render
+
+
 def test_scope_switcher_and_scoped_nav(client):
     """The topbar scope switcher appears once channels exist, and an active channel scope is carried
     onto the scope-aware nav links (Campaigns / Asset Pool / Task Logs)."""
@@ -934,6 +1011,70 @@ def test_api_tasks_pagination_and_search(client):
     # Scope filter narrows to one campaign.
     assert client.get(f"/api/tasks?campaign={cam.id}").json()["total"] == 30
     assert client.get("/api/tasks?campaign=999999").json()["total"] == 0
+
+
+def test_tasks_channel_scope(client):
+    """The scope switcher's ?channel= truly filters the live Task Logs feed (not just the nav link)."""
+    from database.db_session import SessionLocal
+    from database.models import Campaign, Channel, Task
+    from database.types import CampaignStatus, TaskStatus
+
+    client.post("/channels/facebook", data={"channel_name": "ChA", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    client.post("/channels/facebook", data={"channel_name": "ChB", "page_id": "2", "page_access_token": "t"},
+                follow_redirects=False)
+    db = SessionLocal()
+    chans = db.query(Channel).order_by(Channel.id).all()
+    uid = chans[0].user_id
+    ca = Campaign(user_id=uid, channel_id=chans[0].id, topic_name="CampA", total_episodes=3,
+                  status=CampaignStatus.active)
+    cb = Campaign(user_id=uid, channel_id=chans[1].id, topic_name="CampB", total_episodes=3,
+                  status=CampaignStatus.active)
+    db.add_all([ca, cb])
+    db.commit()
+    db.refresh(ca)
+    db.refresh(cb)
+    db.add(Task(campaign_id=ca.id, user_id=uid, episode_number=1, status=TaskStatus.COMPLETED))
+    db.add(Task(campaign_id=cb.id, user_id=uid, episode_number=1, status=TaskStatus.COMPLETED))
+    db.commit()
+    cha_id = chans[0].id
+    db.close()
+
+    assert client.get("/api/tasks").json()["total"] == 2
+    scoped = client.get(f"/api/tasks?channel={cha_id}").json()
+    assert scoped["total"] == 1 and scoped["tasks"][0]["topic"] == "CampA"
+    # The page carries the scope so the poller sends it, and shows a channel scope note.
+    page = client.get(f"/tasks?channel={cha_id}").text
+    assert f'data-scope-channel="{cha_id}"' in page and "Render jobs for channel" in page
+
+
+def test_calendar_channel_scope(client):
+    """The calendar filters to one channel and keeps ?channel on its week-navigation links."""
+    from database.db_session import SessionLocal
+    from database.models import Campaign, Channel
+    from database.types import CampaignStatus
+    from workers.scheduler import WEEKDAY_KEYS, local_now
+
+    client.post("/channels/facebook", data={"channel_name": "ChX", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    client.post("/channels/facebook", data={"channel_name": "ChY", "page_id": "2", "page_access_token": "t"},
+                follow_redirects=False)
+    db = SessionLocal()
+    chans = db.query(Channel).order_by(Channel.id).all()
+    today = WEEKDAY_KEYS[local_now().weekday()]
+    cfg = {"posting_slots": ["21:00"], "posting_days": [today]}
+    db.add(Campaign(user_id=chans[0].user_id, channel_id=chans[0].id, topic_name="OnlyX",
+                    total_episodes=3, status=CampaignStatus.active, config_json=cfg))
+    db.add(Campaign(user_id=chans[1].user_id, channel_id=chans[1].id, topic_name="OnlyY",
+                    total_episodes=3, status=CampaignStatus.active, config_json=cfg))
+    db.commit()
+    chx = chans[0].id
+    db.close()
+
+    scoped = client.get(f"/calendar?channel={chx}").text
+    assert "OnlyX" in scoped and "OnlyY" not in scoped
+    # week-nav keeps the scope (& is HTML-escaped to &amp; in the attribute)
+    assert f'href="/calendar?week=1&amp;channel={chx}"' in scoped
 
 
 def test_api_summary_snapshot(client):

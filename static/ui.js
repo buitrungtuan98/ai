@@ -239,14 +239,51 @@
     stopSummary();
     (function loop() { summaryTimer = setTimeout(function () { pollSummary(); loop(); }, 6000); })();
   }
-  // Topbar scope switcher: pick a channel → reload the current page scoped to it (or clear to All).
+  // Channel scope switcher. Changing it merges ?channel into the CURRENT query (keeping status/q,
+  // resetting page). The choice is remembered in localStorage so it survives visits to unscoped
+  // pages (Dashboard/Channels/Credentials) — on load the remembered channel is reflected in the
+  // dropdown and carried onto the scope-aware nav links. An explicit ?channel in the URL always wins.
+  var SCOPED_PATHS = ["/episodes", "/campaigns", "/assets", "/tasks", "/calendar"];
+  var SCOPE_KEY = "scopeChannel";
+
   function initScopeSwitcher() {
     var sel = document.getElementById("scope-switcher");
-    if (!sel) return;
-    sel.addEventListener("change", function () {
-      var base = window.location.pathname;
-      window.location.href = sel.value ? base + "?channel=" + encodeURIComponent(sel.value) : base;
-    });
+    var urlCh = new URLSearchParams(window.location.search).get("channel");
+    var sticky = null;
+    try {
+      if (urlCh) { localStorage.setItem(SCOPE_KEY, urlCh); sticky = urlCh; }
+      else { sticky = localStorage.getItem(SCOPE_KEY); }
+    } catch (e) { /* private mode — degrade to URL-only scope */ }
+
+    if (sel) {
+      var has = Array.prototype.some.call(sel.options, function (o) { return o.value === sticky; });
+      if (!urlCh && sticky && has) sel.value = sticky;           // reflect the remembered channel
+      else if (sticky && !has) { try { localStorage.removeItem(SCOPE_KEY); } catch (e) {} sticky = null; }
+      sel.addEventListener("change", function () {
+        var params = new URLSearchParams(window.location.search);
+        if (sel.value) params.set("channel", sel.value); else params.delete("channel");
+        params.delete("page");                                   // scope change → back to page 1
+        try {
+          if (sel.value) localStorage.setItem(SCOPE_KEY, sel.value);
+          else localStorage.removeItem(SCOPE_KEY);
+        } catch (e) {}
+        var qs = params.toString();
+        window.location.href = window.location.pathname + (qs ? "?" + qs : "");
+      });
+    }
+
+    // Carry the remembered channel onto scope-aware nav links when the URL didn't already scope.
+    if (!urlCh && sticky) {
+      document.querySelectorAll(".sidebar a, .tabbar a").forEach(function (a) {
+        try {
+          var u = new URL(a.getAttribute("href"), window.location.origin);
+          if (SCOPED_PATHS.indexOf(u.pathname) >= 0 && !u.searchParams.get("channel")) {
+            u.searchParams.set("channel", sticky);
+            a.setAttribute("href", u.pathname + "?" + u.searchParams.toString());
+          }
+        } catch (e) { /* skip malformed href */ }
+      });
+    }
   }
 
   // Global search palette (⌘K / Ctrl-K, or "/"): one box across channels/campaigns/episodes.

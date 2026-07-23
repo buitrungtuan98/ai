@@ -29,9 +29,10 @@
     ⛔ <b>Failed.</b> {{ task.error_message or 'This episode failed to render.' }}
   </div>
   {% else %}
+  {% set complete = task.status.value == 'COMPLETED' %}
   <ol class="timeline mt">
     {% for s in stages %}
-    <li class="tl-step {{ 'done' if stage_index is not none and loop.index0 < stage_index else ('now' if loop.index0 == stage_index else 'todo') }}">
+    <li class="tl-step {{ 'done' if stage_index is not none and (loop.index0 < stage_index or (complete and loop.index0 == stage_index)) else ('now' if loop.index0 == stage_index else 'todo') }}">
       <span class="tl-dot"></span><span class="tl-label">{{ s }}</span>
     </li>
     {% endfor %}

@@ -587,6 +587,31 @@ All six phases DONE (Episode view · filter grammar · scope switcher · Episode
 ⌘K search). One episode now has one home; one filter language; one persistent scope; act where you
 see. All additive — no route renamed/removed, Task Logs & Asset Pool kept as specialized views.
 
+## Scope-switcher fixes (keep-the-state) `DONE`
+- `/tasks` + `/api/tasks` and `/calendar` now truly filter by `?channel=` (via the channel's
+  campaigns) — the live feed and calendar match what the switcher shows, instead of a selected
+  channel that the page ignored.
+- Switcher onchange MERGES `channel` into the current query (keeps an active status/search, resets
+  page) rather than replacing it.
+- localStorage stickiness: the choice survives visits to the factory-wide Dashboard/setup pages —
+  `ui.js` reflects it in the dropdown and rewrites the scope-aware nav links; explicit `?channel=`
+  wins; "All channels" clears it. Dashboard stays factory-wide by design (health/quota are
+  machine-wide, shared with /api/summary). ADR-038.
+- Verified: 168 tests (2 new — /api/tasks channel scope + tasks scope note; calendar channel filter +
+  week-nav keeps scope), ruff clean, docs guard green; persistence + filter-keeping verified live in
+  a browser (pick channel → scopes; visit Dashboard → remembered; switch/clear → status kept).
+
+## Polish sweep (review findings) `DONE`
+- Episodes pager: label now shows the FILTERED total ("N matches"), not the whole-scope count; pager
+  URLs built via `query_string` so an unfiltered page no longer emits a malformed `?&page=`.
+- Episode timeline: a COMPLETED episode now shows every step done (green) instead of the Published
+  step glowing as "current".
+- Retry banner: retrying a failed episode whose file still exists (re-publish, no re-render) now shows
+  "Publish queued", not "Re-render queued".
+- Removed the dead `id="campaign-grid"` left over when the client-side campaign search was replaced.
+- Verified: 171 tests (3 new — pager filtered-count + clean URLs, timeline completed-vs-in-progress,
+  retry publish-vs-render flash), ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download
