@@ -375,10 +375,12 @@ class CampaignProposal(BaseModel):
     posting_slots: str = Field(default="", description="One daily slot as HH:MM, or empty.")
     posting_days: list[Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]] = Field(
         default_factory=list, description="Days to publish on; EMPTY means every day (the usual choice).")
-    duration_min_s: int = Field(default=0, ge=0, le=180,
-                                description="Target min spoken seconds per episode (0 = unset).")
-    duration_max_s: int = Field(default=0, ge=0, le=180,
-                                description="Target max spoken seconds per episode (0 = unset).")
+    duration_min_s: int = Field(default=0, ge=0, le=900,
+                                description="Target min spoken seconds per episode (0 = unset). "
+                                            "Short ≤180; long up to 900 (15 min).")
+    duration_max_s: int = Field(default=0, ge=0, le=900,
+                                description="Target max spoken seconds per episode (0 = unset). "
+                                            "Short ≤180; long up to 900 (15 min).")
     rationale: str = Field(default="", max_length=400, description="One sentence on the angle.")
 
 
@@ -398,22 +400,41 @@ def propose_campaign(
     *,
     topic: str | None = None,
     language: str | None = None,
+    video_format: str = "short",
     api_key: str,
     model: str = DEFAULT_MODEL,
     nonce: int = 0,
 ) -> CampaignProposal:
     """Design one complete, standout campaign config. With no topic, it invents a concept; high
     temperature + a variation `nonce` make each call distinct. The chosen voice is validated
-    against PROPOSABLE_VOICES (an invented voice is dropped to the language default)."""
+    against PROPOSABLE_VOICES (an invented voice is dropped to the language default). `video_format`
+    ('short'|'long') is the operator's explicit choice — the prompt designs FOR it and it is forced
+    onto the result, and durations are clamped to the format's real range so a long-video proposal
+    is genuinely long-form (16:9, minutes) rather than silently downgraded to a short."""
+    is_long = video_format == "long"
     topic_line = (f'Design the campaign around this title/topic: "{topic}".' if topic
                   else "Invent a fresh, specific, non-generic channel concept and topic yourself.")
     lang_line = (f"The target language MUST be '{language}'." if language in ("vi", "en", "es")
                  else "Choose the most fitting target language (vi, en or es).")
+    if is_long:
+        fmt_line = (
+            "The video_format MUST be 'long' — horizontal 16:9, multi-minute videos (3-15 min). "
+            "Design FOR long-form: a spoken length range of 240-720 seconds; a narrative arc built "
+            "to carry chapters (the description gets auto chapter timestamps); prefer script_depth "
+            "'deep' (a research pass) for depth; and, because long videos render slowly on one CPU, "
+            "keep total_episodes modest and post only 2-3 days a week (set posting_days)."
+        )
+    else:
+        fmt_line = (
+            "The video_format MUST be 'short' — vertical 9:16 clips (≤3 min). Design FOR short-form: "
+            "a spoken length range fitting the beat (e.g. 25-45s for punchy facts, 60-120s for "
+            "stories); post daily (leave posting_days empty)."
+        )
     voices = ", ".join(v for vs in PROPOSABLE_VOICES.values() for v in vs)
     prompt = (
-        "You are a senior short-form video channel strategist. Propose ONE complete, standout "
-        "campaign configuration for an automated vertical-shorts factory. "
-        f"{topic_line} {lang_line} "
+        "You are a senior short-form AND long-form video channel strategist. Propose ONE complete, "
+        "standout campaign configuration for an automated video factory. "
+        f"{topic_line} {lang_line} {fmt_line} "
         "Make it distinctive and genuinely good — a real creator's channel, never a bland template. "
         "Choose: a vivid, specific persona (region/age/speech habits, written in the target "
         "language); 2-3 short style-example lines in that voice; signature opening and closing "
@@ -422,10 +443,9 @@ def propose_campaign(
         f"voice chosen ONLY from this list: {voices}; a rate_pct — TTS sounds most natural "
         "slightly slowed, so prefer -8..-3 for storytelling personas and 0 only for fast-paced "
         "formats; a sensible total_episodes; one daily posting slot as HH:MM; a continuity mode; "
-        "a spoken length range in seconds fitting the format (e.g. 25-45 for punchy facts, "
-        "60-120 for stories); a script_depth ('deep' for narrative/history/story channels that "
-        "benefit from a research pass, 'standard' for quick punchy facts); and a short "
-        "call-to-action. "
+        "a spoken length range in seconds fitting the format (per the format guidance above); "
+        "a script_depth ('deep' for narrative/history/story channels that benefit from a research "
+        "pass, 'standard' for quick punchy facts); and a short call-to-action. "
         f"Variation seed {nonce}: make this proposal clearly different from any previous one. "
         "Include a one-sentence 'rationale' for the creative angle."
     )
@@ -436,6 +456,18 @@ def propose_campaign(
     allowed = {v for vs in PROPOSABLE_VOICES.values() for v in vs}
     if proposal.voice not in allowed:
         proposal.voice = ""  # model invented a voice → fall back to the app default
+    # The format is the operator's explicit choice, not the model's — force it, then clamp the
+    # proposed durations into that format's real range (matches the create-time clamp in main.py).
+    proposal.video_format = "long" if is_long else "short"
+    floor, ceil = (60, 900) if is_long else (10, 180)
+    if proposal.duration_min_s:
+        proposal.duration_min_s = max(floor, min(proposal.duration_min_s, ceil))
+    if proposal.duration_max_s:
+        proposal.duration_max_s = max(floor, min(proposal.duration_max_s, ceil))
+    if (proposal.duration_min_s and proposal.duration_max_s
+            and proposal.duration_min_s > proposal.duration_max_s):
+        proposal.duration_min_s, proposal.duration_max_s = (
+            proposal.duration_max_s, proposal.duration_min_s)
     return proposal
 
 

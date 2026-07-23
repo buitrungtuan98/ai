@@ -336,6 +336,23 @@
   fillVoices();
   if (langSel) langSel.addEventListener("change", function () { fillVoices(""); });
 
+  // Format-aware video-length inputs: Short caps at 180s, Long allows up to 900s (15 min). Keeps
+  // the min/max/placeholder honest so the hints match what the server will accept for the format.
+  const fmtSel = document.querySelector('select[name="video_format"]');
+  function applyFormatConstraints() {
+    const long = fmtSel && fmtSel.value === "long";
+    const lo = document.querySelector('input[name="duration_min_s"]');
+    const hi = document.querySelector('input[name="duration_max_s"]');
+    const setBounds = (el, ph) => {
+      if (!el) return;
+      el.min = long ? 60 : 10; el.max = long ? 900 : 180; el.placeholder = ph;
+    };
+    setBounds(lo, long ? "min, e.g. 300" : "min, e.g. 30");
+    setBounds(hi, long ? "max, e.g. 600" : "max, e.g. 60");
+  }
+  applyFormatConstraints();
+  if (fmtSel) fmtSel.addEventListener("change", applyFormatConstraints);
+
   // 🎬 Live campaign "identity card": a plain-language summary of what you're about to create.
   const idText = document.getElementById("identity-text");
   const CAPTIONS = { highlight: "highlight captions", classic: "clean captions", boxed: "boxed captions", neon: "neon captions" };
@@ -417,6 +434,9 @@
           const body = new URLSearchParams();
           body.set("topic", (form.elements["topic_name"].value || "").trim());
           body.set("language", form.elements["language"].value || "");
+          // The chosen format is a constraint the designer must honor (short vs long), not something
+          // it may override — send it so a Long campaign is designed long-form.
+          body.set("video_format", form.elements["video_format"].value || "short");
           const r = await fetch("/campaigns/propose", { method: "POST", body });
           const p = await r.json();
           if (!r.ok) throw new Error(p.error || "AI proposal failed");
@@ -432,6 +452,7 @@
           setVal("continuity", p.continuity);
           setVal("script_depth", p.script_depth);
           setVal("video_format", p.video_format);
+          applyFormatConstraints();  // sync the duration input bounds to the proposed format
           fillVoices("");            // rebuild the voice list for the proposed language first
           setVal("voice", p.voice);  // the proposal's voice is always in that language's catalog
           setVal("rate_pct", p.rate_pct);
@@ -494,6 +515,16 @@
       const dmin = val("duration_min_s"), dmax = val("duration_max_s");
       if ((dmin && !dmax) || (dmax && !dmin)) { e.preventDefault(); return fail("Set BOTH video-length fields or leave both blank.", "core", el(dmin ? "duration_max_s" : "duration_min_s")); }
       if (dmin && dmax && Number(dmin) > Number(dmax)) { e.preventDefault(); return fail("Minimum video length can't exceed the maximum.", "core", el("duration_min_s")); }
+      // Range depends on format: short 10–180s, long 60–900s (matches the server clamp).
+      const longFmt = el("video_format") && el("video_format").value === "long";
+      const rlo = longFmt ? 60 : 10, rhi = longFmt ? 900 : 180;
+      for (const nm of ["duration_min_s", "duration_max_s"]) {
+        const v = val(nm);
+        if (v && (Number(v) < rlo || Number(v) > rhi)) {
+          e.preventDefault();
+          return fail("Video length for " + (longFmt ? "long" : "short") + " must be " + rlo + "–" + rhi + " seconds.", "core", el(nm));
+        }
+      }
       // Posting-slot format (Distribution tab)
       const slots = val("posting_slots");
       if (slots && !slots.split(",").map(s => s.trim()).filter(Boolean).every(s => /^([01]?\d|2[0-3]):[0-5]\d$/.test(s))) {

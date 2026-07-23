@@ -713,6 +713,28 @@ def test_propose_campaign_needs_key(client, monkeypatch):
     assert r.status_code == 400 and "Gemini" in r.json()["error"]
 
 
+def test_propose_campaign_forwards_video_format(client, monkeypatch):
+    """The form's video_format reaches the designer so a Long campaign is designed long-form."""
+    from core import ai_engine
+    from core.ai_engine import CampaignProposal
+    from core.config import settings
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "k")
+    captured = {}
+
+    def fake_propose(**kwargs):
+        captured.update(kwargs)
+        return CampaignProposal(topic_name="T", language="en", total_episodes=8, persona="P",
+                                video_format=kwargs.get("video_format", "short"))
+
+    monkeypatch.setattr(ai_engine, "propose_campaign", lambda **k: fake_propose(**k))
+    j = client.post("/campaigns/propose", data={"topic": "docs", "video_format": "long"}).json()
+    assert captured["video_format"] == "long" and j["video_format"] == "long"
+    # An unknown value falls back to short (whitelisted).
+    client.post("/campaigns/propose", data={"topic": "docs", "video_format": "bogus"})
+    assert captured["video_format"] == "short"
+
+
 def _seed_campaign(client):
     from database.db_session import SessionLocal
     from database.models import Campaign, Channel

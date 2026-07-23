@@ -670,6 +670,19 @@ see. All additive — no route renamed/removed, Task Logs & Asset Pool kept as s
   ruff clean, docs guard green; Settings save/prefill/quota-chip and all bugfixes verified in a
   browser at 1280px and 375px.
 
+## AI Propose designs long-form too `DONE`
+- AI Propose was shorts-only — and choosing **Long** then proposing silently reset to Short (the
+  response's `video_format` overwrote the form). Fixed end to end: the form sends `video_format`
+  with the request; the route forwards it (whitelisted); `propose_campaign` designs FOR the format
+  (short vs long prompt guidance) and **forces** the operator's choice onto the result; the proposal
+  schema's duration ceiling widens `le=180 → le=900` and durations are clamped to the format range
+  (60–900 long / 10–180 short) + auto-ordered — matching the create-time clamp. The form's
+  video-length inputs are now format-aware (min/max/placeholder), with matching validation. One AI
+  call, unchanged. ADR-042.
+- Verified: 176 tests (2 new — route forwards video_format incl. bogus→short; propose forces long +
+  clamps durations + prompt designed for long), ruff clean, docs guard green; the format-aware inputs
+  and the `video_format=long` propose request verified in a browser.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

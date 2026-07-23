@@ -696,9 +696,12 @@ def preview_script(
 
 
 @app.post("/campaigns/propose")
-def propose_campaign_route(user: CurrentUser, topic: str = Form(""), language: str = Form("")):
+def propose_campaign_route(user: CurrentUser, topic: str = Form(""), language: str = Form(""),
+                           video_format: str = Form("short")):
     """AI-design a whole campaign config from a title (or from scratch). Returns JSON the New
-    Campaign form fills in for review — nothing is saved until the user clicks Create."""
+    Campaign form fills in for review — nothing is saved until the user clicks Create. The form's
+    video_format is an explicit constraint: the designer builds for it (short vs long) and it is
+    forced onto the result, so choosing Long no longer gets silently reset to a short."""
     import random
 
     from core import ai_engine
@@ -708,9 +711,10 @@ def propose_campaign_route(user: CurrentUser, topic: str = Form(""), language: s
         return JSONResponse({"error": "Add a Gemini API key first (Credentials page or .env)."},
                             status_code=400)
     lang = language if language in ("en", "vi", "es") else None
+    fmt = "long" if video_format == "long" else "short"
     try:
         proposal = ai_engine.propose_campaign(
-            topic=topic.strip() or None, language=lang, api_key=key,
+            topic=topic.strip() or None, language=lang, video_format=fmt, api_key=key,
             model=user.gemini_model or settings.GEMINI_MODEL,
             nonce=random.randint(1, 1_000_000),
         )

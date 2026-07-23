@@ -774,3 +774,23 @@ the same choices, and the one tunable that behaves like a preference (the AI bud
 `.env` where a non-operator can't reach it. Splitting preferences (Settings) from secrets
 (Credentials) keeps the encrypted-at-rest boundary clean while giving the common defaults a home; a
 plain JSON column keeps it schema-light and additive, honoring the single-box KISS/YAGNI rules.
+
+### ADR-042 — AI Propose designs long-form too (format as a constraint, not a guess)
+**Decision:** the campaign designer (`propose_campaign`) now takes the operator's `video_format` as
+an explicit input and designs FOR it, instead of being a shorts-only tool that silently reset a Long
+selection. Three coupled changes: (1) the New Campaign form sends `video_format` with the propose
+request, and the route forwards it (whitelisted short/long); (2) the prompt is reframed as a
+short-AND-long strategist with per-format guidance — short: vertical 9:16, 25–120s, post daily; long:
+horizontal 16:9, a 240–720s spoken range, a chapter-friendly arc, prefer `script_depth='deep'`, modest
+episode count, 2–3 posting days/week (long renders are slow on one CPU); (3) the proposal schema's
+duration ceiling is widened `le=180 → le=900`, and after the call the format is FORCED to the
+operator's choice and the durations are clamped into that format's real range + auto-ordered (the same
+60–900 / 10–180 bounds the create-time config builder already enforces). The form's video-length
+inputs became format-aware (min/max/placeholder follow the selected format), with matching client
+validation. Cost is unchanged — one AI call. **Why:** Long format existed everywhere in the render
+pipeline (16:9, chapters, part-numbering) but the one place a channel is *designed* — AI Propose —
+couldn't reach it, and worse, choosing Long then proposing silently flipped back to Short because the
+response's `video_format` overwrote the form. Treating the operator's format as a constraint the AI
+must honor (like the language line) — forced, not suggested — makes "propose a long-form channel" a
+real, single-click capability while the clamp keeps a stray model value from ever producing an
+out-of-range duration.
