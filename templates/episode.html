@@ -3,7 +3,7 @@
 {% block title %}Ep {{ task.episode_number }} · {{ campaign.topic_name if campaign else '' }} · AI Video Factory{% endblock %}
 {% block content %}
 {% if channel and campaign %}
-{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': channel.channel_name, 'href': '/campaigns?channel=' ~ channel.id}, {'label': campaign.topic_name, 'href': '/campaigns/' ~ campaign.id ~ '/performance'}, {'label': 'Ep ' ~ task.episode_number}]) }}
+{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': channel.channel_name, 'href': '/campaigns?channel=' ~ channel.id}, {'label': campaign.topic_name, 'href': '/campaigns/' ~ campaign.id}, {'label': 'Ep ' ~ task.episode_number}]) }}
 {% endif %}
 
 {% if flash == 'publish' %}
@@ -17,7 +17,7 @@
 {% endif %}
 
 {% call ui.page_head('Ep ' ~ task.episode_number ~ ' · ' ~ (campaign.topic_name if campaign else ''), (task.synopsis or '')) %}
-  {% if campaign %}<a class="btn ghost" href="/campaigns/{{ campaign.id }}/performance">Performance ↗</a>{% endif %}
+  {% if campaign %}<a class="btn ghost" href="/campaigns/{{ campaign.id }}">Campaign ↗</a>{% endif %}
   <a class="btn ghost" href="/tasks">Task Logs ↗</a>
 {% endcall %}
 

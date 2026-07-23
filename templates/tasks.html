@@ -5,7 +5,7 @@
 {% call ui.page_head('Task Logs', 'Live render pipeline · refreshes every few seconds. Pending → AI Generation → Audio Synced → Rendering → Publishing → Completed. Retry a failed episode in one tap.') %}{% endcall %}
 
 {% if scope_campaign %}
-{{ ui.breadcrumb([{'label': 'Campaigns', 'href': '/campaigns'}, {'label': scope_campaign.topic_name, 'href': '/campaigns/' ~ scope_campaign.id ~ '/performance'}, {'label': 'Tasks'}]) }}
+{{ ui.breadcrumb([{'label': 'Campaigns', 'href': '/campaigns'}, {'label': scope_campaign.topic_name, 'href': '/campaigns/' ~ scope_campaign.id}, {'label': 'Tasks'}]) }}
 <p class="scope-note">Render jobs for <b>{{ scope_campaign.topic_name }}</b>. <a href="/tasks">Show all →</a></p>
 {% elif scope_channel %}
 <p class="scope-note">Render jobs for channel <b>{{ scope_channel.channel_name }}</b>. <a href="/tasks">Show all →</a></p>

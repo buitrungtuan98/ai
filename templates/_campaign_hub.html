@@ -1,0 +1,29 @@
+{% import "macros.html" as ui %}
+{# Shared campaign-hub header + tab bar — one home per campaign, tabs keep you in place.
+   Context expected: campaign, channel, asset_count, hub_active ∈ 'overview'|'episodes'|'settings'. #}
+{{ ui.breadcrumb([
+   {'label': 'Channels', 'href': '/channels'},
+   {'label': channel.channel_name if channel else 'Channel', 'href': '/campaigns?channel=' ~ campaign.channel_id},
+   {'label': campaign.topic_name}]) }}
+{% call ui.page_head(campaign.topic_name,
+   (channel.channel_name ~ ' · ' if channel else '') ~ (campaign.config_json.get('language','en')|upper)
+   ~ ' · Episode ' ~ campaign.current_episode ~ ' / ' ~ campaign.total_episodes) %}
+  {{ ui.pill(campaign.status.value) }}
+  {% if campaign.status.value in ['pending','failed'] %}
+  <form method="post" action="/campaigns/{{ campaign.id }}/start">
+    <input type="hidden" name="scope_channel" value="{{ campaign.channel_id }}">
+    <button class="btn sm" type="submit">▶ Start</button></form>
+  {% endif %}
+  <a class="btn ghost sm" href="/campaigns/new?from_id={{ campaign.id }}" title="Copy this campaign (e.g. another language/channel)">⧉ Duplicate</a>
+  <form method="post" action="/campaigns/{{ campaign.id }}/delete"
+        data-confirm="Delete “{{ campaign.topic_name }}” and all its episodes? This can't be undone.">
+    <input type="hidden" name="scope_channel" value="{{ campaign.channel_id }}">
+    <button class="btn danger sm" type="submit">Delete</button></form>
+{% endcall %}
+
+{% set _ec = (asset_count.ready + asset_count.awaiting_review) if asset_count else 0 %}
+<div class="hub-tabs">
+  <a class="hub-tab {{ 'active' if hub_active == 'overview' }}" href="/campaigns/{{ campaign.id }}">📊 Overview</a>
+  <a class="hub-tab {{ 'active' if hub_active == 'episodes' }}" href="/campaigns/{{ campaign.id }}/episodes">🎬 Episodes{% if _ec %} ({{ _ec }}){% endif %}</a>
+  <a class="hub-tab {{ 'active' if hub_active == 'settings' }}" href="/campaigns/{{ campaign.id }}/settings">⚙ Settings</a>
+</div>

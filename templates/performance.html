@@ -1,20 +1,18 @@
 {% extends "base.html" %}
 {% import "macros.html" as ui %}
-{% block title %}Performance · {{ campaign.topic_name }} · AI Video Factory{% endblock %}
+{% block title %}Overview · {{ campaign.topic_name }} · AI Video Factory{% endblock %}
 {% block content %}
-{% if channel %}{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': channel.channel_name, 'href': '/campaigns?channel=' ~ channel.id}, {'label': campaign.topic_name}]) }}{% endif %}
-{% call ui.page_head('Performance — ' ~ campaign.topic_name, 'What this channel has learned from its own results. Retention (avg % viewed) is the metric that matters most for Shorts.') %}
-  <a class="btn ghost" href="/campaigns">← Campaigns</a>
-{% endcall %}
+{% set hub_active = 'overview' %}
+{% include "_campaign_hub.html" %}
 
-{# Campaign hub — jump to this campaign's scoped Assets / Tasks / settings. #}
-<div class="hub-tabs">
-  <span class="hub-tab active">📊 Overview</span>
-  <a class="hub-tab" href="/episodes?campaign={{ campaign.id }}">🎬 Episodes{% if asset_count.ready + asset_count.awaiting_review %} ({{ asset_count.ready + asset_count.awaiting_review }}){% endif %}</a>
-  <a class="hub-tab" href="/campaigns/{{ campaign.id }}/edit">✎ Edit</a>
+{# Scorecard — the campaign's results at a glance; retention (avg % viewed) is the Shorts metric. #}
+<div class="grid cols-3">
+  {{ ui.stat(episodes|length, 'Episodes') }}
+  {{ ui.stat(measured_count, 'Measured', 'work' if measured_count else '') }}
+  {% if best_ret is not none %}{{ ui.stat('🏆 ' ~ best_ret ~ '%', 'Best retention', 'ok') }}{% else %}{{ ui.stat('—', 'Best retention') }}{% endif %}
 </div>
 
-<div class="card">
+<div class="card mt">
   <div class="card-head">
     <h3>Channel Playbook</h3>
     <span class="meta">auto-learned; refreshed weekly from real stats — refine it by rejecting videos with a reason</span>
@@ -92,35 +90,7 @@
 </div>
 {% endif %}
 
-<div class="card mt">
-  <h3>Episodes</h3>
-  <div class="table-wrap mt">
-    <table>
-      <thead><tr><th>Ep</th><th>Synopsis</th><th>Status</th><th>Variant</th><th>Retention</th><th>Views</th><th>Likes</th><th>Link</th></tr></thead>
-      <tbody>
-        {% for t in episodes_page %}
-        {% set ret = t.stats_json.get('avg_pct_viewed') if t.stats_json else none %}
-        <tr {% if t.id == best_id %}class="win-row"{% endif %}>
-          <td><a href="/episodes/{{ t.id }}">{{ t.episode_number }}</a>{% if t.id == best_id %} 🏆{% endif %}</td>
-          <td class="meta" style="max-width:340px">{{ t.synopsis or '—' }}</td>
-          <td>{{ ui.pill(t.status.value) }}</td>
-          <td>{{ t.ab_variant or '—' }}</td>
-          <td>{% if ret is not none %}<span class="minibar"><span style="width:{{ ret }}%"></span></span> {{ ret }}%{% else %}—{% endif %}</td>
-          <td>{{ t.stats_json.get('views', '—') if t.stats_json else '—' }}</td>
-          <td>{{ t.stats_json.get('likes', '—') if t.stats_json else '—' }}</td>
-          <td>{% if t.published_url %}<a href="{{ t.published_url }}" target="_blank" rel="noopener">View ↗</a>{% endif %}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-  {% if pages > 1 %}
-  <div class="pager">
-    {% if page > 1 %}<a class="btn ghost sm" href="/campaigns/{{ campaign.id }}/performance?page={{ page - 1 }}">← Newer</a>{% else %}<span class="btn ghost sm pager-off">← Newer</span>{% endif %}
-    <span class="meta">Page {{ page }} of {{ pages }}</span>
-    {% if page < pages %}<a class="btn ghost sm" href="/campaigns/{{ campaign.id }}/performance?page={{ page + 1 }}">Older →</a>{% else %}<span class="btn ghost sm pager-off">Older →</span>{% endif %}
-  </div>
-  {% endif %}
-  <p class="hint mt-sm">Stats refresh daily for videos 2–30 days old (YouTube Analytics / Facebook insights).</p>
-</div>
+<p class="hint mt">Every episode — with preview, stage and per-episode stats — lives under the
+  <a href="/campaigns/{{ campaign.id }}/episodes">🎬 Episodes</a> tab. Stats refresh daily for videos
+  2–30 days old (YouTube Analytics / Facebook insights).</p>
 {% endblock %}

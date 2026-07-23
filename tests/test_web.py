@@ -416,8 +416,8 @@ def test_review_and_track_entry_points_go_to_episode(client):
 
     assert f'href="/episodes/{tid}"' in client.get("/").text           # dashboard triage → detail
     assert f'href="/episodes/{tid}"' in client.get("/assets").text     # Review card → detail
-    perf = client.get(f"/campaigns/{cam_id}/performance").text
-    assert f'href="/episodes?campaign={cam_id}"' in perf               # hub Episodes tab
+    perf = client.get(f"/campaigns/{cam_id}/performance").text        # legacy URL → hub Overview
+    assert f'href="/campaigns/{cam_id}/episodes"' in perf              # hub Episodes tab
     assert f'href="/tasks?campaign={cam_id}"' not in perf              # old Tasks tab removed
 
 

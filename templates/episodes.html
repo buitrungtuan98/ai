@@ -9,7 +9,7 @@
 
 {% if scope_campaign %}
 {% set sc = chan_by_id.get(scope_campaign.channel_id) %}
-{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': sc.channel_name if sc else 'Channel', 'href': '/campaigns?channel=' ~ scope_campaign.channel_id}, {'label': scope_campaign.topic_name, 'href': '/campaigns/' ~ scope_campaign.id ~ '/performance'}, {'label': 'Episodes'}]) }}
+{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': sc.channel_name if sc else 'Channel', 'href': '/campaigns?channel=' ~ scope_campaign.channel_id}, {'label': scope_campaign.topic_name, 'href': '/campaigns/' ~ scope_campaign.id}, {'label': 'Episodes'}]) }}
 <p class="scope-note">Episodes for <b>{{ scope_campaign.topic_name }}</b>. <a href="/episodes">Show all →</a></p>
 {% elif scope_channel %}
 <p class="scope-note">Episodes for channel <b>{{ scope_channel.channel_name }}</b>. <a href="/episodes">Show all →</a></p>
@@ -18,37 +18,9 @@
 {% if total_all %}
 {{ ui.filter_bar('/episodes', chips, current=status, q=q, placeholder='🔎 Search episodes…', hidden=scope_hidden) }}
 {% if episodes %}
-<div class="card">
-  <div class="table-wrap">
-    <table class="stack-table">
-      <thead><tr><th>Episode</th><th>Campaign</th><th>Stage</th><th>Updated</th><th></th></tr></thead>
-      <tbody>
-        {% for t in episodes %}
-        {% set camp = camp_by_id.get(t.campaign_id) %}
-        {% set ch = chan_by_id.get(camp.channel_id) if camp else none %}
-        {% set stage = status_to_stage.get(t.status.value, t.status.value) %}
-        <tr>
-          <td data-label="Episode"><a href="/episodes/{{ t.id }}"><b>Ep {{ t.episode_number }}</b></a>
-            {% if t.synopsis %}<div class="meta">{{ t.synopsis[:70] }}</div>{% endif %}</td>
-          <td data-label="Campaign">{{ camp.topic_name if camp else 'C' ~ t.campaign_id }}
-            {% if ch %}<div class="meta">{{ ch.channel_name }}</div>{% endif %}</td>
-          <td data-label="Stage">{{ ui.pill(t.status.value, stage.replace('_',' ')|title) }}
-            {% if t.status.value in ('AI_GENERATION','AUDIO_SYNCED','RENDERING') and t.progress_pct %}<span class="meta">{{ t.progress_pct }}%</span>{% endif %}</td>
-          <td data-label="Updated" class="meta"><span {% if t.updated_at %}data-reltime="{{ t.updated_at.isoformat() }}Z"{% endif %}>{{ t.updated_at.strftime('%Y-%m-%d %H:%M') if t.updated_at else '—' }}</span></td>
-          <td data-label=""><a class="btn ghost sm" href="/episodes/{{ t.id }}">Open →</a></td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-  {% if pages > 1 %}
-  <div class="pager">
-    {% if page > 1 %}<a class="btn ghost sm" href="/episodes?{{ query_string(status=status, q=q, page=page-1, **scope_hidden) }}">← Newer</a>{% else %}<span class="btn ghost sm pager-off">← Newer</span>{% endif %}
-    <span class="meta">Page {{ page }} of {{ pages }} · {{ total }} match{{ 'es' if total != 1 else '' }}</span>
-    {% if page < pages %}<a class="btn ghost sm" href="/episodes?{{ query_string(status=status, q=q, page=page+1, **scope_hidden) }}">Older →</a>{% else %}<span class="btn ghost sm pager-off">Older →</span>{% endif %}
-  </div>
-  {% endif %}
-</div>
+{% set table_action = '/episodes' %}
+{% set show_campaign = true %}
+{% include "_episodes_table.html" %}
 {% else %}
 <div class="empty" style="padding:var(--sp-8)">No episodes match this filter. <a href="/episodes?{{ query_string(**scope_hidden) }}">Show all →</a></div>
 {% endif %}

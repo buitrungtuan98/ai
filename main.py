@@ -892,15 +892,24 @@ def create_campaign(user: CurrentUser, db: DbDep, form: dict = Depends(_campaign
     return _campaigns_redirect(campaign.channel_id)  # land beside the new campaign's channel
 
 
-@app.get("/campaigns/{campaign_id}/edit", response_class=HTMLResponse)
-def campaign_edit_form(request: Request, user: CurrentUser, db: DbDep,
-                       campaign=Depends(get_owned_campaign)):
+@app.get("/campaigns/{campaign_id}/settings", response_class=HTMLResponse)
+def campaign_settings(request: Request, user: CurrentUser, db: DbDep,
+                      campaign=Depends(get_owned_campaign)):
+    """Settings tab of the campaign hub — the edit form, wrapped in the shared hub header/tabs."""
     channels = db.scalars(select(Channel).where(Channel.user_id == user.id)).all()
     return templates.TemplateResponse(
         request, "campaign_new.html",
         {"request": request, "user": user, "channels": channels, "nav": "campaigns",
-         "campaign": campaign, "cfg": campaign.config_json or {}},
+         "campaign": campaign, "cfg": campaign.config_json or {}, "hub_active": "settings",
+         "channel": db.get(Channel, campaign.channel_id),
+         "asset_count": _buffer_counts(db, user.id).get(campaign.id, {"ready": 0, "awaiting_review": 0})},
     )
+
+
+@app.get("/campaigns/{campaign_id}/edit")
+def campaign_edit_form(campaign=Depends(get_owned_campaign)):
+    """Legacy edit URL → the hub's Settings tab (kept so old links/bookmarks still land right)."""
+    return RedirectResponse(f"/campaigns/{campaign.id}/settings", status_code=307)
 
 
 @app.post("/campaigns/{campaign_id}/edit")
@@ -914,7 +923,7 @@ def update_campaign(user: CurrentUser, db: DbDep, campaign=Depends(get_owned_cam
     campaign.total_episodes = form["total_episodes"]
     campaign.config_json = form["config"]
     db.commit()
-    return _campaigns_redirect(campaign.channel_id)
+    return RedirectResponse(f"/campaigns/{campaign.id}", status_code=303)  # back to the hub Overview
 
 
 @app.post("/campaigns/{campaign_id}/start")
@@ -1303,13 +1312,10 @@ _STATUS_TO_STAGE = {st: stage for stage, sts in _STAGE_STATUSES.items() for st i
 _EPISODES_LIST_PER_PAGE = 25
 
 
-@app.get("/episodes", response_class=HTMLResponse)
-def episodes_list(request: Request, user: CurrentUser, db: DbDep,
-                  channel: int | None = None, campaign: int | None = None,
-                  status: str = "", q: str = "", page: int = 1):
-    """The pipeline: every episode as one row, grouped by lifecycle stage — the unified view that
-    merges what used to be split between Task Logs (render) and Asset Pool (review). Row → the
-    Episode detail page. Server-rendered + stage tabs + search + scope + pagination (one grammar)."""
+def _episode_list_ctx(db, user, *, campaign: int | None = None, channel: int | None = None,
+                      status: str = "", q: str = "", page: int = 1) -> dict:
+    """Shared episode-list query + chip/pager context. Powers both the global /episodes list and the
+    campaign-hub Episodes tab, so the stage grammar (tabs, counts, search, pagination) has one home."""
     scope_conds = [Task.user_id == user.id]
     if campaign:
         scope_conds.append(Task.campaign_id == campaign)
@@ -1350,16 +1356,27 @@ def episodes_list(request: Request, user: CurrentUser, db: DbDep,
     chips = [{"label": "All", "value": "", "count": total_all}] + [
         {"label": stage.replace("_", " ").title(), "value": stage, "count": stage_counts.get(stage, 0)}
         for stage in _STAGE_STATUSES]
+    return {"episodes": episodes, "camp_by_id": camp_by_id, "chan_by_id": chan_by_id,
+            "status_to_stage": _STATUS_TO_STAGE, "chips": chips, "status": stage, "q": q,
+            "total_all": total_all, "total": total, "page": page, "pages": pages}
+
+
+@app.get("/episodes", response_class=HTMLResponse)
+def episodes_list(request: Request, user: CurrentUser, db: DbDep,
+                  channel: int | None = None, campaign: int | None = None,
+                  status: str = "", q: str = "", page: int = 1):
+    """The pipeline: every episode as one row, grouped by lifecycle stage — the unified view that
+    merges what used to be split between Task Logs (render) and Asset Pool (review). Row → the
+    Episode detail page. Server-rendered + stage tabs + search + scope + pagination (one grammar)."""
+    ctx = _episode_list_ctx(db, user, campaign=campaign, channel=channel, status=status, q=q, page=page)
     scope_hidden = {"campaign": campaign} if campaign else ({"channel": channel} if channel else {})
-    scope_qs = _query_string(**scope_hidden, status=stage, q=q)
+    scope_qs = _query_string(**scope_hidden, status=ctx["status"], q=ctx["q"])
     return templates.TemplateResponse(
         request, "episodes.html",
-        {"request": request, "user": user, "nav": "episodes", "episodes": episodes,
-         "camp_by_id": camp_by_id, "chan_by_id": chan_by_id, "status_to_stage": _STATUS_TO_STAGE,
-         "chips": chips, "status": stage, "q": q, "total_all": total_all, "total": total,
-         "scope_hidden": scope_hidden, "scope_qs": scope_qs, "page": page, "pages": pages,
-         "scope_campaign": camp_by_id.get(campaign) if campaign else None,
-         "scope_channel": chan_by_id.get(channel) if channel else None},
+        {"request": request, "user": user, "nav": "episodes",
+         "scope_hidden": scope_hidden, "scope_qs": scope_qs,
+         "scope_campaign": ctx["camp_by_id"].get(campaign) if campaign else None,
+         "scope_channel": ctx["chan_by_id"].get(channel) if channel else None, **ctx},
     )
 
 
@@ -1427,40 +1444,59 @@ def ab_variant_summary(episodes) -> list[dict]:
     return summary
 
 
-_EPISODES_PER_PAGE = 20
+def _hub_context(db, user, campaign) -> dict:
+    """Shared campaign-hub context (parent channel + buffer tally) for the hub header/tabs partial."""
+    return {"channel": db.get(Channel, campaign.channel_id),
+            "asset_count": _buffer_counts(db, user.id).get(
+                campaign.id, {"ready": 0, "awaiting_review": 0})}
 
 
-@app.get("/campaigns/{campaign_id}/performance", response_class=HTMLResponse)
-def campaign_performance(request: Request, user: CurrentUser, db: DbDep,
-                         campaign=Depends(get_owned_campaign), page: int = 1):
-    # Full list drives the aggregates (variant summary, sparkline, best episode); the episodes TABLE
-    # is paginated (newest first) so a long-running campaign doesn't render hundreds of rows at once.
+@app.get("/campaigns/{campaign_id}", response_class=HTMLResponse)
+def campaign_overview(request: Request, user: CurrentUser, db: DbDep,
+                      campaign=Depends(get_owned_campaign)):
+    """Campaign hub — Overview tab: what this channel has learned from its own results (playbook,
+    A/B variant retention, trend, scorecard). Per-episode detail lives under the Episodes tab."""
     episodes = db.scalars(
         select(Task).where(Task.campaign_id == campaign.id).order_by(Task.episode_number)
     ).all()
     measured = [t for t in episodes if t.stats_json]
     best = max(measured, key=lambda t: t.stats_json.get("avg_pct_viewed", 0), default=None)
-    ep_recent = list(reversed(episodes))
-    pages = max(1, -(-len(ep_recent) // _EPISODES_PER_PAGE))
-    page = min(max(page, 1), pages)
-    episodes_page = ep_recent[(page - 1) * _EPISODES_PER_PAGE: page * _EPISODES_PER_PAGE]
     return templates.TemplateResponse(
         request, "performance.html",
         {"request": request, "user": user, "nav": "campaigns", "campaign": campaign,
-         "episodes": episodes, "episodes_page": episodes_page, "page": page, "pages": pages,
-         "learning": campaign.learning_json or {},
-         "best_id": best.id if best else None, "variants": ab_variant_summary(episodes),
-         # Campaign-hub context: parent channel + its buffer tally for the drill-down links.
-         "channel": db.get(Channel, campaign.channel_id),
-         "asset_count": _buffer_counts(db, user.id).get(campaign.id, {"ready": 0, "awaiting_review": 0})},
+         "episodes": episodes, "learning": campaign.learning_json or {},
+         "best_id": best.id if best else None,
+         "best_ret": best.stats_json.get("avg_pct_viewed") if best else None,
+         "measured_count": len(measured), "variants": ab_variant_summary(episodes),
+         "hub_active": "overview", **_hub_context(db, user, campaign)},
     )
+
+
+@app.get("/campaigns/{campaign_id}/episodes", response_class=HTMLResponse)
+def campaign_episodes(request: Request, user: CurrentUser, db: DbDep,
+                      campaign=Depends(get_owned_campaign),
+                      status: str = "", q: str = "", page: int = 1):
+    """Campaign hub — Episodes tab: this campaign's episodes as a stage-tabbed list (same grammar as
+    the global /episodes view), scoped in-page so the hub tabs stay visible."""
+    ctx = _episode_list_ctx(db, user, campaign=campaign.id, status=status, q=q, page=page)
+    return templates.TemplateResponse(
+        request, "campaign_episodes.html",
+        {"request": request, "user": user, "nav": "campaigns", "campaign": campaign,
+         "hub_active": "episodes", **_hub_context(db, user, campaign), **ctx},
+    )
+
+
+@app.get("/campaigns/{campaign_id}/performance")
+def campaign_performance_redirect(campaign=Depends(get_owned_campaign)):
+    """Legacy performance URL → the hub's Overview tab (kept so old links/bookmarks still land)."""
+    return RedirectResponse(f"/campaigns/{campaign.id}", status_code=307)
 
 
 @app.post("/campaigns/{campaign_id}/learning/reset")
 def reset_learning(db: DbDep, campaign=Depends(get_owned_campaign)):
     campaign.learning_json = None
     db.commit()
-    return RedirectResponse(f"/campaigns/{campaign.id}/performance", status_code=303)
+    return RedirectResponse(f"/campaigns/{campaign.id}", status_code=303)
 
 
 # ── Content calendar ─────────────────────────────────────────────────────────

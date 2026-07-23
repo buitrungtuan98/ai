@@ -1,0 +1,39 @@
+{% import "macros.html" as ui %}
+{# Episode list table — shared by the global /episodes list and the campaign-hub Episodes tab.
+   Context: episodes, camp_by_id, chan_by_id, status_to_stage, status, q, page, pages, total.
+   Params (set before include): table_action (base URL for pager, default '/episodes'),
+   show_campaign (show the Campaign column, default true), scope_hidden (extra pager params, default {}). #}
+{% set table_action = table_action if table_action is defined else '/episodes' %}
+{% set show_campaign = show_campaign if show_campaign is defined else true %}
+{% set scope_hidden = scope_hidden if scope_hidden is defined else {} %}
+<div class="card">
+  <div class="table-wrap">
+    <table class="stack-table">
+      <thead><tr><th>Episode</th>{% if show_campaign %}<th>Campaign</th>{% endif %}<th>Stage</th><th>Updated</th><th></th></tr></thead>
+      <tbody>
+        {% for t in episodes %}
+        {% set camp = camp_by_id.get(t.campaign_id) %}
+        {% set ch = chan_by_id.get(camp.channel_id) if camp else none %}
+        {% set stage = status_to_stage.get(t.status.value, t.status.value) %}
+        <tr>
+          <td data-label="Episode"><a href="/episodes/{{ t.id }}"><b>Ep {{ t.episode_number }}</b></a>
+            {% if t.synopsis %}<div class="meta">{{ t.synopsis[:70] }}</div>{% endif %}</td>
+          {% if show_campaign %}<td data-label="Campaign">{{ camp.topic_name if camp else 'C' ~ t.campaign_id }}
+            {% if ch %}<div class="meta">{{ ch.channel_name }}</div>{% endif %}</td>{% endif %}
+          <td data-label="Stage">{{ ui.pill(t.status.value, stage.replace('_',' ')|title) }}
+            {% if t.status.value in ('AI_GENERATION','AUDIO_SYNCED','RENDERING') and t.progress_pct %}<span class="meta">{{ t.progress_pct }}%</span>{% endif %}</td>
+          <td data-label="Updated" class="meta"><span {% if t.updated_at %}data-reltime="{{ t.updated_at.isoformat() }}Z"{% endif %}>{{ t.updated_at.strftime('%Y-%m-%d %H:%M') if t.updated_at else '—' }}</span></td>
+          <td data-label=""><a class="btn ghost sm" href="/episodes/{{ t.id }}">Open →</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if pages > 1 %}
+  <div class="pager">
+    {% if page > 1 %}<a class="btn ghost sm" href="{{ table_action }}?{{ query_string(status=status, q=q, page=page-1, **scope_hidden) }}">← Newer</a>{% else %}<span class="btn ghost sm pager-off">← Newer</span>{% endif %}
+    <span class="meta">Page {{ page }} of {{ pages }} · {{ total }} match{{ 'es' if total != 1 else '' }}</span>
+    {% if page < pages %}<a class="btn ghost sm" href="{{ table_action }}?{{ query_string(status=status, q=q, page=page+1, **scope_hidden) }}">Older →</a>{% else %}<span class="btn ghost sm pager-off">Older →</span>{% endif %}
+  </div>
+  {% endif %}
+</div>

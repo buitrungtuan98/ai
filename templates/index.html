@@ -134,7 +134,7 @@
       <span class="feed-dot {{ ev[0] }}"></span>
       <div class="grow">
         <span class="feed-label">{{ ev[1] }}</span> —
-        <a href="/campaigns/{{ t.campaign_id }}/performance">{{ camp.topic_name if camp else 'C' ~ t.campaign_id }}</a> · Ep {{ t.episode_number }}
+        <a href="/campaigns/{{ t.campaign_id }}">{{ camp.topic_name if camp else 'C' ~ t.campaign_id }}</a> · Ep {{ t.episode_number }}
         {% if chan %}<span class="meta">· {{ chan.channel_name }}</span>{% endif %}
         {% if t.published_url %} · <a href="{{ t.published_url }}" target="_blank" rel="noopener">View ↗</a>{% endif %}
       </div>
