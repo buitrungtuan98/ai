@@ -81,6 +81,62 @@ def classify_campaigns(db, campaigns) -> dict[int, dict]:
             for c in campaigns}
 
 
+# ── Autopilot config (per-channel, stored in Channel.autopilot_json) ─────────
+MODES = ("off", "copilot", "autopilot")
+DEFAULT_INTERVAL_HOURS = 3
+DEFAULT_APPROVE_MIN = 7   # QC score (/10) at/above which a render is auto-approved (autopilot mode)
+DEFAULT_REJECT_MAX = 4    # QC score at/below which a render is auto-rejected (both copilot + autopilot)
+
+
+def ap_mode(channel) -> str:
+    """The channel's autopilot mode ('off' | 'copilot' | 'autopilot'); 'off' if unset/invalid."""
+    m = (channel.autopilot_json or {}).get("mode", "off")
+    return m if m in MODES else "off"
+
+
+def ap_interval_seconds(channel) -> int:
+    """How often this channel's autopilot may run — operator-configurable (default 3h), clamped 1–24h."""
+    h = (channel.autopilot_json or {}).get("interval_hours", DEFAULT_INTERVAL_HOURS)
+    try:
+        h = int(h)
+    except (TypeError, ValueError):
+        h = DEFAULT_INTERVAL_HOURS
+    return max(1, min(h, 24)) * 3600
+
+
+def review_thresholds(channel) -> tuple[int, int]:
+    """(approve_min, reject_max) QC scores for this channel — how strict its auto-review is."""
+    r = (channel.autopilot_json or {}).get("review") or {}
+    try:
+        lo = int(r.get("reject_max", DEFAULT_REJECT_MAX))
+        hi = int(r.get("approve_min", DEFAULT_APPROVE_MIN))
+    except (TypeError, ValueError):
+        lo, hi = DEFAULT_REJECT_MAX, DEFAULT_APPROVE_MIN
+    lo = max(0, min(lo, 10))
+    hi = max(lo + 1, min(hi, 10))  # approve threshold always strictly above the reject threshold
+    return hi, lo
+
+
+def review_decision(qc: dict | None, approve_min: int, reject_max: int) -> tuple[str, str]:
+    """Decide on a rendered video from its STORED QC verdict — never calls AI (reuses the pipeline's
+    vision verdict). Returns (action, reason) where action ∈ 'approve' | 'reject' | 'escalate'.
+
+    A low score or a failed/critical QC → reject (the safe action: a rejection never publishes, and
+    the reason teaches the scriptwriter). A high score + passed QC → approve. Anything in between, or
+    a render with no machine verdict, → escalate to the operator (a good employee asks when unsure)."""
+    if not qc or qc.get("score") is None:
+        return ("escalate", "no automatic QC verdict — needs a human eye")
+    score = qc.get("score")
+    passed = qc.get("passed", True)
+    issues = qc.get("issues") or []
+    if not passed or score <= reject_max:
+        why = "; ".join(issues) if issues else f"low quality score ({score}/10)"
+        return ("reject", why[:180])
+    if score >= approve_min:
+        return ("approve", f"passed auto-QC ({score}/10)")
+    return ("escalate", f"borderline auto-QC ({score}/10) — needs a human eye")
+
+
 def channel_baseline(db, channel_id: int) -> float | None:
     """Average retention across ALL measured episodes of one channel — the bar its campaigns are
     judged against. None until there are ≥ MIN_MEASURED measured episodes."""

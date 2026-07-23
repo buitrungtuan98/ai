@@ -72,6 +72,8 @@
     {% endif %}
 
     {% if i.status.value == 'awaiting_review' %}
+    {% set hint = i.metadata_json.get('ap_hint') %}
+    {% if hint %}<p class="hint">🤖 {{ 'AI recommends approve' if hint.action == 'approve' else 'AI flagged for your review' }} — {{ hint.reason }}</p>{% endif %}
     {% set L = (camp.learning_json or {}) if camp else {} %}
     {% if L.get('playbook') or L.get('reject_reasons') %}
     <details class="disclosure criteria mt">

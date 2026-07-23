@@ -89,6 +89,9 @@ class Channel(Base):
         _enum(ChannelStatus), default=ChannelStatus.active
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    # Autopilot config (NOT secrets): {mode, interval_hours, review thresholds, brief, …}. NULL/off
+    # = the operator drives everything by hand (default). See core/autopilot.py + ADR-044.
+    autopilot_json: Mapped[dict | None] = mapped_column(JSON)
 
     user: Mapped["User"] = relationship(back_populates="channels")
     campaigns: Mapped[list["Campaign"]] = relationship(

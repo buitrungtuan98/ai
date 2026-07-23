@@ -79,6 +79,9 @@ _COLUMN_UPGRADES: dict[str, dict[str, str]] = {
     "campaigns": {
         "learning_json": "TEXT",
     },
+    "channels": {
+        "autopilot_json": "TEXT",
+    },
     "users": {
         "gemini_model": "VARCHAR(200)",
         "settings_json": "TEXT",

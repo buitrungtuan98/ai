@@ -723,7 +723,18 @@ the existing scheduler daemon on a per-channel cadence (default 3h, configurable
   `classify_campaigns`) — pure, read-only, no AI calls. Surfaced as a verdict chip on the campaign
   cards and the hub Overview scorecard. Verified: 178 tests (2 new — classification vs baseline,
   and the no-baseline guard), ruff clean, docs guard green; chip checked in a browser.
-- Phase II — the hands (AI review / auto-reject low scores / retry / catch-up publish) `TODO`
+- **Phase II — the hands** `DONE`: enabled channels manage their own daily work. The scheduler's
+  `autopilot_pass` (per-channel cadence via a Redis NX guard, default 3h) does — from the render
+  pipeline's already-stored QC verdict, 0 extra AI calls — AI **review** (auto-reject weak/failed
+  renders with a reason that feeds the learning loop + re-render; auto-approve & publish strong ones
+  in Full-auto, or recommend them for one-click confirm in Copilot; escalate the middle band),
+  quota-aware **retry** of genuine render failures (skips operator rejects + quota exhaustion), and
+  **catch-up publish** of missed slots (bounded, never bursts). Per-channel control on the Channels
+  page (Off/Copilot/Full-auto + cadence + QC thresholds); "🤖 AI recommends" hint on Review cards;
+  Telegram summary each cycle. Shared `apply_approve`/`apply_reject` keep the manual + auto paths DRY.
+  Verified: 184 tests (6 new — decision thresholds, full-auto approve/reject/escalate, copilot
+  recommend-don't-publish, retry skip-rules, catch-up, per-channel cadence guard), ruff clean, docs
+  guard green; the Channels autopilot control checked in a browser.
 - Phase III — the brain: Copilot proposals inbox (create / extend / wind down / trim / adopt) `TODO`
 - Phase IV — full-auto + weekly strategist call + guardrails `TODO`
 

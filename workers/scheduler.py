@@ -29,7 +29,7 @@ from sqlalchemy import select
 from core.cleanup import sweep_orphans
 from core.config import settings
 from database.db_session import SessionLocal
-from database.models import BufferPoolItem, Campaign, Task
+from database.models import BufferPoolItem, Campaign, Channel, Task, User
 from database.types import BufferStatus, CampaignStatus, TaskStatus
 from workers import task_queue, video_worker
 
@@ -356,6 +356,201 @@ def daily_learning_pass(db, now: datetime | None = None) -> dict:
     return result
 
 
+# ── Autopilot: the "hands" — AI review / auto-reject / retry / catch-up publish (ADR-044) ──
+AUTOPILOT_MAX_RETRIES = 2  # auto-retry a genuine render failure at most this many times
+
+
+def autopilot_review_channel(db, channel, mode: str, approve_min: int, reject_max: int) -> dict:
+    """Review every awaiting-review render for a channel's campaigns from its STORED QC verdict
+    (0 AI calls). Reject fires in copilot AND autopilot (a rejection never publishes and teaches the
+    scriptwriter — safe); approve only in autopilot; copilot instead tags approve-eligible items with
+    a hint the Review page shows for one-click confirm. Borderline / verdict-less → escalate."""
+    from core import autopilot
+
+    counts = {"approved": 0, "rejected": 0, "recommended": 0, "escalated": 0}
+    items = db.scalars(
+        select(BufferPoolItem).join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
+        .where(Campaign.channel_id == channel.id,
+               BufferPoolItem.status == BufferStatus.awaiting_review)
+        .order_by(BufferPoolItem.id)).all()
+    for item in items:
+        qc = (item.metadata_json or {}).get("qc")
+        action, reason = autopilot.review_decision(qc, approve_min, reject_max)
+        if action == "reject":
+            video_worker.apply_reject(db, item, "auto-review: " + reason, rerender=True)
+            counts["rejected"] += 1
+        elif action == "approve" and mode == "autopilot":
+            video_worker.apply_approve(db, item)
+            counts["approved"] += 1
+        else:  # copilot approve-eligible, or a borderline/verdict-less item → leave + hint
+            md = dict(item.metadata_json or {})
+            md["ap_hint"] = {"action": action, "reason": reason}
+            item.metadata_json = md
+            db.commit()
+            counts["recommended" if action == "approve" else "escalated"] += 1
+    return counts
+
+
+def autopilot_retry_channel(db, channel) -> int:
+    """Re-queue genuinely-failed renders (both modes — re-rendering never publishes). Skips operator
+    rejects (their decision stands), quota exhaustion (wait for the reset — don't burn it), and tasks
+    already retried to the cap."""
+    retried = 0
+    for t in db.scalars(
+            select(Task).join(Campaign, Task.campaign_id == Campaign.id)
+            .where(Campaign.channel_id == channel.id, Task.status == TaskStatus.FAILED)).all():
+        msg = (t.error_message or "").lower()
+        if "rejected in review" in msg and "auto-review" not in msg:
+            continue  # a human rejected this — don't silently re-render it
+        if t.retry_count >= AUTOPILOT_MAX_RETRIES:
+            continue
+        if any(k in msg for k in ("429", "quota", "exhaust", "rate limit")):
+            continue  # quota is spent; the reset is what fixes it, not another attempt now
+        t.status = TaskStatus.PENDING_QUEUE
+        t.error_message = None
+        t.progress_pct = 0
+        t.retry_count += 1
+        db.commit()
+        t.rq_job_id = task_queue.enqueue_render(t.id)
+        db.commit()
+        retried += 1
+    return retried
+
+
+def _published_today(db, campaign_id: int, now_local: datetime, tz_name: str | None) -> int:
+    """Count episodes published on `now_local`'s calendar day, in the campaign's timezone."""
+    from datetime import timezone as _tz
+
+    try:
+        tz = ZoneInfo(tz_name or settings.TIMEZONE)
+    except Exception:  # noqa: BLE001
+        tz = _tz.utc
+    day = now_local.date()
+    n = 0
+    for ft in db.scalars(select(Task.finished_at).where(
+            Task.campaign_id == campaign_id, Task.status == TaskStatus.COMPLETED,
+            Task.finished_at.is_not(None))).all():
+        if ft.replace(tzinfo=_tz.utc).astimezone(tz).date() == day:
+            n += 1
+    return n
+
+
+def catch_up_due(db, campaign: Campaign, now: datetime | None = None):
+    """A ready buffer item to publish NOW because a posting slot earlier today was missed (the buffer
+    was empty then and an episode is ready now) — so a finished video isn't wasted waiting a full day
+    for the next slot. Conservative: only auto-publish (slotted) campaigns, only on a posting day,
+    never while a slot is currently live (the normal publish handles that), never within the
+    recently-published guard, and only when fewer posts went out today than slots have already
+    passed. Returns the item or None. Bounds bursting to ≤1 per pass per campaign."""
+    cfg = campaign.config_json or {}
+    if not cfg.get("auto_publish", True):
+        return None
+    slots = sorted(cfg.get("posting_slots") or [])
+    if not slots:
+        return None  # continuous mode publishes at render time — nothing to catch up
+    now_l = now or local_now(cfg.get("timezone"))
+    if not is_posting_day(cfg.get("posting_days") or [], now_l):
+        return None
+    if is_within_slot(slots, now_l) or _recently_published(db, campaign.id, settings.SLOT_TOLERANCE_MINUTES):
+        return None
+    now_min = now_l.hour * 60 + now_l.minute
+    past_slots = 0
+    for s in slots:
+        try:
+            hh, mm = (int(x) for x in s.split(":"))
+        except ValueError:
+            continue
+        if hh * 60 + mm < now_min:
+            past_slots += 1
+    if past_slots == 0 or _published_today(db, campaign.id, now_l, cfg.get("timezone")) >= past_slots:
+        return None  # nothing missed yet today
+    return db.scalar(
+        select(BufferPoolItem).where(
+            BufferPoolItem.campaign_id == campaign.id, BufferPoolItem.status == BufferStatus.ready)
+        .order_by(BufferPoolItem.episode_number).limit(1))
+
+
+def autopilot_catchup_channel(db, channel, now: datetime | None = None) -> int:
+    """Publish one missed-slot recovery per eligible campaign on the channel (both modes — this only
+    completes the auto-publish the operator already configured, recovering a slot lost to an empty
+    buffer)."""
+    published = 0
+    for c in db.scalars(select(Campaign).where(
+            Campaign.channel_id == channel.id, Campaign.status == CampaignStatus.active)).all():
+        buf = catch_up_due(db, c, now)
+        if buf is not None:
+            task_queue.enqueue_publish(buf.id)
+            logger.info("Autopilot catch-up: campaign %s episode %s queued", c.id, buf.episode_number)
+            published += 1
+    return published
+
+
+def autopilot_pass(db=None, now: datetime | None = None, respect_cadence: bool = True) -> dict:
+    """One autopilot cycle across every channel that has it enabled. Per-channel cadence is enforced
+    with a Redis NX guard (default 3h, operator-set) so a frequent scheduler tick doesn't over-run a
+    channel. Read/enqueue only — never renders inline, so the single-render guarantee holds."""
+    from core import autopilot
+
+    own = db is None
+    db = db or SessionLocal()
+    summary: dict = {"channels": 0, "approved": 0, "rejected": 0, "recommended": 0,
+                     "escalated": 0, "retried": 0, "caught_up": 0}
+    try:
+        channels = db.scalars(select(Channel)).all()
+        for ch in channels:
+            mode = autopilot.ap_mode(ch)
+            if mode == "off":
+                continue
+            if respect_cadence:
+                try:
+                    if not task_queue.conn.set(f"autopilot:ch:{ch.id}", "1", nx=True,
+                                               ex=autopilot.ap_interval_seconds(ch)):
+                        continue  # not due yet for this channel
+                except Exception:  # noqa: BLE001 — no Redis → run every tick rather than never
+                    pass
+            approve_min, reject_max = autopilot.review_thresholds(ch)
+            try:
+                r = autopilot_review_channel(db, ch, mode, approve_min, reject_max)
+                caught = autopilot_catchup_channel(db, ch, now=now)
+                retried = autopilot_retry_channel(db, ch)
+            except Exception:  # noqa: BLE001 — one channel's fault must not stop the others
+                logger.warning("Autopilot failed for channel %s", ch.id, exc_info=True)
+                db.rollback()
+                continue
+            summary["channels"] += 1
+            for k in ("approved", "rejected", "recommended", "escalated"):
+                summary[k] += r[k]
+            summary["retried"] += retried
+            summary["caught_up"] += caught
+            acted = r["approved"] + r["rejected"] + retried + caught
+            if acted:
+                _autopilot_notify(db, ch, r, retried, caught)
+        return summary
+    finally:
+        if own:
+            db.close()
+
+
+def _autopilot_notify(db, channel, review: dict, retried: int, caught: int) -> None:
+    """Tell the operator what their autopilot did this cycle (Telegram), if anything material did."""
+    user = db.get(User, channel.user_id)
+    if user is None:
+        return
+    bits = []
+    if review["approved"]:
+        bits.append(f"approved+published {review['approved']}")
+    if review["rejected"]:
+        bits.append(f"rejected {review['rejected']} (re-rendering)")
+    if review["recommended"]:
+        bits.append(f"{review['recommended']} awaiting your ✓")
+    if caught:
+        bits.append(f"caught up {caught} missed slot(s)")
+    if retried:
+        bits.append(f"retried {retried} failed render(s)")
+    if bits:
+        video_worker._notify(user, f"🤖 Autopilot · {channel.channel_name}: " + ", ".join(bits) + ".")
+
+
 def periodic_tick(db=None, now: datetime | None = None) -> dict:
     """One automation cycle. `now` (local time) drives the posting-slot check; buffer expiry uses
     UTC internally to match DB timestamps. Returns a small summary dict."""
@@ -387,6 +582,13 @@ def periodic_tick(db=None, now: datetime | None = None) -> dict:
             except Exception:  # noqa: BLE001 — keep processing the remaining campaigns
                 logger.warning("Tick failed for campaign %s", campaign.id, exc_info=True)
                 db.rollback()
+
+        # Autopilot: enabled channels manage themselves (review/reject/retry/catch-up). Per-channel
+        # cadence is guarded inside the pass; a failure here must not stop the tick.
+        try:
+            summary["autopilot"] = autopilot_pass(db, now=now)
+        except Exception:  # noqa: BLE001
+            logger.warning("Autopilot pass failed", exc_info=True)
 
         # Self-improvement pass at most once per day (Redis NX guard across ticks/restarts).
         try:

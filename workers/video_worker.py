@@ -27,6 +27,7 @@ from database.models import BufferPoolItem, Campaign, ChannelClipUsage, Channel,
 from database.types import BufferStatus, CampaignStatus, Platform, TaskStatus
 from workers.task_queue import (
     clear_progress,
+    enqueue_publish,
     enqueue_render,
     set_progress,
     with_render_lock,
@@ -292,6 +293,52 @@ def _safe_remove(*paths: str) -> None:
                 os.remove(p)
         except OSError:
             logger.warning("Could not remove %s", p)
+
+
+# ── Shared review actions (used by the manual Review page AND the autopilot reviewer) ──
+def apply_approve(db, item) -> None:
+    """Approve a review render: mark its task queued and enqueue the publish job. DRY: the /assets
+    approve route and `core.autopilot`'s reviewer both go through here."""
+    task = db.scalar(select(Task).where(
+        Task.campaign_id == item.campaign_id, Task.episode_number == item.episode_number))
+    if task is not None:
+        task.status = TaskStatus.PENDING_QUEUE  # the publish job drives it to PUBLISHING
+        task.error_message = None
+        db.commit()
+    enqueue_publish(item.id)
+
+
+def apply_reject(db, item, reason: str = "", *, rerender: bool = False) -> None:
+    """Reject a render: delete its files, mark the buffer row rejected + the task FAILED with the
+    reason, and feed the reason into the campaign's avoid-list (learning loop). When `rerender`,
+    also queue a fresh render of the same episode — autopilot rejects re-render so the episode
+    regenerates with the new avoid-note; the manual Review reject leaves it FAILED for an explicit
+    Retry (unchanged behavior)."""
+    _safe_remove(*[p for p in (item.video_path, item.thumbnail_path) if p])
+    item.status = BufferStatus.rejected
+    reason = (reason or "").strip()[:200]
+    task = db.scalar(select(Task).where(
+        Task.campaign_id == item.campaign_id, Task.episode_number == item.episode_number))
+    if task is not None:
+        task.status = TaskStatus.FAILED
+        task.error_message = ("Rejected in review: " + reason) if reason else \
+            "Rejected in review. Use Retry to re-render."
+    if reason:  # the operator's/AI's reason becomes a permanent avoid-note (Loop 1 learning signal)
+        campaign = db.get(Campaign, item.campaign_id)
+        if campaign is not None:
+            learning = dict(campaign.learning_json or {})
+            reasons = (learning.get("reject_reasons") or [])[-9:]
+            learning["reject_reasons"] = reasons + [reason]
+            campaign.learning_json = learning
+    db.commit()
+    if rerender and task is not None:
+        task.status = TaskStatus.PENDING_QUEUE
+        task.error_message = None
+        task.progress_pct = 0
+        task.retry_count += 1
+        db.commit()
+        task.rq_job_id = enqueue_render(task.id)
+        db.commit()
 
 
 # ── Publish step (shared by auto mode and review-approval) ───────────────────
