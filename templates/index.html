@@ -14,7 +14,6 @@
   <span class="hitem"><span class="dot2 {{ 'ok' if health.redis else 'bad' }}" id="hd-redis"></span>
     Redis <b id="hl-redis">{{ 'connected' if health.redis else 'down' }}</b></span>
   <span class="hitem">Queue <b id="hv-queue">{{ health.queue_depth if health.queue_depth is not none else '—' }}</b> waiting</span>
-  <span class="hitem">Buffer <b id="hv-buffer">{{ health.buffer_ready }}</b> pre-rendered</span>
   <span class="hitem {{ 'warn' if health.disk_pct and health.disk_pct >= 85 }}">
     Disk <b id="hv-disk">{{ health.disk_pct ~ '%' if health.disk_pct is not none else '—' }}</b></span>
   <span class="hitem {{ 'warn' if health.ai_budget and health.ai_calls >= health.ai_budget * 0.8 }}">
@@ -65,6 +64,27 @@
   <div><b>All clear — nothing needs you right now.</b>
     <div class="meta">The factory is running on its own. Failed renders and videos awaiting review will surface here.</div></div>
 </div>
+
+{# ── Running now: what each active campaign is doing + when it posts (per-campaign operations) ── #}
+{% if active_running %}
+<div class="card">
+  <div class="flex between"><h3>Running now</h3><a href="/campaigns">All campaigns →</a></div>
+  <ul class="run-list mt">
+    {% for c in active_running %}
+    {% set o = ops.get(c.id) %}
+    {% set chan = chan_by_id.get(c.channel_id) %}
+    <li class="run-row">
+      <div class="grow">
+        <b><a href="/campaigns/{{ c.id }}">{{ c.topic_name }}</a></b>{% if chan %} <span class="meta">· {{ chan.channel_name }}</span>{% endif %}
+        {{ ui.now_next(o, c.status.value, c.config_json) }}
+      </div>
+      {% if o and o.awaiting_review %}<a class="pill AWAITING_REVIEW nowrap" href="/campaigns/{{ c.id }}/episodes">{{ o.awaiting_review }} to review</a>{% endif %}
+      <a class="btn ghost sm" href="/campaigns/{{ c.id }}">Open →</a>
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
 
 <div class="stats">
   {{ ui.stat(channels|length, 'Connected channels', href='/channels', live='channels') }}

@@ -698,6 +698,13 @@ and macros `sched_facts` / `now_next` feed all four surfaces. ADR-043.
   (playbook, A/B) plus the retention trend into ONE "Learning & results" card with a single empty
   state — so opening a young campaign no longer shows two empty cards above the fold. Verified: 176
   tests, ruff clean; active + pending hubs checked in a browser.
+- **Batch G — dashboard hierarchy + per-campaign view**: new "Running now" card — one row per
+  active campaign showing what it's doing (▶ Rendering Ep N · % / ⏭ Next post / ⚠ Buffer empty)
+  with a "N to review" chip + Open link — the operational per-campaign view the home page lacked.
+  De-duplicated the numeric bands (the health strip is now infra-only; the buffer count lives once
+  in the scorecard runway). Reading order: health → needs-attention → Running now → stat tiles →
+  scorecard → activity. `/api/summary` JSON keys unchanged. Verified: 176 tests, ruff clean;
+  dashboard checked in a browser.
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation

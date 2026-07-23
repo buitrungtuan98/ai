@@ -464,6 +464,8 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
                 Task.episode_number.in_({e for _, e in rev_pairs}))):
             if (t.campaign_id, t.episode_number) in rev_pairs:
                 review_ids[(t.campaign_id, t.episode_number)] = t.id
+    # "Running now" panel: one row per active campaign (what each is doing + when it posts next).
+    active_campaigns = [c for c in campaigns if c.status == CampaignStatus.active]
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -475,6 +477,8 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
             "attention_failed": attention_failed, "attention_review": attention_review,
             "review_ids": review_ids,
             "scorecard": _scorecard(db, user.id), "next_publish": _next_publish(db, user.id),
+            "active_running": active_campaigns,
+            "ops": _campaign_ops(db, user.id, active_campaigns),
             "camp_by_id": {c.id: c for c in campaigns},
             "chan_by_id": {c.id: c for c in channels},
         },

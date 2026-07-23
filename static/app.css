@@ -493,6 +493,13 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 /* Now & next strip: reuse .stats tiles but with a smaller number (values are short text, not big
    counts) so "Ep 6 · 62%" / "Thu 21:00" fit on one line. */
 .nn-strip .n { font-size: var(--fs-lg); }
+/* Dashboard "Running now" — one operational row per active campaign. */
+.run-list { list-style: none; margin: 0; padding: 0; }
+.run-row { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-3) 0;
+  border-top: 1px solid var(--border); }
+.run-row:first-child { border-top: none; }
+.run-row .grow { min-width: 0; }
+.run-row .nownext { margin-top: 2px; }
 
 /* Campaign-hub tab row (links to the campaign's scoped Assets / Tasks / Edit) */
 .hub-tabs { display: flex; gap: var(--sp-1); flex-wrap: wrap; border-bottom: 1px solid var(--border);
