@@ -9,7 +9,7 @@
 
 {% if scope_campaign %}
 {% set sc = chan_by_id.get(scope_campaign.channel_id) %}
-{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': sc.channel_name if sc else 'Channel', 'href': '/campaigns?channel=' ~ scope_campaign.channel_id}, {'label': scope_campaign.topic_name, 'href': '/campaigns/' ~ scope_campaign.id ~ '/performance'}, {'label': 'Episodes'}]) }}
+{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': sc.channel_name if sc else 'Channel', 'href': '/campaigns?channel=' ~ scope_campaign.channel_id}, {'label': scope_campaign.topic_name, 'href': '/campaigns/' ~ scope_campaign.id}, {'label': 'Episodes'}]) }}
 <p class="scope-note">Episodes for <b>{{ scope_campaign.topic_name }}</b>. <a href="/episodes">Show all →</a></p>
 {% elif scope_channel %}
 <p class="scope-note">Episodes for channel <b>{{ scope_channel.channel_name }}</b>. <a href="/episodes">Show all →</a></p>

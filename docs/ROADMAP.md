@@ -639,9 +639,15 @@ see. All additive — no route renamed/removed, Task Logs & Asset Pool kept as s
 - **Legacy URLs kept as 307 redirects** — `/campaigns/{id}/performance` → the hub Overview, GET
   `/campaigns/{id}/edit` → Settings — so bookmarks, cross-page links and tests still land right; POST
   `/edit` stays the form target and now returns to the hub Overview after saving. ADR-040.
+- **Batch 2 — one way in**: every cross-page campaign link now points at the hub — breadcrumbs on
+  Episodes/Review/Task Logs, the Episode view's action (was "Performance ↗", now "Campaign ↗"), and
+  the dashboard feed all resolve to `/campaigns/{id}`. The campaign card is decluttered from six
+  buttons (Start/Edit/Duplicate/Performance/Episodes/Delete) to three — **Open →** (the hub) + Start +
+  Delete — with the actionable "N awaiting review" count surfaced as a card hint; Edit/Duplicate/
+  Episodes now live as hub tabs/actions.
 - Verified: 173 tests (test_review_and_track_entry_points updated for the in-hub Episodes tab URL),
-  ruff clean, docs guard green; all three tabs + the pending-campaign Start action verified in a
-  browser at 1280px and 375px.
+  ruff clean, docs guard green; all three tabs, the pending-campaign Start action, and the decluttered
+  card list verified in a browser at 1280px and 375px.
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
