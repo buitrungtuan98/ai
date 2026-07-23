@@ -290,7 +290,7 @@
     <button class="btn" type="submit" name="start_now" value="1" id="save-start">▶ Create &amp; Start</button>
     <button class="btn ghost" type="submit" id="save-campaign">Create only</button>
     {% endif %}
-    <a class="btn ghost" href="/campaigns">Cancel</a>
+    <a class="btn ghost" href="{{ '/campaigns/' ~ campaign.id if editing else '/campaigns' }}">Cancel</a>
     <span class="grow"></span>
     <span class="hint" id="save-hint">{{ 'Save your changes.' if editing else '“Create & Start” begins rendering now; “Create only” saves it as pending.' }}</span>
   </div>

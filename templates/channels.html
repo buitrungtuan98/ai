@@ -30,7 +30,7 @@
     <p class="meta mt-sm">{{ cc.total }} campaign{{ 's' if cc.total != 1 }}{% if cc.active %} · {{ cc.active }} active{% endif %}</p>
     <div class="row-actions">
       <a class="btn ghost sm" href="/campaigns?channel={{ c.id }}">Campaigns →</a>
-      <a class="btn ghost sm" href="/assets?channel={{ c.id }}">Assets →</a>
+      <a class="btn ghost sm" href="/assets?channel={{ c.id }}">Review →</a>
     </div>
     {% if c.status.value != 'active' %}
     <p class="hint mt-sm">Re-authorise this channel to resume publishing — reconnect it via OAuth above.</p>

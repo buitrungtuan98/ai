@@ -907,7 +907,9 @@ def create_campaign(user: CurrentUser, db: DbDep, form: dict = Depends(_campaign
         campaign.status = CampaignStatus.active
         db.commit()
         video_worker.hydrate_buffers(db)
-    return _campaigns_redirect(campaign.channel_id)  # land beside the new campaign's channel
+    # Land on the new campaign's hub — you see what you just made (and, if started, it rendering)
+    # instead of hunting for it in the list.
+    return RedirectResponse(f"/campaigns/{campaign.id}", status_code=303)
 
 
 @app.get("/campaigns/{campaign_id}/settings", response_class=HTMLResponse)
@@ -1692,7 +1694,7 @@ def api_search(user: CurrentUser, db: DbDep, q: str = ""):
             Campaign.user_id == user.id, Campaign.topic_name.ilike(like))
             .order_by(Campaign.id.desc()).limit(6)):
         results.append({"type": "Campaign", "label": c.topic_name,
-                        "sub": c.status.value, "href": f"/episodes?campaign={c.id}"})
+                        "sub": c.status.value, "href": f"/campaigns/{c.id}"})
     camp_names = {c.id: c.topic_name for c in db.scalars(
         select(Campaign).where(Campaign.user_id == user.id))}
     for t in db.scalars(select(Task).where(

@@ -364,7 +364,7 @@ def test_api_search_across_types(client):
     tid, _bid = _make_episode(client)  # campaign "Space" + ep1 synopsis "A test episode"
     assert client.get("/api/search?q=a").json()["results"] == []  # <2 chars → nothing
     camp_hits = client.get("/api/search?q=Space").json()["results"]
-    assert any(r["type"] == "Campaign" and r["href"].startswith("/episodes?campaign=")
+    assert any(r["type"] == "Campaign" and r["href"].startswith("/campaigns/")
                for r in camp_hits)
     ep_hits = client.get("/api/search?q=test").json()["results"]
     assert any(r["type"] == "Episode" and r["href"] == f"/episodes/{tid}" for r in ep_hits)
