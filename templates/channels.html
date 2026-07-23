@@ -1,16 +1,11 @@
 {% extends "base.html" %}
+{% import "macros.html" as ui %}
 {% block title %}Channels · AI Video Factory{% endblock %}
 {% block content %}
-<div class="page-head">
-  <div>
-    <h1>Channels Manager</h1>
-    <p class="subtitle">Connect and manage your YouTube channels and Facebook pages.</p>
-  </div>
-  <div class="row-actions">
-    <a class="btn" href="/oauth/google/start">+ YouTube (OAuth)</a>
-    <button class="btn ghost" onclick="document.getElementById('fb-form').scrollIntoView()">+ Facebook Page</button>
-  </div>
-</div>
+{% call ui.page_head('Channels', 'Connect and manage your YouTube channels and Facebook pages.') %}
+  <a class="btn" href="/oauth/google/start">+ YouTube (OAuth)</a>
+  <button class="btn ghost" onclick="document.getElementById('fb-form').scrollIntoView({behavior:'smooth'})">+ Facebook Page</button>
+{% endcall %}
 
 {% if channels %}
 <div class="grid cols-3">
@@ -23,27 +18,41 @@
         <span class="platform {{ c.platform.value }}">{{ c.platform.value|title }}</span>
       </div>
     </div>
-    <div class="flex between">
-      <span class="pill {{ 'active' if c.status.value=='active' else 'failed' }}">{{ 'Active' if c.status.value=='active' else 'Expired Token' }}</span>
-      <form method="post" action="/channels/{{ c.id }}/delete" onsubmit="return confirm('Remove this channel?')">
+    <div class="flex between mt-sm">
+      {% if c.status.value == 'active' %}{{ ui.pill('active', 'Active') }}{% else %}{{ ui.pill('failed', 'Expired token') }}{% endif %}
+      <form method="post" action="/channels/{{ c.id }}/delete" data-confirm="Remove “{{ c.channel_name }}”? This also deletes its campaigns and rendered videos — it can't be undone." data-confirm-type="{{ c.channel_name }}">
         <button class="btn danger sm" type="submit">Remove</button>
       </form>
     </div>
+    {% set cc = camp_counts.get(c.id, {'total': 0, 'active': 0}) %}
+    <p class="meta mt-sm">{{ cc.total }} campaign{{ 's' if cc.total != 1 }}{% if cc.active %} · {{ cc.active }} active{% endif %}</p>
+    <div class="row-actions">
+      <a class="btn ghost sm" href="/campaigns?channel={{ c.id }}">Campaigns →</a>
+      <a class="btn ghost sm" href="/assets?channel={{ c.id }}">Assets →</a>
+    </div>
+    {% if c.status.value != 'active' %}
+    <p class="hint mt-sm">Re-authorise this channel to resume publishing — reconnect it via OAuth above.</p>
+    {% endif %}
   </div>
   {% endfor %}
 </div>
 {% else %}
-<div class="empty">No channels connected yet. Add a YouTube channel or Facebook page to get started.</div>
+{% call ui.empty('◉', 'No channels connected yet', 'Connect a YouTube channel or Facebook page — every campaign publishes to one of these.') %}
+  <div class="row-actions" style="justify-content:center">
+    <a class="btn" href="/oauth/google/start">+ YouTube (OAuth)</a>
+    <button class="btn ghost" onclick="document.getElementById('fb-form').scrollIntoView({behavior:'smooth'})">+ Facebook Page</button>
+  </div>
+{% endcall %}
 {% endif %}
 
 <div class="card mt" id="fb-form">
   <h3>Add a Facebook Page</h3>
   <p class="subtitle">Provide the Page ID and a permanent Page Access Token. Stored encrypted at rest.</p>
   <form method="post" action="/channels/facebook" class="mt">
-    <div class="form-row"><label>Page name</label><input name="channel_name" required placeholder="My Page"></div>
-    <div class="form-row"><label>Page ID</label><input name="page_id" required placeholder="1234567890"></div>
-    <div class="form-row"><label>Permanent Page Access Token</label><input name="page_access_token" required type="password"></div>
-    <div class="form-row"><label>Avatar URL (optional)</label><input name="avatar_url" placeholder="https://…"></div>
+    {% call ui.field('Page name') %}<input name="channel_name" required placeholder="My Page">{% endcall %}
+    {% call ui.field('Page ID') %}<input name="page_id" required placeholder="1234567890">{% endcall %}
+    {% call ui.field('Permanent Page Access Token') %}<input name="page_access_token" required type="password">{% endcall %}
+    {% call ui.field('Avatar URL (optional)') %}<input name="avatar_url" placeholder="https://…">{% endcall %}
     <button class="btn" type="submit">Connect Page</button>
   </form>
 </div>

@@ -1,28 +1,35 @@
 {% extends "base.html" %}
+{% import "macros.html" as ui %}
 {% block title %}Campaigns · AI Video Factory{% endblock %}
 {% block content %}
-<div class="page-head">
-  <div>
-    <h1>Campaigns Manager</h1>
-    <p class="subtitle">Each campaign is mapped to a connected channel and runs episodic content.</p>
-  </div>
+{% call ui.page_head('Campaigns', 'Each campaign is mapped to a connected channel and runs episodic content.') %}
   <a class="btn" href="/campaigns/new">+ New Campaign</a>
-</div>
+{% endcall %}
+
+{% if scope_channel %}
+{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': scope_channel.channel_name}]) }}
+<p class="scope-note">Campaigns for <b>{{ scope_channel.channel_name }}</b>. <a href="/campaigns">Show all campaigns →</a></p>
+{% endif %}
 
 {% if campaigns %}
-<div class="grid cols-3">
+{% if campaigns|length > 3 %}<input class="search" id="campaign-search" placeholder="🔎 Search campaigns…" aria-label="Search campaigns">{% endif %}
+<div class="grid cols-3" id="campaign-grid">
   {% for c in campaigns %}
-  <div class="card">
-    <div class="flex between">
+  {% set pct = (100 * c.current_episode / c.total_episodes)|round(0, 'floor')|int if c.total_episodes else 0 %}
+  <div class="card" data-search="{{ (c.topic_name ~ ' ' ~ c.status.value)|lower }}">
+    <div class="card-head">
       <h3>{{ c.topic_name }}</h3>
-      <span class="pill {{ c.status.value }}">{{ c.status.value|title }}</span>
+      {{ ui.pill(c.status.value) }}
     </div>
     <p class="meta">
-      Channel: {{ channels[c.channel_id].channel_name if c.channel_id in channels else '—' }}<br>
-      Episode {{ c.current_episode }} / {{ c.total_episodes }} ·
-      Language: {{ c.config_json.get('language','en') }}
+      <a href="/campaigns?channel={{ c.channel_id }}">{{ channels[c.channel_id].channel_name if c.channel_id in channels else '—' }}</a> ·
+      {{ c.config_json.get('language','en')|upper }}
     </p>
-    <div class="progress mt"><span style="width: {{ (100 * c.current_episode / c.total_episodes) if c.total_episodes else 0 }}%"></span></div>
+    <div class="flex between mt">
+      <span class="meta">Episode {{ c.current_episode }} / {{ c.total_episodes }}</span>
+      <span class="meta mono">{{ pct }}%</span>
+    </div>
+    {{ ui.progress(pct, 'done' if c.status.value == 'completed' else ('work' if c.status.value == 'active' else '')) }}
     <div class="row-actions mt">
       {% if c.status.value in ['pending','failed'] %}
       <form method="post" action="/campaigns/{{ c.id }}/start"><button class="btn sm" type="submit">▶ Start</button></form>
@@ -30,7 +37,10 @@
       <a class="btn ghost sm" href="/campaigns/{{ c.id }}/edit">Edit</a>
       <a class="btn ghost sm" href="/campaigns/new?from_id={{ c.id }}" title="Copy this campaign (e.g. another language/channel)">⧉ Duplicate</a>
       <a class="btn ghost sm" href="/campaigns/{{ c.id }}/performance" title="Stats + learned playbook">📊 Performance</a>
-      <form method="post" action="/campaigns/{{ c.id }}/delete" onsubmit="return confirm('Delete campaign?')">
+      {% set ac = asset_counts.get(c.id, {'ready': 0, 'awaiting_review': 0}) %}
+      <a class="btn ghost sm" href="/assets?campaign={{ c.id }}" title="This campaign's pre-rendered videos">▦ Assets{% if ac.ready + ac.awaiting_review %} ({{ ac.ready + ac.awaiting_review }}){% endif %}</a>
+      <a class="btn ghost sm" href="/tasks?campaign={{ c.id }}" title="This campaign's render jobs">≣ Tasks</a>
+      <form method="post" action="/campaigns/{{ c.id }}/delete" data-confirm="Delete “{{ c.topic_name }}” and all its episodes? This can't be undone.">
         <button class="btn danger sm" type="submit">Delete</button>
       </form>
     </div>
@@ -38,6 +48,21 @@
   {% endfor %}
 </div>
 {% else %}
-<div class="empty">No campaigns yet. Create one and map it to a channel.</div>
+{% call ui.empty('▤', 'No campaigns yet', 'Create your first campaign and map it to a channel — the AI can propose the whole thing from a topic.', '/campaigns/new', '+ New Campaign') %}{% endcall %}
 {% endif %}
+{% endblock %}
+{% block scripts %}
+<script>
+  (function () {
+    var s = document.getElementById("campaign-search");
+    var grid = document.getElementById("campaign-grid");
+    if (!s || !grid) return;
+    s.addEventListener("input", function () {
+      var q = s.value.trim().toLowerCase();
+      grid.querySelectorAll(".card").forEach(function (c) {
+        c.hidden = q && (c.dataset.search || "").indexOf(q) < 0;
+      });
+    });
+  })();
+</script>
 {% endblock %}

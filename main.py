@@ -224,12 +224,124 @@ def _task_counts(db, user_id: int) -> dict:
     }
 
 
+def _buffer_counts(db, user_id: int) -> dict:
+    """Per-campaign buffer tallies for the rollup links: {campaign_id: {ready, awaiting_review}}."""
+    rows = db.execute(
+        select(BufferPoolItem.campaign_id, BufferPoolItem.status, func.count())
+        .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
+        .where(Campaign.user_id == user_id)
+        .group_by(BufferPoolItem.campaign_id, BufferPoolItem.status)
+    ).all()
+    out: dict = {}
+    for cid, status, n in rows:
+        d = out.setdefault(cid, {"ready": 0, "awaiting_review": 0})
+        if status == BufferStatus.ready:
+            d["ready"] += n
+        elif status == BufferStatus.awaiting_review:
+            d["awaiting_review"] += n
+    return out
+
+
+def _scorecard(db, user_id: int) -> dict:
+    """Trajectory signals for the dashboard: 7-day publish throughput, buffer runway, and
+    week-over-week retention. Read-only; answers 'is the factory winning?'."""
+    from datetime import datetime, timedelta
+
+    now = datetime.utcnow()
+    today = now.date()
+    recent = db.scalars(
+        select(Task).where(Task.user_id == user_id, Task.status == TaskStatus.COMPLETED,
+                           Task.updated_at >= now - timedelta(days=14))
+    ).all()
+    days = [today - timedelta(days=i) for i in range(6, -1, -1)]
+    per_day = {d: 0 for d in days}
+    ret_this, ret_prev = [], []
+    for t in recent:
+        when = t.finished_at or t.updated_at
+        if not when:
+            continue
+        if when.date() in per_day:
+            per_day[when.date()] += 1
+        r = (t.stats_json or {}).get("avg_pct_viewed") if t.stats_json else None
+        if r is not None:
+            (ret_this if (now - when).days < 7 else ret_prev).append(r)
+    thr = [per_day[d] for d in days]
+    active = db.scalars(select(Campaign).where(
+        Campaign.user_id == user_id, Campaign.status == CampaignStatus.active)).all()
+    demand = sum(len((c.config_json or {}).get("posting_slots") or []) or 1 for c in active)
+    ready = db.scalar(
+        select(func.count()).select_from(BufferPoolItem)
+        .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
+        .where(Campaign.user_id == user_id, BufferPoolItem.status == BufferStatus.ready)) or 0
+    return {
+        "throughput": thr, "throughput_days": [d.strftime("%a") for d in days],
+        "throughput_max": max(thr) if thr else 0, "published_7d": sum(thr),
+        "ready": ready, "runway_days": round(ready / demand, 1) if demand else None,
+        "retention_this": round(sum(ret_this) / len(ret_this), 1) if ret_this else None,
+        "retention_prev": round(sum(ret_prev) / len(ret_prev), 1) if ret_prev else None,
+    }
+
+
+def _next_publish(db, user_id: int):
+    """Soonest upcoming posting slot across active auto-publish campaigns (each in its own tz)."""
+    from datetime import timedelta
+
+    from workers.scheduler import WEEKDAY_KEYS, local_now
+
+    active = db.scalars(select(Campaign).where(
+        Campaign.user_id == user_id, Campaign.status == CampaignStatus.active)).all()
+    best = None
+    for c in active:
+        cfg = c.config_json or {}
+        if not cfg.get("auto_publish", True):
+            continue
+        slots = sorted(cfg.get("posting_slots") or [])
+        if not slots:
+            continue
+        allowed = cfg.get("posting_days") or []
+        now_local = local_now(cfg.get("timezone"))
+        found = None
+        for dd in range(0, 8):
+            day = now_local + timedelta(days=dd)
+            if allowed and WEEKDAY_KEYS[day.weekday()] not in allowed:
+                continue
+            for s in slots:
+                try:
+                    hh, mm = (int(x) for x in s.split(":"))
+                except ValueError:
+                    continue
+                cand = day.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                if cand > now_local:
+                    found = (cand, s)
+                    break
+            if found:
+                break
+        if not found:
+            continue
+        hours = (found[0] - now_local).total_seconds() / 3600
+        if best is None or hours < best["in_hours"]:
+            best = {"in_hours": round(hours, 1), "slot": found[1],
+                    "campaign": c.topic_name, "when": found[0].strftime("%a %H:%M")}
+    return best
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request, user: CurrentUser, db: DbDep):
     channels = db.scalars(select(Channel).where(Channel.user_id == user.id)).all()
     campaigns = db.scalars(select(Campaign).where(Campaign.user_id == user.id)).all()
     tasks = db.scalars(
-        select(Task).where(Task.user_id == user.id).order_by(Task.id.desc()).limit(10)
+        select(Task).where(Task.user_id == user.id).order_by(Task.id.desc()).limit(12)
+    ).all()
+    # Triage inbox: the concrete items that need a human, most-recent first.
+    attention_failed = db.scalars(
+        select(Task).where(Task.user_id == user.id, Task.status == TaskStatus.FAILED)
+        .order_by(Task.updated_at.desc()).limit(8)
+    ).all()
+    attention_review = db.scalars(
+        select(BufferPoolItem)
+        .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
+        .where(Campaign.user_id == user.id, BufferPoolItem.status == BufferStatus.awaiting_review)
+        .order_by(BufferPoolItem.id.desc()).limit(8)
     ).all()
     return templates.TemplateResponse(
         request,
@@ -239,6 +351,8 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
             "tasks": tasks, "nav": "dashboard",
             "health": _system_health(db),
             "counts": _task_counts(db, user.id),
+            "attention_failed": attention_failed, "attention_review": attention_review,
+            "scorecard": _scorecard(db, user.id), "next_publish": _next_publish(db, user.id),
             "camp_by_id": {c.id: c for c in campaigns},
             "chan_by_id": {c.id: c for c in channels},
         },
@@ -249,8 +363,20 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
 @app.get("/channels", response_class=HTMLResponse)
 def channels_page(request: Request, user: CurrentUser, db: DbDep):
     channels = db.scalars(select(Channel).where(Channel.user_id == user.id)).all()
+    # Rollup: campaigns per channel (total + active) for the drill-down links.
+    camp_counts: dict = {}
+    for chid, status, n in db.execute(
+        select(Campaign.channel_id, Campaign.status, func.count())
+        .where(Campaign.user_id == user.id).group_by(Campaign.channel_id, Campaign.status)
+    ).all():
+        d = camp_counts.setdefault(chid, {"total": 0, "active": 0})
+        d["total"] += n
+        if status == CampaignStatus.active:
+            d["active"] += n
     return templates.TemplateResponse(
-        request, "channels.html", {"request": request, "user": user, "channels": channels, "nav": "channels"}
+        request, "channels.html",
+        {"request": request, "user": user, "channels": channels, "nav": "channels",
+         "camp_counts": camp_counts},
     )
 
 
@@ -351,13 +477,18 @@ def _google_flow(scopes: list[str], redirect_path: str):
 
 # ── Campaigns Manager ────────────────────────────────────────────────────────
 @app.get("/campaigns", response_class=HTMLResponse)
-def campaigns_page(request: Request, user: CurrentUser, db: DbDep):
-    campaigns = db.scalars(select(Campaign).where(Campaign.user_id == user.id)).all()
+def campaigns_page(request: Request, user: CurrentUser, db: DbDep, channel: int | None = None):
+    q = select(Campaign).where(Campaign.user_id == user.id)
+    if channel:  # scoped to one channel (drill-down from Channels)
+        q = q.where(Campaign.channel_id == channel)
+    campaigns = db.scalars(q).all()
     channels = {c.id: c for c in db.scalars(select(Channel).where(Channel.user_id == user.id)).all()}
     return templates.TemplateResponse(
         request,
         "campaigns.html",
-        {"request": request, "user": user, "campaigns": campaigns, "channels": channels, "nav": "campaigns"},
+        {"request": request, "user": user, "campaigns": campaigns, "channels": channels, "nav": "campaigns",
+         "asset_counts": _buffer_counts(db, user.id),
+         "scope_channel": channels.get(channel) if channel else None},
     )
 
 
@@ -604,7 +735,8 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
 
 
 @app.post("/campaigns")
-def create_campaign(user: CurrentUser, db: DbDep, form: dict = Depends(_campaign_form)):
+def create_campaign(user: CurrentUser, db: DbDep, form: dict = Depends(_campaign_form),
+                    start_now: str = Form("")):
     # Verify the target channel belongs to the user (tenant isolation).
     channel = db.get(Channel, form["channel_id"])
     if channel is None or channel.user_id != user.id:
@@ -616,6 +748,10 @@ def create_campaign(user: CurrentUser, db: DbDep, form: dict = Depends(_campaign
     )
     db.add(campaign)
     db.commit()
+    if start_now:  # "Create & Start" — same path as the standalone start route
+        campaign.status = CampaignStatus.active
+        db.commit()
+        video_worker.hydrate_buffers(db)
     return RedirectResponse("/campaigns", status_code=303)
 
 
@@ -751,19 +887,26 @@ def save_credentials(
 # ── Asset Pool Cache (+ preview & review) ────────────────────────────────────
 @app.get("/assets", response_class=HTMLResponse)
 def assets_page(request: Request, user: CurrentUser, db: DbDep,
-                flash: str = "", flash_reason: str = ""):
-    items = db.scalars(
-        select(BufferPoolItem)
-        .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
-        .where(Campaign.user_id == user.id)
-        .order_by(BufferPoolItem.id.desc())
-    ).all()
+                flash: str = "", flash_reason: str = "",
+                campaign: int | None = None, channel: int | None = None):
+    q = (select(BufferPoolItem)
+         .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
+         .where(Campaign.user_id == user.id))
+    if campaign:  # drill-down scope from a campaign
+        q = q.where(BufferPoolItem.campaign_id == campaign)
+    if channel:   # drill-down scope from a channel
+        q = q.where(BufferPoolItem.channel_id == channel)
+    items = db.scalars(q.order_by(BufferPoolItem.id.desc())).all()
     campaigns = db.scalars(select(Campaign).where(Campaign.user_id == user.id)).all()
+    chan_by_id = {c.id: c for c in db.scalars(select(Channel).where(Channel.user_id == user.id)).all()}
+    camp_by_id = {c.id: c for c in campaigns}
     previewable = {i.id for i in items if i.video_path and os.path.exists(i.video_path)}
     return templates.TemplateResponse(
         request, "assets.html",
         {"request": request, "user": user, "items": items, "nav": "assets",
-         "camp_by_id": {c.id: c for c in campaigns}, "previewable": previewable,
+         "camp_by_id": camp_by_id, "chan_by_id": chan_by_id, "previewable": previewable,
+         "scope_campaign": camp_by_id.get(campaign) if campaign else None,
+         "scope_channel": chan_by_id.get(channel) if channel else None,
          # Post-action feedback (whitelisted — never echo arbitrary input back into the page).
          "flash": flash if flash in ("publish", "rerender", "rejected", "missing") else "",
          "flash_reason": flash_reason[:200]},
@@ -960,7 +1103,10 @@ def campaign_performance(request: Request, user: CurrentUser, db: DbDep,
         request, "performance.html",
         {"request": request, "user": user, "nav": "campaigns", "campaign": campaign,
          "episodes": episodes, "learning": campaign.learning_json or {},
-         "best_id": best.id if best else None, "variants": ab_variant_summary(episodes)},
+         "best_id": best.id if best else None, "variants": ab_variant_summary(episodes),
+         # Campaign-hub context: parent channel + its buffer tally for the drill-down links.
+         "channel": db.get(Channel, campaign.channel_id),
+         "asset_count": _buffer_counts(db, user.id).get(campaign.id, {"ready": 0, "awaiting_review": 0})},
     )
 
 
@@ -1028,8 +1174,15 @@ def calendar_page(request: Request, user: CurrentUser, db: DbDep):
 
 # ── Real-Time Task Logs ──────────────────────────────────────────────────────
 @app.get("/tasks", response_class=HTMLResponse)
-def tasks_page(request: Request, user: CurrentUser):
-    return templates.TemplateResponse(request, "tasks.html", {"request": request, "user": user, "nav": "tasks"})
+def tasks_page(request: Request, user: CurrentUser, db: DbDep, campaign: int | None = None):
+    scope = None
+    if campaign:  # drill-down scope from a campaign (client-side filter over the live feed)
+        scope = db.get(Campaign, campaign)
+        if scope is not None and scope.user_id != user.id:
+            scope = None
+    return templates.TemplateResponse(
+        request, "tasks.html",
+        {"request": request, "user": user, "nav": "tasks", "scope_campaign": scope})
 
 
 @app.get("/api/tasks")
@@ -1064,6 +1217,19 @@ def api_tasks(user: CurrentUser, db: DbDep):
             "updated_at": t.updated_at.isoformat() if t.updated_at else None,
         })
     return {"tasks": out}
+
+
+@app.get("/api/summary")
+def api_summary(user: CurrentUser, db: DbDep):
+    """Read-only live snapshot for the header attention badge + dashboard auto-refresh. Reuses the
+    same helpers the dashboard renders from, so polled values never diverge from a full reload."""
+    channels = db.scalar(
+        select(func.count()).select_from(Channel).where(Channel.user_id == user.id)) or 0
+    active = db.scalar(
+        select(func.count()).select_from(Campaign).where(
+            Campaign.user_id == user.id, Campaign.status == CampaignStatus.active)) or 0
+    return {"health": _system_health(db), "counts": _task_counts(db, user.id),
+            "channels": channels, "active_campaigns": active}
 
 
 @app.post("/api/tasks/{task_id}/retry")

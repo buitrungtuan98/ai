@@ -1,22 +1,30 @@
 {% extends "base.html" %}
+{% import "macros.html" as ui %}
 {% block title %}Task Logs · AI Video Factory{% endblock %}
 {% block content %}
-<div class="page-head">
-  <div>
-    <h1>Real-Time Task Logs</h1>
-    <p class="subtitle">Live pipeline state · polls every 3s. Pending Queue → AI Generation → Audio Synced → Rendering → Publishing → Completed.</p>
+{% call ui.page_head('Task Logs', 'Live render pipeline · refreshes every few seconds. Pending → AI Generation → Audio Synced → Rendering → Publishing → Completed. Retry a failed episode in one tap.') %}{% endcall %}
+
+{% if scope_campaign %}
+{{ ui.breadcrumb([{'label': 'Campaigns', 'href': '/campaigns'}, {'label': scope_campaign.topic_name, 'href': '/campaigns/' ~ scope_campaign.id ~ '/performance'}, {'label': 'Tasks'}]) }}
+<p class="scope-note">Render jobs for <b>{{ scope_campaign.topic_name }}</b>. <a href="/tasks">Show all →</a></p>
+{% endif %}
+
+<input class="search" id="task-filter" placeholder="🔎 Filter by topic, channel, status or #id…" aria-label="Filter tasks">
+<div class="card">
+  <div class="table-wrap">
+    <table class="stack-table">
+      <thead>
+        <tr><th>Task</th><th>Episode</th><th>Status</th><th>Progress</th><th>Time</th><th>Result</th><th></th></tr>
+      </thead>
+      <tbody id="task-rows"{% if scope_campaign %} data-scope-campaign="{{ scope_campaign.id }}"{% endif %}>
+        <tr><td colspan="7">
+          <div class="skeleton sk-line" style="width:80%"></div>
+          <div class="skeleton sk-line"></div>
+          <div class="skeleton sk-line" style="width:55%"></div>
+        </td></tr>
+      </tbody>
+    </table>
   </div>
 </div>
-
-<div class="card">
-  <table>
-    <thead><tr><th>Task</th><th>Episode</th><th>Status</th><th>Progress</th><th>Time</th><th>Result</th><th></th></tr></thead>
-    <tbody id="task-rows">
-      <tr><td colspan="7"><div class="empty">Loading…</div></td></tr>
-    </tbody>
-  </table>
-</div>
 {% endblock %}
-{% block scripts %}
-<script src="/static/app.js"></script>
-{% endblock %}
+{% block scripts %}<script src="/static/app.js"></script>{% endblock %}

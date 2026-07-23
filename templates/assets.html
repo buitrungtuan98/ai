@@ -1,81 +1,166 @@
 {% extends "base.html" %}
+{% import "macros.html" as ui %}
 {% block title %}Asset Pool · AI Video Factory{% endblock %}
 {% block content %}
-<div class="page-head"><div><h1>Asset Pool Cache</h1>
-  <p class="subtitle">Pre-rendered episodes. Review-mode videos wait here for your approval — watch them before anything is published.</p></div></div>
+{% call ui.page_head('Asset Pool', 'Pre-rendered episodes. Review-mode videos wait here for your approval — watch them before anything is published.') %}{% endcall %}
 
 {% if flash == 'publish' %}
-<div class="banner">⏳ <b>Publish queued.</b> The episode uploads as soon as the worker is free (one job at a
+{% call ui.banner('success') %}⏳ <b>Publish queued.</b> The episode uploads as soon as the worker is free (one job at a
   time — a render in progress runs first). Track it in <a href="/tasks">Task Logs</a>; this card flips to
-  <i>Consumed</i> with the video link once it's live.</div>
+  <i>Consumed</i> with the video link once it's live.{% endcall %}
 {% elif flash == 'rerender' %}
-<div class="banner">⏳ <b>Re-render queued.</b> The old files were discarded; a fresh render starts as soon as
-  the worker is free. Watch progress in <a href="/tasks">Task Logs</a>.</div>
+{% call ui.banner() %}⏳ <b>Re-render queued.</b> The old files were discarded; a fresh render starts as soon as
+  the worker is free. Watch progress in <a href="/tasks">Task Logs</a>.{% endcall %}
 {% elif flash == 'rejected' %}
-<div class="banner">🗑 <b>Rejected.</b> The render was deleted{% if flash_reason %} and the AI was told to avoid:
-  “{{ flash_reason }}”{% endif %}. Re-render it anytime from Task Logs → Retry.</div>
+{% call ui.banner() %}🗑 <b>Rejected.</b> The render was deleted{% if flash_reason %} and the AI was told to avoid:
+  “{{ flash_reason }}”{% endif %}. Re-render it anytime from Task Logs → Retry.{% endcall %}
 {% elif flash == 'missing' %}
-<div class="banner danger">⚠️ <b>That episode's video file is no longer on disk</b>, so it can't be published.
-  Use <b>Discard &amp; re-render</b> on the card to produce it again.</div>
+{% call ui.banner('danger') %}⚠️ <b>That episode's video file is no longer on disk</b>, so it can't be published.
+  Use <b>Discard &amp; re-render</b> on the card to produce it again.{% endcall %}
+{% endif %}
+
+{% if scope_campaign %}
+{% set sc = chan_by_id.get(scope_campaign.channel_id) %}
+{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': sc.channel_name if sc else 'Channel', 'href': '/campaigns?channel=' ~ scope_campaign.channel_id}, {'label': scope_campaign.topic_name, 'href': '/campaigns/' ~ scope_campaign.id ~ '/performance'}, {'label': 'Assets'}]) }}
+<p class="scope-note">Assets for <b>{{ scope_campaign.topic_name }}</b>. <a href="/assets">Show all →</a></p>
+{% elif scope_channel %}
+{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': scope_channel.channel_name}, {'label': 'Assets'}]) }}
+<p class="scope-note">Assets for channel <b>{{ scope_channel.channel_name }}</b>. <a href="/assets">Show all →</a></p>
 {% endif %}
 
 {% if items %}
+<div class="filter-bar" id="asset-filter">
+  <button type="button" class="chip active" data-filter="all">All ({{ items|length }})</button>
+  <button type="button" class="chip" data-filter="awaiting_review">Awaiting review ({{ items|selectattr('status.value','equalto','awaiting_review')|list|length }})</button>
+  <button type="button" class="chip" data-filter="ready">Ready ({{ items|selectattr('status.value','equalto','ready')|list|length }})</button>
+  <button type="button" class="chip" data-filter="consumed">Published ({{ items|selectattr('status.value','equalto','consumed')|list|length }})</button>
+</div>
+<p class="hint" style="margin:-8px 0 16px">Keyboard: <b>J</b>/<b>K</b> move · <b>A</b> approve · <b>R</b> reject.</p>
 <div class="grid cols-3">
   {% for i in items %}
   {% set camp = camp_by_id.get(i.campaign_id) %}
-  <div class="card">
-    <div class="flex between">
-      <h3>{{ camp.topic_name if camp else 'C' ~ i.campaign_id }} · Ep {{ i.episode_number }}</h3>
-      <span class="pill {{ 'completed' if i.status.value=='consumed' else ('failed' if i.status.value in ['expired','rejected'] else ('AWAITING_REVIEW' if i.status.value=='awaiting_review' else 'active')) }}">
-        {{ i.status.value.replace('_',' ')|title }}</span>
-    </div>
-    <p class="meta">{{ i.metadata_json.get('title','—') }}
-      {% if i.metadata_json.get('variant') %} · Variant {{ i.metadata_json.get('variant') }}{% endif %}<br>
-      {{ i.created_at.strftime('%Y-%m-%d %H:%M') if i.created_at else '' }} UTC</p>
-    {% set qc = i.metadata_json.get('qc') %}
-    {% if qc %}
-    <p class="hint">🔍 Auto-QC: {{ 'passed' if qc.get('passed') else 'FAILED' }}{% if qc.get('score') is not none %} · score {{ qc.get('score') }}/10{% endif %}{% if qc.get('attempts', 1) > 1 %} · {{ qc.get('attempts') }} attempts{% endif %}{% if qc.get('issues') %} · {{ qc.get('issues')|join('; ') }}{% endif %}</p>
-    {% endif %}
-
+  {% set pill_cls = 'completed' if i.status.value=='consumed' else ('failed' if i.status.value in ['expired','rejected'] else ('AWAITING_REVIEW' if i.status.value=='awaiting_review' else 'active')) %}
+  <div class="card asset-card" data-status="{{ i.status.value }}">
     {% if i.id in previewable %}
     <video class="preview" controls preload="metadata"
            {% if i.thumbnail_path %}poster="/assets/{{ i.id }}/thumb"{% endif %}
            src="/assets/{{ i.id }}/video"></video>
     {% elif i.status.value == 'consumed' %}
-    <p class="hint">Published — local file cleaned up.</p>
+    <div class="empty" style="padding:var(--sp-6)">Published — local file cleaned up.</div>
+    {% endif %}
+
+    <div class="card-head mt">
+      <h3><a href="/campaigns/{{ i.campaign_id }}/performance">{{ camp.topic_name if camp else 'C' ~ i.campaign_id }}</a> · Ep {{ i.episode_number }}</h3>
+      {{ ui.pill(pill_cls, i.status.value.replace('_',' ')|title) }}
+    </div>
+    {% set ch = chan_by_id.get(i.channel_id) %}
+    <p class="meta">{{ i.metadata_json.get('title','—') }}
+      {% if i.metadata_json.get('variant') %} · Variant {{ i.metadata_json.get('variant') }}{% endif %}<br>
+      {% if ch %}<a href="/assets?channel={{ i.channel_id }}">{{ ch.channel_name }}</a> · {% endif %}<span {% if i.created_at %}data-reltime="{{ i.created_at.isoformat() }}Z"{% endif %}>{{ i.created_at.strftime('%Y-%m-%d %H:%M') if i.created_at else '' }} UTC</span></p>
+    {% set qc = i.metadata_json.get('qc') %}
+    {% if qc %}
+    <p class="hint">{% if qc.get('passed') %}🟢 Auto-QC passed{% else %}🔴 Auto-QC FAILED{% endif %}{% if qc.get('score') is not none %} · score {{ qc.get('score') }}/10{% endif %}{% if qc.get('attempts', 1) > 1 %} · {{ qc.get('attempts') }} attempts{% endif %}{% if qc.get('issues') %} · {{ qc.get('issues')|join('; ') }}{% endif %}</p>
     {% endif %}
 
     {% if i.status.value == 'ready' %}
     <div class="row-actions mt">
       <form method="post" action="/assets/{{ i.id }}/publish-now"
-            onsubmit="return confirm('Publish this episode right now (skip the posting slot)?')">
+            data-confirm="Publish this episode right now, skipping the posting slot?">
         <button class="btn sm" type="submit">▶ Publish now</button></form>
       <form method="post" action="/assets/{{ i.id }}/rerender"
-            onsubmit="return confirm('Discard this render and re-render the episode?')">
+            data-confirm="Discard this render and re-render the episode?">
         <button class="btn danger sm" type="submit">🗑 Discard &amp; re-render</button></form>
     </div>
     <p class="hint">Ready = pre-rendered, waiting for the campaign's next posting slot.</p>
     {% endif %}
 
     {% if i.status.value == 'awaiting_review' %}
+    {% set L = (camp.learning_json or {}) if camp else {} %}
+    {% if L.get('playbook') or L.get('reject_reasons') %}
+    <details class="disclosure criteria mt">
+      <summary>What good looks like for this channel</summary>
+      <div class="disclosure-body">
+        {% if L.get('playbook') %}<ul class="crit-list">{% for l in L.get('playbook')[:3] %}<li>{{ l }}</li>{% endfor %}</ul>{% endif %}
+        {% if L.get('reject_reasons') %}<p class="hint">Avoid (from your past reviews): {{ L.get('reject_reasons')|join(' · ') }}</p>{% endif %}
+      </div>
+    </details>
+    {% endif %}
     <div class="row-actions mt">
       <form method="post" action="/assets/{{ i.id }}/approve"><button class="btn sm" type="submit">✓ Approve &amp; publish</button></form>
       <form method="post" action="/assets/{{ i.id }}/rerender"
-            onsubmit="return confirm('Discard this render and re-render the episode?')">
+            data-confirm="Discard this render and re-render the episode?">
         <button class="btn ghost sm" type="submit">🗑 Re-render</button></form>
     </div>
     <form method="post" action="/assets/{{ i.id }}/reject" class="mt"
-          onsubmit="return confirm('Reject and delete this render?')">
-      <div class="flex" style="gap:8px;">
-        <input name="reason" placeholder="Why? (teaches the AI — e.g. 'mở đầu chậm quá')" style="flex:1">
-        <button class="btn danger sm" type="submit">✕ Reject</button>
+          data-confirm="Reject and delete this render? The reason teaches the AI what to avoid.">
+      <div class="field-inline">
+        <input name="reason" placeholder="Why? (teaches the AI — e.g. 'mở đầu chậm quá')" class="grow">
+        <button class="btn danger sm nowrap" type="submit">✕ Reject</button>
       </div>
+      {% set reasons = (camp.learning_json or {}).get('reject_reasons') if camp else none %}
+      {% if reasons %}
+      <div class="reason-chips">
+        {% for r in reasons[:6] %}<button type="button" class="chip sm reason-chip" data-reason="{{ r }}">{{ r }}</button>{% endfor %}
+      </div>
+      {% endif %}
+      <p class="hint">Your reason becomes a permanent <b>avoid-note</b> — the scriptwriter follows it on every future episode.</p>
     </form>
     {% endif %}
   </div>
   {% endfor %}
 </div>
 {% else %}
-<div class="empty">Buffer pool is empty. Active campaigns will pre-render episodes here; review-mode campaigns will wait here for your approval.</div>
+{% call ui.empty('▦', 'Buffer pool is empty', 'Active campaigns pre-render episodes here; review-mode campaigns park each video here for your approval before it publishes.', '/campaigns', 'View campaigns') %}{% endcall %}
 {% endif %}
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  // Filter chips — client-side show/hide by status.
+  const bar = document.getElementById("asset-filter");
+  function apply(f) {
+    document.querySelectorAll(".asset-card").forEach(function (c) {
+      c.hidden = !(f === "all" || c.dataset.status === f);
+    });
+    kbdIdx = -1; highlight();
+  }
+  if (bar) bar.addEventListener("click", function (e) {
+    const b = e.target.closest("[data-filter]"); if (!b) return;
+    bar.querySelectorAll(".chip").forEach(function (c) { c.classList.remove("active"); });
+    b.classList.add("active"); apply(b.dataset.filter);
+  });
+
+  // Reject-reason quick-pick — fill the reason input from a learned-reason chip.
+  document.addEventListener("click", function (e) {
+    const chip = e.target.closest(".reason-chip"); if (!chip) return;
+    const form = chip.closest("form");
+    const inp = form && form.querySelector('input[name="reason"]');
+    if (inp) { inp.value = chip.dataset.reason; inp.focus(); }
+  });
+
+  // Keyboard review: J/K move through awaiting-review cards, A approve, R focus reject.
+  let kbdIdx = -1;
+  function reviewCards() {
+    return Array.prototype.filter.call(
+      document.querySelectorAll('.asset-card[data-status="awaiting_review"]'), function (c) { return !c.hidden; });
+  }
+  function highlight() {
+    document.querySelectorAll(".asset-card").forEach(function (c) { c.classList.remove("kbd-active"); });
+    const list = reviewCards();
+    if (kbdIdx >= 0 && kbdIdx < list.length) {
+      list[kbdIdx].classList.add("kbd-active");
+      list[kbdIdx].scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  }
+  document.addEventListener("keydown", function (e) {
+    if (/^(input|textarea|select)$/i.test(e.target.tagName || "")) return;  // don't hijack typing
+    const list = reviewCards(); if (!list.length) return;
+    const k = e.key.toLowerCase();
+    if (k === "j") { kbdIdx = Math.min((kbdIdx < 0 ? -1 : kbdIdx) + 1, list.length - 1); highlight(); e.preventDefault(); }
+    else if (k === "k") { kbdIdx = Math.max((kbdIdx < 0 ? 0 : kbdIdx) - 1, 0); highlight(); e.preventDefault(); }
+    else if (k === "a" && kbdIdx >= 0) { const f = list[kbdIdx].querySelector('form[action$="/approve"]'); if (f) f.submit(); }
+    else if (k === "r" && kbdIdx >= 0) { const inp = list[kbdIdx].querySelector('input[name="reason"]'); if (inp) { inp.focus(); e.preventDefault(); } }
+  });
+})();
+</script>
 {% endblock %}

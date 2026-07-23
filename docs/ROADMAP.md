@@ -300,6 +300,87 @@ measured at TTS time (audio remains ground truth). Proposed by the AI designer.
   playbook distiller.
 - Verified: 137 tests passing (4 new), ruff clean, docs guard green.
 
+## Dashboard UX/UI refactor `DONE`
+- **Design system** in `static/app.css`: dark-first token layer (colour/type/spacing/radii/elevation)
+  with ONE semantic status-colour set (`--st-*`) reused by pills, banners, table highlights and chart
+  bars; a 12-column grid + auto-fill card grid on a shared spacing rhythm.
+- **Component layer**: `templates/macros.html` (pill/page_head/card/stat/progress/bar/banner/empty/field)
+  replaces the copy-pasted markup across all pages; `static/ui.js` adds a shared `busyButton` helper
+  (generalises the async-button idiom) and the mobile drawer-nav toggle with aria state.
+- **Responsive**: intent-grouped nav (Monitor/Content/Setup); the sidebar becomes an off-canvas drawer
+  under a top bar ≤720px (it previously vanished with no replacement); tables stack into labelled cards
+  on mobile; ≥44px tap targets; both 375px (Operator) and 1280px (Strategist) are first-class.
+- **Per-persona pages + all system states**: health strip with a deliberate degraded (red) state +
+  AI-quota meter; guided campaign form (AI Propose/Preview lead-in, progressive-disclosure advanced
+  sections, sticky save bar); video-first Asset Pool review cards; Performance A/B retention comparison
+  bars + episode mini-bars; calendar runway indicators; skeleton loading states; teaching empty states.
+- **Data-viz**: hand-rolled CSS/inline-SVG bars only — no chart library, no CDN, no external assets.
+- Contracts preserved: route paths, form field names, JS/test element ids + `data-*`, flash whitelist,
+  and the `textContent`-only XSS boundary. ADR-019 records the design system.
+- Verified: 137 tests passing, ruff clean, docs guard green; every page screenshotted at 375px & 1280px
+  (seeded + fresh-install empty state) via the pre-installed Playwright Chromium.
+
+## Dashboard ease-of-use follow-ups `DONE`
+- **Live status everywhere**: read-only `GET /api/summary` (reuses the dashboard helpers) drives a
+  cross-page attention badge (failures on Task Logs, awaiting-review on Asset Pool, combined on the
+  mobile hamburger) and auto-refreshes the dashboard health strip / tiles / banners every 6s — the
+  Operator no longer has to reload or even be on the dashboard to notice work.
+- **Accessible confirm + toasts**: native `confirm()` on every destructive action replaced by an
+  in-page dialog (`data-confirm`); transient aria-live toasts for client feedback.
+- **Campaign form is `novalidate` + JS-validated**: fixes a latent trap where a required field on a
+  hidden tab silently blocked submit; validation now jumps to the offending field's tab, explains the
+  problem, and puts the submit button in a busy state on a valid save. Asset timestamps show relative
+  time ("4m ago") with the full UTC time on hover.
+- Verified: 138 tests passing (1 new — `/api/summary`), ruff clean, docs guard green; interactions
+  (badge, confirm modal, toast, form validation, tab-jump) screenshotted at 375px & 1280px.
+
+## Dashboard UX batch 2 (approved backlog) `DONE`
+- **Reviewer flow (Asset Pool)**: status filter chips (with counts), reject-reason quick-pick chips
+  from the channel's learned avoid-notes, keyboard review (J/K move · A approve · R reject).
+- **Strategist**: Performance retention sparkline (inline SVG); client-side search on Campaigns &
+  Task Logs; "Create & Start" one-click on the campaign form (`start_now` reuses the start route).
+- **Mobile**: bottom tab bar (Home/Tasks/Assets/Campaigns) with attention badges for one-thumb access;
+  a pulsing "Live" freshness indicator on the dashboard.
+- **Polish/correctness**: dynamic degraded copy that names the actual culprit; `aria-current` on the
+  active nav link; a "reconnecting…" toast when polling drops and a "reconnected" one on recovery.
+- **Light theme**: opt-in `[data-theme="light"]` with no-FOUC head script + sidebar/top-bar toggle.
+- **Safer deletes**: channel delete requires typing the channel name to confirm.
+- Verified: 139 tests passing (1 new — start_now), ruff clean, docs guard green; every new interaction
+  (tab bar, light theme, filter/reason chips, keyboard review, search, sparkline, typed-confirm,
+  live indicator) screenshotted at 375px & 1280px. ADR-021 records the theme + client-filtering stance.
+
+## Channel → Campaign → Asset linkage (master-detail navigation) `DONE`
+- The four flat lists are now a navigable hierarchy: every entity name links to its home, related
+  collections show as counts that open a **scoped list** (`/campaigns?channel=`, `/assets?campaign=` /
+  `?channel=`, `/tasks?campaign=`), and each scoped view renders a **breadcrumb + "show all"** with the
+  URL as the source of truth (server-side scoping; Task Logs filters the live feed client-side).
+- **Channels** cards show a campaign rollup ("3 campaigns · 2 active") + Campaigns/Assets drill-downs;
+  **Campaign** cards link the channel and add Assets(N)/Tasks; **Asset** cards link campaign + channel;
+  **Performance** is promoted to the campaign **hub** (Overview · Assets · Tasks · Edit tab row).
+- Additive read-only backend only: optional `?channel=`/`?campaign=` params + rollup `group by` counts;
+  no route paths added, no business logic touched. ADR-022 records the pattern.
+- Verified: 139 tests passing, ruff clean, docs guard green; the full drill-down flow (channel → its
+  campaigns → a campaign's assets/tasks/performance, with breadcrumbs) screenshotted at 1280px.
+
+## Dashboard as a trust instrument (deep UX) `DONE`
+- **Triage inbox** ("Needs your attention"): the concrete failed / awaiting-review items with inline
+  Retry + Review, or a calm **"All clear"** state — the 30-second glance now yields a verdict, not a
+  count. **Activity feed** turns the pipeline into a narrative with relative times, and a client-side
+  **"N new since your last visit"** marker answers *what changed?*
+- **Review-in-context**: the channel's playbook + avoid-notes sit beside the player in the Asset Pool.
+- **Visible learning loop**: reject-with-reason states it becomes a permanent avoid-note; Performance
+  shows those notes as the feedback that steers every new script.
+- **Live campaign identity card**: a plain-language summary of the channel you're about to create.
+- Fixed a latent CSS trap with a global `[hidden]{display:none!important}` so JS-toggled cards/badges
+  hide reliably. Backend: two read-only triage queries reusing existing helpers. ADR-023 records it.
+- Verified: 139 tests passing, ruff clean, docs guard green; triage/all-clear, activity feed,
+  review-criteria, identity card and loop-note screenshotted (seeded + empty states).
+- **Factory scorecard + next-publish** (trajectory layer): adds "is the factory winning?" beside
+  "what needs me / what happened" — 7-day publish throughput sparkbars, buffer runway (≈ days at
+  current cadence), week-over-week retention trend, and the soonest upcoming posting slot across
+  active campaigns (each in its own tz). Read-only helpers (`_scorecard`, `_next_publish`) reusing
+  scheduler primitives; screenshotted.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

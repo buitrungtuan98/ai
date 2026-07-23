@@ -1,80 +1,120 @@
 {% extends "base.html" %}
+{% import "macros.html" as ui %}
 {% block title %}Performance · {{ campaign.topic_name }} · AI Video Factory{% endblock %}
 {% block content %}
-<div class="page-head">
-  <div>
-    <h1>Performance — {{ campaign.topic_name }}</h1>
-    <p class="subtitle">What this channel has learned from its own results. Retention (avg % viewed) is the metric that matters most for Shorts.</p>
-  </div>
+{% if channel %}{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': channel.channel_name, 'href': '/campaigns?channel=' ~ channel.id}, {'label': campaign.topic_name}]) }}{% endif %}
+{% call ui.page_head('Performance — ' ~ campaign.topic_name, 'What this channel has learned from its own results. Retention (avg % viewed) is the metric that matters most for Shorts.') %}
   <a class="btn ghost" href="/campaigns">← Campaigns</a>
+{% endcall %}
+
+{# Campaign hub — jump to this campaign's scoped Assets / Tasks / settings. #}
+<div class="hub-tabs">
+  <span class="hub-tab active">📊 Overview</span>
+  <a class="hub-tab" href="/assets?campaign={{ campaign.id }}">▦ Assets{% if asset_count.ready + asset_count.awaiting_review %} ({{ asset_count.ready + asset_count.awaiting_review }}){% endif %}</a>
+  <a class="hub-tab" href="/tasks?campaign={{ campaign.id }}">≣ Tasks</a>
+  <a class="hub-tab" href="/campaigns/{{ campaign.id }}/edit">✎ Edit</a>
 </div>
 
 <div class="card">
-  <h3>Channel Playbook <span class="meta">(auto-learned; refreshed weekly from real stats — refine it by rejecting videos with a reason)</span></h3>
+  <div class="card-head">
+    <h3>Channel Playbook</h3>
+    <span class="meta">auto-learned; refreshed weekly from real stats — refine it by rejecting videos with a reason</span>
+  </div>
   {% if learning.get('playbook') %}
-  <ul class="mt">
-    {% for lesson in learning.get('playbook', []) %}<li class="meta" style="margin-bottom:6px; color: var(--text);">{{ lesson }}</li>{% endfor %}
+  <ul class="mt" style="margin:0; padding-left:1.1em;">
+    {% for lesson in learning.get('playbook', []) %}<li style="margin-bottom:6px;">{{ lesson }}</li>{% endfor %}
   </ul>
   {% if learning.get('best_examples') %}
-  <p class="hint">Top performers used as examples: {{ learning.get('best_examples')|join(' · ') }}</p>
+  <p class="hint mt-sm">Top performers used as examples: {{ learning.get('best_examples')|join(' · ') }}</p>
   {% endif %}
   <p class="hint">Last updated: {{ learning.get('distilled_at', '—') }}</p>
   {% else %}
-  <div class="empty mt">No playbook yet — it appears automatically once ≥5 published episodes have ~3 days of stats.</div>
+  {% call ui.empty('📈', 'No playbook yet', 'It appears automatically once ≥5 published episodes have ~3 days of stats.') %}{% endcall %}
   {% endif %}
   {% if learning.get('reject_reasons') %}
-  <p class="hint mt">Active avoid-notes from your reviews: {{ learning.get('reject_reasons')|join(' · ') }}</p>
+  <div class="loop-note mt-sm">↺ <b>Your feedback is shaping this channel.</b> These avoid-notes came from videos you rejected, and now steer every new script:
+    <span class="meta">{{ learning.get('reject_reasons')|join(' · ') }}</span></div>
   {% endif %}
   {% if learning %}
   <form method="post" action="/campaigns/{{ campaign.id }}/learning/reset" class="mt"
-        onsubmit="return confirm('Clear everything this channel has learned?')">
+        data-confirm="Clear everything this channel has learned? The playbook and avoid-notes are lost.">
     <button class="btn danger sm" type="submit">Reset learning</button>
   </form>
   {% endif %}
 </div>
 
 <div class="card mt">
-  <h3>A/B Variant Results <span class="meta">(which metadata style actually retains viewers)</span></h3>
+  <div class="card-head">
+    <h3>A/B Variant Results</h3>
+    <span class="meta">which metadata style actually retains viewers</span>
+  </div>
   {% if variants %}
-  <table class="mt">
-    <thead><tr><th>Variant</th><th>Episodes measured</th><th>Avg retention</th><th>Avg views</th></tr></thead>
-    <tbody>
-      {% set best_v = (variants | selectattr('avg_retention') | sort(attribute='avg_retention') | last | default(none)) %}
-      {% for v in variants %}
-      <tr {% if best_v and v.variant == best_v.variant %}style="background:#3ecf8e10"{% endif %}>
-        <td>{{ v.variant }}{% if best_v and v.variant == best_v.variant %} 🏆{% endif %}</td>
-        <td>{{ v.episodes }}</td>
-        <td>{{ (v.avg_retention ~ '%') if v.avg_retention is not none else '—' }}</td>
-        <td>{{ v.avg_views if v.avg_views is not none else '—' }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  {% set best_v = (variants | selectattr('avg_retention') | sort(attribute='avg_retention') | last | default(none)) %}
+  {% set max_ret = (variants | selectattr('avg_retention') | map(attribute='avg_retention') | max) if best_v else 100 %}
+  <div class="mt">
+    {% for v in variants %}
+    {% set win = best_v and v.variant == best_v.variant %}
+    <div class="flex between" style="margin-bottom:4px;">
+      <span>{{ v.variant }}{% if win %} 🏆{% endif %} <span class="meta">· {{ v.episodes }} ep · {{ v.avg_views if v.avg_views is not none else '—' }} views</span></span>
+    </div>
+    {% if v.avg_retention is not none %}
+      {{ ui.bar(v.avg_retention, max_ret, win=win) }}
+    {% else %}
+      <div class="bar-row"><span class="bar-track"></span><span class="bar-val">—</span></div>
+    {% endif %}
+    {% endfor %}
+  </div>
   <p class="hint mt">Each episode rotates through title/description variants A→B→C; this compares their real performance. Give it ~9+ measured episodes (3 per variant) before trusting a winner.</p>
   {% else %}
-  <div class="empty mt">No variant data yet — it appears once published episodes (with A/B testing on) have stats.</div>
+  {% call ui.empty('🔬', 'No variant data yet', 'It appears once published episodes (with A/B testing on) have stats.') %}{% endcall %}
   {% endif %}
 </div>
 
+{% set ns = namespace(vals=[]) %}
+{% for t in episodes %}
+  {% if t.stats_json and t.stats_json.get('avg_pct_viewed') is not none %}
+    {% set ns.vals = ns.vals + [t.stats_json.get('avg_pct_viewed')] %}
+  {% endif %}
+{% endfor %}
+{% if ns.vals|length >= 2 %}
+<div class="card mt">
+  <div class="card-head"><h3>Retention trend</h3><span class="meta">avg % viewed · oldest → newest measured episode</span></div>
+  {% set W = 600 %}{% set H = 60 %}{% set n = ns.vals|length %}
+  {% set pts = namespace(s='') %}
+  {% for v in ns.vals %}
+    {% set x = (loop.index0 * (W / (n - 1)))|round(1) %}
+    {% set y = (H - (v / 100 * H))|round(1) %}
+    {% set pts.s = pts.s ~ x ~ ',' ~ y ~ ' ' %}
+  {% endfor %}
+  <svg class="spark mt-sm" viewBox="0 0 {{ W }} {{ H }}" preserveAspectRatio="none" role="img" aria-label="Retention trend across episodes">
+    <polyline points="{{ pts.s|trim }}" fill="none" stroke="var(--st-working)" stroke-width="2" vector-effect="non-scaling-stroke"/>
+  </svg>
+  <div class="flex between"><span class="hint">{{ ns.vals[0] }}%</span><span class="hint">{{ ns.vals[-1] }}%</span></div>
+</div>
+{% endif %}
+
 <div class="card mt">
   <h3>Episodes</h3>
-  <table class="mt">
-    <thead><tr><th>Ep</th><th>Synopsis</th><th>Status</th><th>Variant</th><th>Retention</th><th>Views</th><th>Likes</th><th>Link</th></tr></thead>
-    <tbody>
-      {% for t in episodes %}
-      <tr {% if t.id == best_id %}style="background:#3ecf8e10"{% endif %}>
-        <td>{{ t.episode_number }}{% if t.id == best_id %} 🏆{% endif %}</td>
-        <td class="meta" style="max-width:380px">{{ t.synopsis or '—' }}</td>
-        <td><span class="pill {{ t.status.value }}">{{ t.status.value.replace('_',' ')|title }}</span></td>
-        <td>{{ t.ab_variant or '—' }}</td>
-        <td>{{ (t.stats_json.get('avg_pct_viewed') ~ '%') if t.stats_json and t.stats_json.get('avg_pct_viewed') is not none else '—' }}</td>
-        <td>{{ t.stats_json.get('views', '—') if t.stats_json else '—' }}</td>
-        <td>{{ t.stats_json.get('likes', '—') if t.stats_json else '—' }}</td>
-        <td>{% if t.published_url %}<a href="{{ t.published_url }}" target="_blank" rel="noopener">View ↗</a>{% endif %}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  <p class="hint mt">Stats refresh daily for videos 2–30 days old (YouTube Analytics / Facebook insights).</p>
+  <div class="table-wrap mt">
+    <table>
+      <thead><tr><th>Ep</th><th>Synopsis</th><th>Status</th><th>Variant</th><th>Retention</th><th>Views</th><th>Likes</th><th>Link</th></tr></thead>
+      <tbody>
+        {% for t in episodes %}
+        {% set ret = t.stats_json.get('avg_pct_viewed') if t.stats_json else none %}
+        <tr {% if t.id == best_id %}class="win-row"{% endif %}>
+          <td>{{ t.episode_number }}{% if t.id == best_id %} 🏆{% endif %}</td>
+          <td class="meta" style="max-width:340px">{{ t.synopsis or '—' }}</td>
+          <td>{{ ui.pill(t.status.value) }}</td>
+          <td>{{ t.ab_variant or '—' }}</td>
+          <td>{% if ret is not none %}<span class="minibar"><span style="width:{{ ret }}%"></span></span> {{ ret }}%{% else %}—{% endif %}</td>
+          <td>{{ t.stats_json.get('views', '—') if t.stats_json else '—' }}</td>
+          <td>{{ t.stats_json.get('likes', '—') if t.stats_json else '—' }}</td>
+          <td>{% if t.published_url %}<a href="{{ t.published_url }}" target="_blank" rel="noopener">View ↗</a>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="hint mt-sm">Stats refresh daily for videos 2–30 days old (YouTube Analytics / Facebook insights).</p>
 </div>
 {% endblock %}

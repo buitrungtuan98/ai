@@ -1,0 +1,85 @@
+{# Reusable UI components. Import per page:  {% import "macros.html" as ui %}
+   Each macro emits the exact class names / status values the CSS, JS and tests depend on. #}
+
+{# Status pill. `status` must be the raw enum/status value (lowercase or UPPERCASE) so the CSS
+   colour mapping and app.js (class = status value) stay consistent. #}
+{% macro pill(status, label=None) -%}
+<span class="pill {{ status }}">{{ label if label is not none else status.replace('_', ' ')|title }}</span>
+{%- endmacro %}
+
+{# Page header. Pass actions via {% call %}:
+   {% call ui.page_head('Dashboard', 'subtitle') %}<a class="btn">…</a>{% endcall %} #}
+{% macro page_head(title, subtitle='') -%}
+<div class="page-head">
+  <div>
+    <h1>{{ title }}</h1>
+    {% if subtitle %}<p class="subtitle">{{ subtitle }}</p>{% endif %}
+  </div>
+  {% if caller %}<div class="row-actions">{{ caller() }}</div>{% endif %}
+</div>
+{%- endmacro %}
+
+{# Card wrapper: {% call ui.card('Title', meta='…') %}…body…{% endcall %} #}
+{% macro card(title='', meta='', cls='') -%}
+<div class="card {{ cls }}">
+  {% if title or meta %}
+  <div class="card-head"><h3>{{ title }}</h3>{% if meta %}<span class="meta">{{ meta }}</span>{% endif %}</div>
+  {% endif %}
+  {{ caller() }}
+</div>
+{%- endmacro %}
+
+{# Stat tile. tone ∈ '', ok, warn, bad, work. Optional href makes it a link; `live` adds a
+   data-live key so ui.js can refresh the number in place from /api/summary. #}
+{% macro stat(n, label, tone='', href='', live='') -%}
+{% if href %}<a class="stat attn" href="{{ href }}">{% else %}<div class="stat">{% endif %}
+  <div class="n {{ tone }}"{% if live %} data-live="{{ live }}"{% endif %}>{{ n }}</div><div class="l">{{ label }}</div>
+{% if href %}</a>{% else %}</div>{% endif %}
+{%- endmacro %}
+
+{# Progress bar (0–100). tone ∈ '', done, work. #}
+{% macro progress(pct, tone='') -%}
+<div class="progress {{ tone }}"><span style="width: {{ pct }}%"></span></div>
+{%- endmacro %}
+
+{# Comparison bar for a metric (e.g. retention). value/max drive the fill width; `win` highlights. #}
+{% macro bar(value, max=100, win=false, suffix='%') -%}
+<div class="bar-row">
+  <span class="bar-track"><span class="bar-fill {{ 'win' if win }}"
+        style="width: {{ ((100 * value / max)|round(0, 'floor'))|int if max else 0 }}%"></span></span>
+  <span class="bar-val">{{ value }}{{ suffix }}</span>
+</div>
+{%- endmacro %}
+
+{# Banner / toast. kind ∈ '', danger, info, success. role=status for aria-live. #}
+{% macro banner(kind='') -%}
+<div class="banner {{ kind }}" role="status" aria-live="polite">{{ caller() }}</div>
+{%- endmacro %}
+
+{# Empty state that teaches the next action. #}
+{% macro empty(icon, title, body='', href='', cta='') -%}
+<div class="empty">
+  <span class="empty-ico">{{ icon }}</span>
+  <h3>{{ title }}</h3>
+  {% if body %}<p>{{ body }}</p>{% endif %}
+  {% if caller %}{{ caller() }}{% endif %}
+  {% if href and cta %}<a class="btn" href="{{ href }}">{{ cta }}</a>{% endif %}
+</div>
+{%- endmacro %}
+
+{# Breadcrumb trail. Pass a list of {label, href}; the last item renders as the current (no link).
+   e.g. ui.breadcrumb([{'label':'Channels','href':'/channels'}, {'label':camp.topic_name}]) #}
+{% macro breadcrumb(trail) -%}
+<nav class="crumbs" aria-label="Breadcrumb">
+  {% for c in trail %}{% if c.href and not loop.last %}<a href="{{ c.href }}">{{ c.label }}</a><span class="sep" aria-hidden="true">›</span>{% else %}<span class="current" aria-current="page">{{ c.label }}</span>{% endif %}{% endfor %}
+</nav>
+{%- endmacro %}
+
+{# Labelled form field wrapper: {% call ui.field('Topic', hint='…') %}<input …>{% endcall %} #}
+{% macro field(label_text, hint='', for_id='') -%}
+<div class="form-row">
+  {% if label_text %}<label {% if for_id %}for="{{ for_id }}"{% endif %}>{{ label_text }}</label>{% endif %}
+  {{ caller() }}
+  {% if hint %}<p class="hint">{{ hint }}</p>{% endif %}
+</div>
+{%- endmacro %}

@@ -1,38 +1,41 @@
 {% extends "base.html" %}
+{% import "macros.html" as ui %}
 {% block title %}Calendar · AI Video Factory{% endblock %}
 {% block content %}
-<div class="page-head"><div><h1>Content Calendar</h1>
-  <p class="subtitle">Upcoming posting slots for the next 7 days. Each row is computed in its own
-    campaign's timezone; the header dates use the server timezone.</p></div></div>
+{% call ui.page_head('Content Calendar', 'Upcoming posting slots for the next 7 days. Each row is computed in its own campaign timezone; header dates use the server timezone.') %}{% endcall %}
 
 {% if slotted %}
-<div class="card" style="overflow-x:auto;">
-  <table style="width:100%; border-collapse:collapse; font-size:14px;">
-    <thead>
-      <tr>
-        <th style="text-align:left; padding:8px;">Campaign</th>
-        {% for h in day_headers %}<th style="padding:8px;">{{ h }}</th>{% endfor %}
-      </tr>
-    </thead>
-    <tbody>
-      {% for row in slotted %}
-      <tr style="border-top:1px solid #2a2f3a;">
-        <td style="padding:8px; white-space:nowrap;">
-          <b>{{ row.campaign.topic_name }}</b><br>
-          <span class="hint">{{ row.tz }} · Ep {{ row.campaign.current_episode }}/{{ row.campaign.total_episodes }}
-            · <b>{{ row.ready }}</b> pre-rendered</span>
-        </td>
-        {% for times in row.cells %}
-        <td style="padding:8px; text-align:center; {{ 'opacity:.35;' if not times }}">
-          {{ times|join(', ') if times else '—' }}
-        </td>
+<div class="card">
+  <div class="table-wrap">
+    <table class="cal-table">
+      <thead>
+        <tr>
+          <th>Campaign</th>
+          <th class="col-runway">Runway</th>
+          {% for h in day_headers %}<th class="cell">{{ h }}</th>{% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in slotted %}
+        <tr>
+          <td class="nowrap">
+            <b>{{ row.campaign.topic_name }}</b><br>
+            <span class="hint">{{ row.tz }} · Ep {{ row.campaign.current_episode }}/{{ row.campaign.total_episodes }}</span>
+          </td>
+          <td>
+            {% set rw = 'none' if row.ready == 0 else ('low' if row.ready <= 1 else 'ok') %}
+            <span class="runway {{ rw }}"><span class="dot2 {{ 'bad' if rw == 'none' else 'ok' }}"></span>{{ row.ready }} ready</span>
+          </td>
+          {% for times in row.cells %}
+          <td class="cell{{ ' gate' if not times }}">{{ times|join(', ') if times else '—' }}</td>
+          {% endfor %}
+        </tr>
         {% endfor %}
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  <p class="hint" style="margin-top:10px;">A slot publishes only if a pre-rendered episode is ready —
-    the <b>pre-rendered</b> count shows the runway. — = weekday gate (no publishing that day).</p>
+      </tbody>
+    </table>
+  </div>
+  <p class="hint mt-sm">A slot publishes only if a pre-rendered episode is ready — the <b>Runway</b> column
+    shows how many episodes are buffered. — = weekday gate (no publishing that day).</p>
 </div>
 {% endif %}
 
@@ -47,6 +50,6 @@
 {% endif %}
 
 {% if not slotted and not unslotted %}
-<div class="empty">No active campaigns. <a href="/campaigns/new">Create one →</a></div>
+{% call ui.empty('▧', 'Nothing scheduled yet', 'Active campaigns with posting slots appear here as a 7-day runway. Create a campaign to get started.', '/campaigns/new', 'Create a campaign') %}{% endcall %}
 {% endif %}
 {% endblock %}

@@ -1,23 +1,28 @@
 {% extends "base.html" %}
+{% import "macros.html" as ui %}
 {% set cfg = cfg if cfg is defined else {} %}
 {% set editing = campaign is defined and campaign %}
 {% set dup = source is defined and source %}
 {% set branding = cfg.get('branding') or {} %}
 {% block title %}{{ 'Edit' if editing else ('Duplicate' if dup else 'New') }} Campaign · AI Video Factory{% endblock %}
 {% block content %}
-<div class="page-head"><div>
-  <h1>{{ 'Edit Campaign' if editing else ('Duplicate Campaign' if dup else 'New Campaign') }}</h1>
-  <p class="subtitle">{% if dup %}Copied from “{{ source.topic_name }}” — pick a new channel/language, keep the persona.{% else %}Configure strategy, persona, audio &amp; branding, and distribution. Every field here is honored by the render pipeline.{% endif %}</p>
-</div></div>
+{% call ui.page_head(('Edit Campaign' if editing else ('Duplicate Campaign' if dup else 'New Campaign')),
+   (('Copied from “' ~ source.topic_name ~ '” — pick a new channel/language, keep the persona.') if dup
+    else 'Configure strategy, persona, audio & branding, and distribution. Every field here is honored by the render pipeline.')) %}{% endcall %}
 
 {% if not channels %}
-<div class="empty">You need a connected channel first. <a href="/channels">Add one →</a></div>
+{% call ui.empty('◉', 'Connect a channel first', 'Every campaign publishes to a channel — add one to get started.', '/channels', 'Add a channel') %}{% endcall %}
 {% else %}
-<form method="post" action="{{ '/campaigns/' ~ campaign.id ~ '/edit' if editing else '/campaigns' }}">
+<form method="post" action="{{ '/campaigns/' ~ campaign.id ~ '/edit' if editing else '/campaigns' }}" novalidate>
   <div class="tabs">
     <button type="button" class="tab-btn active" data-tab="core">Core &amp; AI Strategy</button>
     <button type="button" class="tab-btn" data-tab="audio">Aesthetics &amp; Audio</button>
     <button type="button" class="tab-btn" data-tab="dist">Distribution</button>
+  </div>
+
+  <div class="identity-card" id="identity-card">
+    <span class="id-ico">🎬</span>
+    <div id="identity-text" class="grow">Fill in the form (or ✨ let AI propose) — a plain-language summary of the channel you're about to create appears here.</div>
   </div>
 
   <div class="tab-panel active" id="core">
@@ -38,17 +43,6 @@
       </div>
       <div class="form-row"><label>Total episodes</label>
         <input name="total_episodes" type="number" min="1" value="{{ campaign.total_episodes if editing else (source.total_episodes if dup else 10) }}" required></div>
-      <div class="form-row"><label>Video length range in seconds (blank = let the AI decide)</label>
-        <div class="flex" style="gap:8px; align-items:center;">
-          <input name="duration_min_s" type="number" min="10" max="180" placeholder="min, e.g. 30"
-                 value="{{ cfg.get('duration_min_s') or '' }}" style="flex:1">
-          <span>–</span>
-          <input name="duration_max_s" type="number" min="10" max="180" placeholder="max, e.g. 60"
-                 value="{{ cfg.get('duration_max_s') or '' }}" style="flex:1">
-        </div>
-        <p class="hint">Target spoken length per episode (10–180s; ≤60s is the classic Shorts sweet spot,
-          up to 3 min still counts as a Short). The scriptwriter gets a word budget and drafts far outside
-          the range are rewritten once. Set BOTH fields or none.</p></div>
       <div class="form-row"><label>Target language</label>
         <select name="language">
           {% for code, name in [('vi','Vietnamese'), ('en','English'), ('es','Spanish')] %}
@@ -56,22 +50,6 @@
           {% endfor %}
         </select>
       </div>
-      <div class="form-row"><label>Episode continuity (series memory)</label>
-        <select name="continuity">
-          <option value="none" {{ 'selected' if cfg.get('continuity', 'none') == 'none' }}>Independent episodes</option>
-          <option value="no_repeat" {{ 'selected' if cfg.get('continuity') == 'no_repeat' }}>Never repeat — every episode a fresh premise</option>
-          <option value="serial" {{ 'selected' if cfg.get('continuity') == 'serial' }}>Serial — each episode continues the story</option>
-        </select>
-        <p class="hint">The AI remembers a one-line synopsis of each past episode and writes accordingly.</p>
-      </div>
-      <div class="form-row"><label>Self-critique (an AI editor reviews every script before render)</label>
-        <select name="self_critique">
-          <option value="on" {{ 'selected' if cfg.get('self_critique','on')!='off' }}>On — critic pass + rewrite when weak (recommended)</option>
-          <option value="off" {{ 'selected' if cfg.get('self_critique')=='off' }}>Off — first draft goes straight to render</option>
-        </select>
-      </div>
-      <div class="form-row"><label>Custom system prompt (optional)</label>
-        <textarea name="system_prompt" placeholder="Tone, style, constraints for the scriptwriter…">{{ cfg.get('system_prompt') or '' }}</textarea></div>
       <div class="form-row">
         <button type="button" class="btn ghost" id="script-preview">📝 Preview a script (1 AI call)</button>
         <p class="hint">Dry-run with the values in this form — read what the AI would write, tune the
@@ -80,6 +58,39 @@
           receive the synopses of all previously rendered ones.</p>
         <div id="script-preview-out" class="mt" style="display:none;"></div>
       </div>
+
+      <details class="disclosure">
+        <summary>Advanced strategy — length, continuity, self-critique, custom prompt</summary>
+        <div class="disclosure-body">
+          <div class="form-row"><label>Video length range in seconds (blank = let the AI decide)</label>
+            <div class="field-inline">
+              <input name="duration_min_s" type="number" min="10" max="180" placeholder="min, e.g. 30"
+                     value="{{ cfg.get('duration_min_s') or '' }}" class="grow">
+              <span>–</span>
+              <input name="duration_max_s" type="number" min="10" max="180" placeholder="max, e.g. 60"
+                     value="{{ cfg.get('duration_max_s') or '' }}" class="grow">
+            </div>
+            <p class="hint">Target spoken length per episode (10–180s; ≤60s is the classic Shorts sweet spot,
+              up to 3 min still counts as a Short). The scriptwriter gets a word budget and drafts far outside
+              the range are rewritten once. Set BOTH fields or none.</p></div>
+          <div class="form-row"><label>Episode continuity (series memory)</label>
+            <select name="continuity">
+              <option value="none" {{ 'selected' if cfg.get('continuity', 'none') == 'none' }}>Independent episodes</option>
+              <option value="no_repeat" {{ 'selected' if cfg.get('continuity') == 'no_repeat' }}>Never repeat — every episode a fresh premise</option>
+              <option value="serial" {{ 'selected' if cfg.get('continuity') == 'serial' }}>Serial — each episode continues the story</option>
+            </select>
+            <p class="hint">The AI remembers a one-line synopsis of each past episode and writes accordingly.</p>
+          </div>
+          <div class="form-row"><label>Self-critique (an AI editor reviews every script before render)</label>
+            <select name="self_critique">
+              <option value="on" {{ 'selected' if cfg.get('self_critique','on')!='off' }}>On — critic pass + rewrite when weak (recommended)</option>
+              <option value="off" {{ 'selected' if cfg.get('self_critique')=='off' }}>Off — first draft goes straight to render</option>
+            </select>
+          </div>
+          <div class="form-row"><label>Custom system prompt (optional)</label>
+            <textarea name="system_prompt" placeholder="Tone, style, constraints for the scriptwriter…">{{ cfg.get('system_prompt') or '' }}</textarea></div>
+        </div>
+      </details>
     </div>
     <div class="card mt">
       <h3>Persona — make it sound like a real person</h3>
@@ -111,21 +122,6 @@
           {% endfor %}
         </select>
       </div>
-      <div class="form-row"><label>Clip motion (subtle zoom/pan on every clip)</label>
-        <select name="motion">
-          <option value="on" {{ 'selected' if cfg.get('motion','on')!='off' }}>On — cinematic movement (recommended)</option>
-          <option value="off" {{ 'selected' if cfg.get('motion')=='off' }}>Off — static clips</option>
-        </select>
-      </div>
-      <div class="form-row"><label>Colour grade (channel look, baked into every clip)</label>
-        <select name="color_grade">
-          <option value="" {{ 'selected' if not cfg.get('color_grade') }}>None — footage as shot</option>
-          {% for g, label in [('cinematic','Cinematic — filmic contrast, teal shadows'), ('warm','Warm — golden, cosy'), ('cool','Cool — blue, moody'), ('vivid','Vivid — punchy colour'), ('noir','Noir — black & white')] %}
-          <option value="{{ g }}" {{ 'selected' if cfg.get('color_grade')==g }}>{{ label }}</option>
-          {% endfor %}
-        </select>
-        <p class="hint">Pick one per channel and keep it — a consistent look is what makes a feed feel curated.</p>
-      </div>
       <div class="form-row"><label>Voice profile (follows the Target language)</label>
         <select name="voice" id="voice-select" data-current="{{ cfg.get('voice') or '' }}"></select>
         <p class="hint">Voices are filtered to the campaign's Target language (Core tab). Default = the
@@ -133,34 +129,58 @@
       <div class="form-row"><label>Audio speed adjustment: <span id="rate-val">{{ cfg.get('rate_pct', 0) }}</span>%</label>
         <input name="rate_pct" type="range" min="-20" max="20" value="{{ cfg.get('rate_pct', 0) }}"
                oninput="document.getElementById('rate-val').textContent=this.value"></div>
-      <div class="form-row"><label>Background music</label>
-        <select name="music_mode">
-          <option value="none" {{ 'selected' if (cfg.get('music_mode') or ('file' if cfg.get('music_path') else 'none'))=='none' }}>None — narration only</option>
-          <option value="auto" {{ 'selected' if cfg.get('music_mode')=='auto' }}>Auto — random free CC0 track by mood, new one each episode</option>
-          <option value="file" {{ 'selected' if (cfg.get('music_mode') or ('file' if cfg.get('music_path') else ''))=='file' }}>My file on the server</option>
-        </select>
-        <p class="hint">Auto uses Freesound.org filtered to CC0 (public domain) — safe for monetized videos, no attribution needed. Requires FREESOUND_API_KEY in .env (free).
-          {% if not settings.FREESOUND_API_KEY %}<strong style="color: var(--danger);">⚠ FREESOUND_API_KEY is NOT set on this server — episodes of an Auto-music campaign will fail until you add it (or choose None).</strong>{% endif %}</p>
-      </div>
-      <div class="form-row"><label>Music mood (for Auto — in English)</label>
-        <input name="music_mood" placeholder="dark ambient horror drone" value="{{ cfg.get('music_mood') or '' }}"></div>
-      <div class="form-row"><label>Music file path (for "My file" — must be YOUR licensed audio)</label>
-        <input name="music_path" placeholder="/data/media/music/bg.mp3" value="{{ cfg.get('music_path') or '' }}"></div>
-      <div class="form-row"><label>Music volume under narration: <span id="mvol-val">{{ cfg.get('music_volume', 0.15) }}</span></label>
-        <input name="music_volume" type="range" min="0.05" max="0.5" step="0.05" value="{{ cfg.get('music_volume', 0.15) }}"
-               oninput="document.getElementById('mvol-val').textContent=this.value"></div>
-    </div>
-    <div class="card mt">
-      <h3>Channel branding (optional)</h3>
-      <p class="subtitle">Watermark/tint are baked into the render. Note: mass-posting near-identical content can violate platform ToS regardless of branding.</p>
-      <div class="form-row"><label>Watermark / logo file on the server (PNG with alpha)</label>
-        <input name="watermark_path" placeholder="/data/media/branding/logo.png" value="{{ branding.get('watermark_path') or '' }}"></div>
-      <div class="form-row"><label>Brand tint colour</label>
-        <input name="tint_color" type="color" value="{{ branding.get('tint_color') or '#1e90ff' }}" style="height:44px; padding:4px;"></div>
-      <div class="form-row"><label>Tint opacity: <span id="tint-val">{{ branding.get('tint_opacity', 0.0) }}</span> (0 = off)</label>
-        <input name="tint_opacity" type="range" min="0" max="0.3" step="0.05" value="{{ branding.get('tint_opacity', 0.0) }}"
-               oninput="document.getElementById('tint-val').textContent=this.value"></div>
-      <div class="form-row"><label><input type="checkbox" name="mirror" style="width:auto" {{ 'checked' if branding.get('mirror') }}> Mirror footage horizontally (stylistic)</label></div>
+
+      <details class="disclosure mt">
+        <summary>Motion, colour grade &amp; background music</summary>
+        <div class="disclosure-body">
+          <div class="form-row"><label>Clip motion (subtle zoom/pan on every clip)</label>
+            <select name="motion">
+              <option value="on" {{ 'selected' if cfg.get('motion','on')!='off' }}>On — cinematic movement (recommended)</option>
+              <option value="off" {{ 'selected' if cfg.get('motion')=='off' }}>Off — static clips</option>
+            </select>
+          </div>
+          <div class="form-row"><label>Colour grade (channel look, baked into every clip)</label>
+            <select name="color_grade">
+              <option value="" {{ 'selected' if not cfg.get('color_grade') }}>None — footage as shot</option>
+              {% for g, label in [('cinematic','Cinematic — filmic contrast, teal shadows'), ('warm','Warm — golden, cosy'), ('cool','Cool — blue, moody'), ('vivid','Vivid — punchy colour'), ('noir','Noir — black & white')] %}
+              <option value="{{ g }}" {{ 'selected' if cfg.get('color_grade')==g }}>{{ label }}</option>
+              {% endfor %}
+            </select>
+            <p class="hint">Pick one per channel and keep it — a consistent look is what makes a feed feel curated.</p>
+          </div>
+          <div class="form-row"><label>Background music</label>
+            <select name="music_mode">
+              <option value="none" {{ 'selected' if (cfg.get('music_mode') or ('file' if cfg.get('music_path') else 'none'))=='none' }}>None — narration only</option>
+              <option value="auto" {{ 'selected' if cfg.get('music_mode')=='auto' }}>Auto — random free CC0 track by mood, new one each episode</option>
+              <option value="file" {{ 'selected' if (cfg.get('music_mode') or ('file' if cfg.get('music_path') else ''))=='file' }}>My file on the server</option>
+            </select>
+            <p class="hint">Auto uses Freesound.org filtered to CC0 (public domain) — safe for monetized videos, no attribution needed. Requires FREESOUND_API_KEY in .env (free).
+              {% if not settings.FREESOUND_API_KEY %}<strong style="color: var(--danger);">⚠ FREESOUND_API_KEY is NOT set on this server — episodes of an Auto-music campaign will fail until you add it (or choose None).</strong>{% endif %}</p>
+          </div>
+          <div class="form-row"><label>Music mood (for Auto — in English)</label>
+            <input name="music_mood" placeholder="dark ambient horror drone" value="{{ cfg.get('music_mood') or '' }}"></div>
+          <div class="form-row"><label>Music file path (for "My file" — must be YOUR licensed audio)</label>
+            <input name="music_path" placeholder="/data/media/music/bg.mp3" value="{{ cfg.get('music_path') or '' }}"></div>
+          <div class="form-row"><label>Music volume under narration: <span id="mvol-val">{{ cfg.get('music_volume', 0.15) }}</span></label>
+            <input name="music_volume" type="range" min="0.05" max="0.5" step="0.05" value="{{ cfg.get('music_volume', 0.15) }}"
+                   oninput="document.getElementById('mvol-val').textContent=this.value"></div>
+        </div>
+      </details>
+
+      <details class="disclosure">
+        <summary>Channel branding — watermark, tint, mirror (optional)</summary>
+        <div class="disclosure-body">
+          <p class="subtitle">Watermark/tint are baked into the render. Note: mass-posting near-identical content can violate platform ToS regardless of branding.</p>
+          <div class="form-row"><label>Watermark / logo file on the server (PNG with alpha)</label>
+            <input name="watermark_path" placeholder="/data/media/branding/logo.png" value="{{ branding.get('watermark_path') or '' }}"></div>
+          <div class="form-row"><label>Brand tint colour</label>
+            <input name="tint_color" type="color" value="{{ branding.get('tint_color') or '#1e90ff' }}"></div>
+          <div class="form-row"><label>Tint opacity: <span id="tint-val">{{ branding.get('tint_opacity', 0.0) }}</span> (0 = off)</label>
+            <input name="tint_opacity" type="range" min="0" max="0.3" step="0.05" value="{{ branding.get('tint_opacity', 0.0) }}"
+                   oninput="document.getElementById('tint-val').textContent=this.value"></div>
+          <div class="form-row"><label class="check-row"><input type="checkbox" name="mirror" {{ 'checked' if branding.get('mirror') }}> Mirror footage horizontally (stylistic)</label></div>
+        </div>
+      </details>
     </div>
   </div>
 
@@ -173,15 +193,6 @@
         </select>
         <p class="hint">Review mode parks each rendered video in the Asset Pool with an in-browser player.</p>
       </div>
-      <div class="form-row"><label>Auto-QC (the machine reviews every video before it goes out)</label>
-        <select name="auto_qc">
-          <option value="on" {{ 'selected' if cfg.get('auto_qc','on')!='off' }}>On — AI vets footage &amp; judges the final video (recommended)</option>
-          <option value="off" {{ 'selected' if cfg.get('auto_qc')=='off' }}>Off — render without machine review</option>
-        </select>
-        <p class="hint">Footage that doesn't match the narration is swapped before render; a finished video that fails the
-          quality check is re-rendered once, and if it fails again it waits in the Asset Pool for you instead of publishing.
-          Uses your Gemini key; if the vision API is unavailable the pipeline continues as if QC were off.</p>
-      </div>
       <div class="form-row"><label>Privacy on the platform</label>
         <select name="privacy">
           {% for p in ['public', 'unlisted', 'private'] %}
@@ -193,49 +204,70 @@
         <input name="posting_slots" placeholder="21:00" value="{{ cfg.get('posting_slots', [])|join(', ') }}">
         <p class="hint">Empty = publish immediately after each render (continuous mode).</p></div>
       <div class="form-row"><label>Publish days (all unchecked = every day)</label>
-        <div class="flex" style="gap:12px; flex-wrap:wrap;">
+        <div class="check-grid">
           {% for d, label in [('mon','Mon'), ('tue','Tue'), ('wed','Wed'), ('thu','Thu'), ('fri','Fri'), ('sat','Sat'), ('sun','Sun')] %}
-          <label style="display:flex; align-items:center; gap:5px; font-weight:normal;">
-            <input type="checkbox" name="posting_days" value="{{ d }}" style="width:auto"
+          <label><input type="checkbox" name="posting_days" value="{{ d }}"
                    {{ 'checked' if d in (cfg.get('posting_days') or []) }}> {{ label }}</label>
           {% endfor %}
         </div>
         <p class="hint">The slots above fire only on checked days (campaign timezone). Rendering still runs ahead
           every day, and day-gated pre-renders are kept longer before expiring (up to ~1 week).</p></div>
-      <div class="form-row"><label>Campaign timezone (IANA name; blank = server default {{ settings.TIMEZONE }})</label>
-        <input name="timezone" placeholder="Asia/Ho_Chi_Minh" value="{{ cfg.get('timezone') or '' }}"></div>
-      <div class="form-row"><label>Pre-rendered buffer size (blank = global default {{ settings.DEFAULT_BUFFER_SIZE }})</label>
-        <input name="buffer_size" type="number" min="1" max="10" value="{{ cfg.get('buffer_size') or '' }}"></div>
-      <div class="form-row"><label>Max new renders per day (blank = unlimited)</label>
-        <input name="max_per_day" type="number" min="1" max="100" value="{{ cfg.get('max_per_day') or '' }}">
-        <p class="hint">Caps how many episodes this campaign may START rendering per day (its timezone). Use it to
-          share the daily Gemini quota fairly when several campaigns/accounts run at once. Publishing cadence is
-          still set by the posting slots above.</p></div>
-      <div class="form-row"><label>Min published per day — alert if below (blank = off)</label>
-        <input name="min_per_day" type="number" min="1" max="100" value="{{ cfg.get('min_per_day') or '' }}">
-        <p class="hint">A watchdog, not a guarantee: if this campaign publishes fewer episodes than this in 24h
-          (failures, quota…), you get a Telegram alert instead of silence.</p></div>
-      <div class="form-row"><label><input type="checkbox" name="ab_testing" style="width:auto" {{ 'checked' if cfg.get('ab_testing', true) }}> Enable A/B metadata testing (rotate 3 title/description variants)</label></div>
-      <div class="form-row"><label>Catchy title prefix (optional channel brand mark)</label>
-        <input name="title_prefix" maxlength="40" placeholder="🔥 SỬ VIỆT |" value="{{ cfg.get('title_prefix') or '' }}">
-        <p class="hint">Prepended to every video title. Titles themselves are standalone hooks — the AI never puts the
-          campaign name or episode number in them (the series stays findable via a stable hashtag in the description).</p></div>
-      <div class="form-row"><label>Affiliate / product link (optional — monetization)</label>
-        <input name="affiliate_url" maxlength="300" placeholder="https://shope.ee/your-link"
-               value="{{ cfg.get('affiliate_url') or '' }}">
-        <p class="hint">Auto-appended to every description and pinned comment, always marked
-          “(affiliate link)” — platform &amp; advertising rules require the disclosure.</p></div>
-      <div class="form-row"><label>Affiliate label (short text before the link)</label>
-        <input name="affiliate_label" maxlength="30" placeholder="📚 Sách hay về thời Trần:"
-               value="{{ cfg.get('affiliate_label') or '' }}"></div>
-      <div class="form-row"><label>Pinned comment / CTA</label>
-        <textarea name="cta" placeholder="👉 Follow for daily shorts!">{{ cfg.get('cta') or '' }}</textarea></div>
+
+      <details class="disclosure mt">
+        <summary>Advanced distribution — QC, quota caps, A/B, monetization</summary>
+        <div class="disclosure-body">
+          <div class="form-row"><label>Auto-QC (the machine reviews every video before it goes out)</label>
+            <select name="auto_qc">
+              <option value="on" {{ 'selected' if cfg.get('auto_qc','on')!='off' }}>On — AI vets footage &amp; judges the final video (recommended)</option>
+              <option value="off" {{ 'selected' if cfg.get('auto_qc')=='off' }}>Off — render without machine review</option>
+            </select>
+            <p class="hint">Footage that doesn't match the narration is swapped before render; a finished video that fails the
+              quality check is re-rendered once, and if it fails again it waits in the Asset Pool for you instead of publishing.
+              Uses your Gemini key; if the vision API is unavailable the pipeline continues as if QC were off.</p>
+          </div>
+          <div class="form-row"><label>Campaign timezone (IANA name; blank = server default {{ settings.TIMEZONE }})</label>
+            <input name="timezone" placeholder="Asia/Ho_Chi_Minh" value="{{ cfg.get('timezone') or '' }}"></div>
+          <div class="form-row"><label>Pre-rendered buffer size (blank = global default {{ settings.DEFAULT_BUFFER_SIZE }})</label>
+            <input name="buffer_size" type="number" min="1" max="10" value="{{ cfg.get('buffer_size') or '' }}"></div>
+          <div class="form-row"><label>Max new renders per day (blank = unlimited)</label>
+            <input name="max_per_day" type="number" min="1" max="100" value="{{ cfg.get('max_per_day') or '' }}">
+            <p class="hint">Caps how many episodes this campaign may START rendering per day (its timezone). Use it to
+              share the daily Gemini quota fairly when several campaigns/accounts run at once. Publishing cadence is
+              still set by the posting slots above.</p></div>
+          <div class="form-row"><label>Min published per day — alert if below (blank = off)</label>
+            <input name="min_per_day" type="number" min="1" max="100" value="{{ cfg.get('min_per_day') or '' }}">
+            <p class="hint">A watchdog, not a guarantee: if this campaign publishes fewer episodes than this in 24h
+              (failures, quota…), you get a Telegram alert instead of silence.</p></div>
+          <div class="form-row"><label class="check-row"><input type="checkbox" name="ab_testing" {{ 'checked' if cfg.get('ab_testing', true) }}> Enable A/B metadata testing (rotate 3 title/description variants)</label></div>
+          <div class="form-row"><label>Catchy title prefix (optional channel brand mark)</label>
+            <input name="title_prefix" maxlength="40" placeholder="🔥 SỬ VIỆT |" value="{{ cfg.get('title_prefix') or '' }}">
+            <p class="hint">Prepended to every video title. Titles themselves are standalone hooks — the AI never puts the
+              campaign name or episode number in them (the series stays findable via a stable hashtag in the description).</p></div>
+          <div class="form-row"><label>Affiliate / product link (optional — monetization)</label>
+            <input name="affiliate_url" maxlength="300" placeholder="https://shope.ee/your-link"
+                   value="{{ cfg.get('affiliate_url') or '' }}">
+            <p class="hint">Auto-appended to every description and pinned comment, always marked
+              “(affiliate link)” — platform &amp; advertising rules require the disclosure.</p></div>
+          <div class="form-row"><label>Affiliate label (short text before the link)</label>
+            <input name="affiliate_label" maxlength="30" placeholder="📚 Sách hay về thời Trần:"
+                   value="{{ cfg.get('affiliate_label') or '' }}"></div>
+          <div class="form-row"><label>Pinned comment / CTA</label>
+            <textarea name="cta" placeholder="👉 Follow for daily shorts!">{{ cfg.get('cta') or '' }}</textarea></div>
+        </div>
+      </details>
     </div>
   </div>
 
-  <div class="row-actions mt">
-    <button class="btn" type="submit">{{ 'Save changes' if editing else 'Create Campaign' }}</button>
+  <div class="savebar">
+    {% if editing %}
+    <button class="btn" type="submit" id="save-campaign">Save changes</button>
+    {% else %}
+    <button class="btn" type="submit" name="start_now" value="1" id="save-start">▶ Create &amp; Start</button>
+    <button class="btn ghost" type="submit" id="save-campaign">Create only</button>
+    {% endif %}
     <a class="btn ghost" href="/campaigns">Cancel</a>
+    <span class="grow"></span>
+    <span class="hint" id="save-hint">{{ 'Save your changes.' if editing else '“Create & Start” begins rendering now; “Create only” saves it as pending.' }}</span>
   </div>
 </form>
 {% endif %}
@@ -279,106 +311,173 @@
   fillVoices();
   if (langSel) langSel.addEventListener("change", function () { fillVoices(""); });
 
+  // 🎬 Live campaign "identity card": a plain-language summary of what you're about to create.
+  const idText = document.getElementById("identity-text");
+  const CAPTIONS = { highlight: "highlight captions", classic: "clean captions", boxed: "boxed captions", neon: "neon captions" };
+  const GRADES = { cinematic: "cinematic grade", warm: "warm grade", cool: "cool grade", vivid: "vivid grade", noir: "noir grade" };
+  function updateIdentity() {
+    const form = document.querySelector("form");
+    if (!idText || !form) return;
+    const g = (n) => { const el = form.elements[n]; return el ? (el.value || "").trim() : ""; };
+    const persona = g("persona"), topic = g("topic_name");
+    const lead = persona ? persona.split(/[.\n]/)[0].slice(0, 64) : (topic || "Your campaign");
+    const parts = [lead, LANG_NAMES[g("language")] || g("language")];
+    if (CAPTIONS[g("caption_theme")]) parts.push(CAPTIONS[g("caption_theme")]);
+    if (GRADES[g("color_grade")]) parts.push(GRADES[g("color_grade")]);
+    const voice = g("voice");
+    parts.push(voice ? "voice " + voice.split("-").pop().replace("Neural", "") : "default voice");
+    const mm = g("music_mode");
+    parts.push(mm === "auto" ? "auto music" : (mm === "file" ? "your music" : "no music"));
+    const slots = g("posting_slots");
+    if (slots) {
+      const days = Array.prototype.filter.call(form.querySelectorAll('[name="posting_days"]'), (c) => c.checked).map((c) => c.value);
+      parts.push("posts " + slots + (days.length ? " on " + days.join("/") : " daily"));
+    } else {
+      parts.push("publishes continuously");
+    }
+    parts.push(g("publish_mode") === "review" ? "review first" : "auto-publish");
+    idText.textContent = parts.filter(Boolean).join(" · ");
+  }
+  updateIdentity();
+  const idForm = document.querySelector("form");
+  if (idForm) { idForm.addEventListener("input", updateIdentity); idForm.addEventListener("change", updateIdentity); }
+
   // 📝 Script preview: dry-run the scriptwriter with the current form values (nothing saved).
   const previewBtn = document.getElementById("script-preview");
   if (previewBtn) {
-    previewBtn.addEventListener("click", async function () {
+    previewBtn.addEventListener("click", function () {
       const form = previewBtn.closest("form");
       const out = document.getElementById("script-preview-out");
-      const orig = previewBtn.textContent;
-      previewBtn.disabled = true;
-      previewBtn.textContent = "📝 Writing…";
-      try {
-        const body = new URLSearchParams();
-        ["topic_name", "language", "system_prompt", "persona", "style_examples",
-         "catchphrase_open", "catchphrase_close", "rate_pct", "duration_min_s", "duration_max_s"]
-          .forEach(n => { const el = form.elements[n]; if (el) body.set(n, el.value || ""); });
-        const r = await fetch("/campaigns/preview-script", { method: "POST", body });
-        const p = await r.json();
-        if (!r.ok) throw new Error(p.error || "Preview failed");
-        out.textContent = "";                        // build with textContent — never innerHTML
-        const head = document.createElement("p");
-        head.className = "hint";
-        head.textContent = "🎬 " + (p.title || "") + " · ~" + p.est_seconds + "s spoken" +
-                           (p.synopsis ? " · " + p.synopsis : "");
-        out.appendChild(head);
-        (p.scenes || []).forEach(function (s, i) {
-          const line = document.createElement("p");
-          line.className = "meta";
-          line.textContent = (i + 1) + ". " + s.narration + "  [" + (s.keywords || []).join(", ") + "]";
-          out.appendChild(line);
-        });
-        out.style.display = "block";
-      } catch (e) {
-        out.textContent = e.message || "Preview failed — please try again.";
-        out.style.display = "block";
-      } finally {
-        previewBtn.disabled = false;
-        previewBtn.textContent = orig;
-      }
+      window.ui.busyButton(previewBtn, "📝 Writing…", async function () {
+        try {
+          const body = new URLSearchParams();
+          ["topic_name", "language", "system_prompt", "persona", "style_examples",
+           "catchphrase_open", "catchphrase_close", "rate_pct", "duration_min_s", "duration_max_s"]
+            .forEach(n => { const el = form.elements[n]; if (el) body.set(n, el.value || ""); });
+          const r = await fetch("/campaigns/preview-script", { method: "POST", body });
+          const p = await r.json();
+          if (!r.ok) throw new Error(p.error || "Preview failed");
+          out.textContent = "";                        // build with textContent — never innerHTML
+          const head = document.createElement("p");
+          head.className = "hint";
+          head.textContent = "🎬 " + (p.title || "") + " · ~" + p.est_seconds + "s spoken" +
+                             (p.synopsis ? " · " + p.synopsis : "");
+          out.appendChild(head);
+          (p.scenes || []).forEach(function (s, i) {
+            const line = document.createElement("p");
+            line.className = "meta";
+            line.textContent = (i + 1) + ". " + s.narration + "  [" + (s.keywords || []).join(", ") + "]";
+            out.appendChild(line);
+          });
+          out.style.display = "block";
+        } catch (e) {
+          out.textContent = e.message || "Preview failed — please try again.";
+          out.style.display = "block";
+        }
+      });
     });
   }
 
   // ✨ AI campaign designer: ask the server for a full proposal and fill the form for review.
   const proposeBtn = document.getElementById("ai-propose");
   if (proposeBtn) {
-    proposeBtn.addEventListener("click", async function () {
+    proposeBtn.addEventListener("click", function () {
       const form = proposeBtn.closest("form");
-      const orig = proposeBtn.textContent;
-      proposeBtn.disabled = true;
-      proposeBtn.textContent = "✨ Designing…";
       const setVal = (name, val) => {
         const el = form.elements[name];
         if (el && val !== null && val !== undefined) el.value = val;
       };
-      try {
-        const body = new URLSearchParams();
-        body.set("topic", (form.elements["topic_name"].value || "").trim());
-        body.set("language", form.elements["language"].value || "");
-        const r = await fetch("/campaigns/propose", { method: "POST", body });
-        const p = await r.json();
-        if (!r.ok) throw new Error(p.error || "AI proposal failed");
-        setVal("topic_name", p.topic_name);
-        setVal("total_episodes", p.total_episodes);
-        setVal("language", p.language);
-        setVal("duration_min_s", p.duration_min_s || "");
-        setVal("duration_max_s", p.duration_max_s || "");
-        setVal("persona", p.persona);
-        setVal("style_examples", p.style_examples);
-        setVal("catchphrase_open", p.catchphrase_open);
-        setVal("catchphrase_close", p.catchphrase_close);
-        setVal("continuity", p.continuity);
-        fillVoices("");            // rebuild the voice list for the proposed language first
-        setVal("voice", p.voice);  // the proposal's voice is always in that language's catalog
-        setVal("rate_pct", p.rate_pct);
-        setVal("subtitle_style", p.subtitle_style);
-        setVal("caption_theme", p.caption_theme);
-        setVal("motion", p.motion);
-        setVal("color_grade", p.color_grade === "none" ? "" : p.color_grade);
-        setVal("music_mode", p.music_mode);
-        setVal("music_mood", p.music_mood);
-        setVal("privacy", p.privacy);
-        setVal("cta", p.cta);
-        setVal("title_prefix", p.title_prefix);
-        setVal("posting_slots", p.posting_slots);
-        form.querySelectorAll('[name="posting_days"]').forEach(function (cb) {
-          cb.checked = (p.posting_days || []).includes(cb.value);
-        });
-        const ab = form.elements["ab_testing"];
-        if (ab) ab.checked = !!p.ab_testing;
-        const rv = document.getElementById("rate-val");
-        if (rv) rv.textContent = form.elements["rate_pct"].value;
-        const note = document.getElementById("ai-rationale");
-        if (note) {
-          note.textContent = p.rationale ? ("💡 " + p.rationale) : "";
-          note.style.display = p.rationale ? "block" : "none";
+      window.ui.busyButton(proposeBtn, "✨ Designing…", async function () {
+        try {
+          const body = new URLSearchParams();
+          body.set("topic", (form.elements["topic_name"].value || "").trim());
+          body.set("language", form.elements["language"].value || "");
+          const r = await fetch("/campaigns/propose", { method: "POST", body });
+          const p = await r.json();
+          if (!r.ok) throw new Error(p.error || "AI proposal failed");
+          setVal("topic_name", p.topic_name);
+          setVal("total_episodes", p.total_episodes);
+          setVal("language", p.language);
+          setVal("duration_min_s", p.duration_min_s || "");
+          setVal("duration_max_s", p.duration_max_s || "");
+          setVal("persona", p.persona);
+          setVal("style_examples", p.style_examples);
+          setVal("catchphrase_open", p.catchphrase_open);
+          setVal("catchphrase_close", p.catchphrase_close);
+          setVal("continuity", p.continuity);
+          fillVoices("");            // rebuild the voice list for the proposed language first
+          setVal("voice", p.voice);  // the proposal's voice is always in that language's catalog
+          setVal("rate_pct", p.rate_pct);
+          setVal("subtitle_style", p.subtitle_style);
+          setVal("caption_theme", p.caption_theme);
+          setVal("motion", p.motion);
+          setVal("color_grade", p.color_grade === "none" ? "" : p.color_grade);
+          setVal("music_mode", p.music_mode);
+          setVal("music_mood", p.music_mood);
+          setVal("privacy", p.privacy);
+          setVal("cta", p.cta);
+          setVal("title_prefix", p.title_prefix);
+          setVal("posting_slots", p.posting_slots);
+          form.querySelectorAll('[name="posting_days"]').forEach(function (cb) {
+            cb.checked = (p.posting_days || []).includes(cb.value);
+          });
+          const ab = form.elements["ab_testing"];
+          if (ab) ab.checked = !!p.ab_testing;
+          const rv = document.getElementById("rate-val");
+          if (rv) rv.textContent = form.elements["rate_pct"].value;
+          const note = document.getElementById("ai-rationale");
+          if (note) {
+            note.textContent = p.rationale ? ("💡 " + p.rationale) : "";
+            note.style.display = p.rationale ? "block" : "none";
+          }
+          updateIdentity();  // fields set programmatically don't fire input events
+        } catch (e) {
+          alert(e.message || "AI proposal failed — please try again.");
         }
-      } catch (e) {
-        alert(e.message || "AI proposal failed — please try again.");
-      } finally {
-        proposeBtn.disabled = false;
-        proposeBtn.textContent = orig;
+      });
+    });
+  }
+
+  // ✅ Inline validation + submit busy state. Native POST navigates on success, so the busy
+  // label persists until the new page loads — clear feedback that the save is in flight.
+  const campaignForm = document.querySelector('form[action$="/campaigns"], form[action*="/edit"]');
+  if (campaignForm) {
+    const saveBtn = document.getElementById("save-campaign");
+    const hint = document.getElementById("save-hint");
+    const showTab = (name) => { const b = document.querySelector('.tab-btn[data-tab="' + name + '"]'); if (b) b.click(); };
+    const openDetails = (el) => { const d = el && el.closest("details"); if (d) d.open = true; };
+    const fail = (msg, tab, el) => {
+      if (tab) showTab(tab);
+      openDetails(el);
+      if (hint) { hint.textContent = "⚠ " + msg; hint.style.color = "var(--st-failed)"; }
+      if (el) { el.focus(); el.scrollIntoView({ block: "center", behavior: "smooth" }); }
+      if (window.ui) window.ui.toast(msg, "danger");
+    };
+    // The form is `novalidate` so we control validation entirely — otherwise a required field on
+    // a hidden tab would block submit with an un-focusable bubble (silent failure).
+    campaignForm.addEventListener("submit", function (e) {
+      const el = (n) => campaignForm.elements[n];
+      const val = (n) => (el(n) && el(n).value || "").trim();
+      // Required (Core tab)
+      if (!val("topic_name")) { e.preventDefault(); return fail("Give the campaign a topic name.", "core", el("topic_name")); }
+      if (!val("channel_id")) { e.preventDefault(); return fail("Pick a target channel.", "core", el("channel_id")); }
+      const eps = Number(val("total_episodes"));
+      if (!val("total_episodes") || isNaN(eps) || eps < 1) { e.preventDefault(); return fail("Total episodes must be at least 1.", "core", el("total_episodes")); }
+      // Video-length pair (Core → advanced)
+      const dmin = val("duration_min_s"), dmax = val("duration_max_s");
+      if ((dmin && !dmax) || (dmax && !dmin)) { e.preventDefault(); return fail("Set BOTH video-length fields or leave both blank.", "core", el(dmin ? "duration_max_s" : "duration_min_s")); }
+      if (dmin && dmax && Number(dmin) > Number(dmax)) { e.preventDefault(); return fail("Minimum video length can't exceed the maximum.", "core", el("duration_min_s")); }
+      // Posting-slot format (Distribution tab)
+      const slots = val("posting_slots");
+      if (slots && !slots.split(",").map(s => s.trim()).filter(Boolean).every(s => /^([01]?\d|2[0-3]):[0-5]\d$/.test(s))) {
+        e.preventDefault(); return fail("Posting slots must be HH:MM, comma-separated (e.g. 07:30, 21:00).", "dist", el("posting_slots"));
       }
+      // Valid → busy state on whichever button was clicked (persists through the navigation).
+      const submitter = e.submitter;
+      [saveBtn, document.getElementById("save-start")].forEach(function (b) { if (b) b.disabled = true; });
+      const active = submitter || saveBtn;
+      if (active) active.textContent = (submitter && submitter.name === "start_now")
+        ? "Starting…" : {{ ('Saving…' if editing else 'Creating…') | tojson }};
     });
   }
 </script>

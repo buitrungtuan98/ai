@@ -321,3 +321,102 @@ for it violated the "manage in the dashboard" principle every other credential a
 Per-user (not per-campaign) matches the quota's blast radius — the daily cap is per API key, and
 keys are per user. The chain keeps the ADR-quoted fallback semantics (404/daily-quota fail over)
 unchanged; it now just originates from the DB instead of the environment.
+
+### ADR-019 — Front-end design system: tokens, 12-col grid, one status-colour vocabulary, Jinja macros
+**Decision:** the UI is rebuilt on an explicit design system instead of ad-hoc per-page markup.
+`static/app.css` starts with a token layer — colour (4 dark surfaces, text, a brand accent, and a
+SEMANTIC STATUS SET `--st-{success,working,scheduled,review,failed,pending}` each with solid/bg/border
+variants), a modular type scale, a 4px spacing scale, radii, and elevation — and every component reads
+those tokens, so status colours are defined ONCE and reused identically by pills, banners, table
+highlights and chart bars. Repeated components live as Jinja macros in `templates/macros.html`
+(pill/page_head/card/stat/progress/bar/banner/empty/field); shared behaviour lives in `static/ui.js`
+(a `busyButton(btn, label, run)` that generalises the copy-pasted async-button idiom, plus the mobile
+drawer toggle with aria state). Layout is a 12-column grid + `.grid.cols-N` auto-fill, collapsing to a
+single column at mobile. The sidebar becomes an off-canvas drawer under a top bar below 720px (it used
+to simply vanish). Data-viz is hand-rolled CSS/inline-SVG bars only — NO chart library, NO CDN, NO
+external fonts/icons — honouring the self-contained/CSP constraint; every metric answers a persona
+question (health strip + AI-quota meter, campaign progress, A/B retention comparison, episode
+mini-bars, calendar runway). All backend contracts are preserved: route paths, form field names,
+element ids/`data-*` the JS and tests key on (`voice-select`+`data-current`, `task-rows`, `data-test`,
+tab panels), the flash whitelist, and the `textContent`-only / `esc()` XSS boundary.
+**Why:** the dashboard had grown feature-by-feature into 11 templates with zero shared components,
+hard-coded px/hex everywhere, and a mobile experience that hid the entire navigation — unusable for the
+primary Operator persona, who checks in from a phone. One token vocabulary + a component layer kills
+copy-paste drift (a status colour or spacing change is now one edit, not eleven), makes the three usage
+modes (Operator/Reviewer/Strategist) first-class at both 375px and 1280px, and keeps the whole thing
+inside the box's no-egress, single-stylesheet, hand-written-JS constraints.
+
+### ADR-020 — Live status via one read-only /api/summary poll; client-owned form validation
+**Decision:** ease-of-use features that need fresh server state read from a single read-only
+`GET /api/summary` endpoint that returns `{health, counts, channels, active_campaigns}` by reusing
+the exact helpers the dashboard renders from (`_system_health`, `_task_counts`) — so a polled value
+can never diverge from a full reload. `ui.js` polls it every 6s on every page and drives (a) a
+cross-page attention badge on the Task Logs / Asset Pool nav items + mobile hamburger, and (b) the
+dashboard's live health strip / tiles / banners. Destructive actions use an accessible in-page
+confirm dialog (`data-confirm` on the form; graceful fallback to native `confirm()`), and transient
+feedback uses aria-live toasts. The campaign form carries `novalidate` and validates entirely in JS,
+because a native `required` field on a hidden tab panel blocks submit with an un-focusable bubble
+(a silent failure); JS validation instead jumps to the offending field's tab and shows the reason.
+**Why:** the primary Operator persona checks in from a phone and must never miss a failure or a
+video awaiting review — a badge that follows them across pages beats a static dashboard they have to
+reload. Deriving counts client-side from the 50-row `/api/tasks` feed would drift from the real
+totals, so a purpose-built snapshot that shares the dashboard's own code is the honest choice. The
+endpoint is read-only and tenant-scoped (`CurrentUser`), adds no business logic, and touches no other
+package — the only backend change in the UI work, and squarely a "template needs live data" one.
+
+### ADR-021 — Optional light theme via `[data-theme]`; client-owned filtering; thin flow shortcuts
+**Decision:** the design system stays dark-first but gains an OPTIONAL light theme as a single
+`:root[data-theme="light"]` token override block (status hues darken to keep WCAG-AA on white); a
+tiny inline `<head>` script applies the saved `localStorage` preference before first paint to avoid a
+flash, and a toggle in the sidebar/top bar flips it. List filtering (Asset Pool status chips,
+Campaigns + Task Logs search) and keyboard review (J/K/A/R) are done entirely client-side over the
+already-rendered rows — no new endpoints, no server round-trips. The one flow shortcut that needs the
+server, "Create & Start", is a single optional `start_now` form field on the existing `POST /campaigns`
+that reuses the standalone start route's exact logic (`status=active` + `hydrate_buffers`). The most
+destructive action (channel delete, which cascades campaigns + renders) upgrades its confirm to a
+type-the-name gate.
+**Why:** a light option is cheap once everything is tokenised and some operators prefer it on a
+bright desktop, but dark stays the default the product was designed around. Filtering/search/keyboard
+belong on the client — the data is already on the page, and a round-trip would only add latency and
+backend surface for what is pure presentation. "Create & Start" removes a two-step create-then-start
+dance without duplicating logic; and requiring the channel name to be typed makes the one irreversible
+cascading delete deliberate rather than a stray click.
+
+### ADR-022 — Master–detail "object hub" navigation for Channel → Campaign → Assets/Tasks
+**Decision:** the four flat lists (Channels, Campaigns, Asset Pool, Task Logs) are wired into the real
+hierarchy without adding route paths. Every entity name is a link to its home; related collections
+appear as counts that link to a SCOPED list view (`/campaigns?channel=`, `/assets?campaign=` or
+`?channel=`, `/tasks?campaign=`); each scoped view narrows its query SERVER-SIDE from the URL param
+and renders a breadcrumb + a "show all" clear, so the URL is the single source of truth (back-button,
+bookmarking, sharing all work). Rollup counts (campaigns-per-channel, buffer-per-campaign) are small
+read-only `group by` queries added to the relevant page contexts. The existing
+`/campaigns/{id}/performance` route is promoted to the campaign HUB with an Overview · Assets · Tasks ·
+Edit tab row — a real detail page reusing a route that already existed. Task Logs is JS-rendered, so
+its scope filters `/api/tasks` client-side over the campaign id the page embeds; every other scope is
+server-side.
+**Why:** a management console's whole job is to let you travel the relationships between objects, not
+eyeball parallel lists. The master–detail + scoped-list + breadcrumb pattern is the industry norm
+(GitHub, Stripe, YouTube Studio) and maps 1:1 to the `User → Channel → Campaign → {Task,
+BufferPoolItem}` model. Doing the scoping server-side from the URL (rather than client-side over a
+fully-loaded list) keeps it correct at any size and makes views shareable; reusing Performance as the
+hub delivers a true detail page without new top-level routes or a heavier backend.
+
+### ADR-023 — Dashboard as a "trust instrument": triage, narrative, and change over raw counts
+**Decision:** the dashboard is reframed from a status board into a sense-making surface for an
+unattended, self-learning system. It leads with a **triage inbox** ("Needs your attention") — the
+concrete failed/awaiting-review items, most-recent first, with inline Retry (reusing the task-retry
+endpoint) and Review links — or a calm **"All clear"** state when the queue is empty. Below it, an
+**activity feed** renders the pipeline as a narrative ("Published · Failed · Awaiting review", with
+relative times), and a client-side **"N new since your last visit"** marker (last-visit stamp in
+localStorage) answers the 2–3×/day checker's real question — *what changed?* The Asset Pool shows the
+channel's learned **playbook + avoid-notes beside the player** (review-in-context) so judgment happens
+against known criteria; rejecting with a reason states plainly that it becomes a permanent avoid-note,
+and Performance surfaces the closed **learning loop** ("your rejections shaped these notes; they steer
+every new script"). The campaign form carries a live **identity card** — a plain-language summary of
+the channel being created. A global `[hidden] { display:none !important }` rule guarantees the hidden
+attribute always beats component `display` (so JS-toggled cards/badges hide reliably).
+**Why:** the product's real UX job is trust, not controls — the operator glances for ~30 seconds and
+must know instantly whether to act. Counts are low-information; a prioritized action queue, a legible
+history, and a "what's new" diff are what make an autonomous factory feel steerable. Showing the
+learning loop closing is what keeps a human bothering to give feedback that improves the AI. The
+backend additions are read-only (two focused queries for the triage lists) and reuse existing helpers.

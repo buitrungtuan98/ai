@@ -1,80 +1,191 @@
 {% extends "base.html" %}
+{% import "macros.html" as ui %}
 {% block title %}Dashboard · AI Video Factory{% endblock %}
 {% block content %}
-<div class="page-head">
-  <div>
-    <h1>Dashboard</h1>
-    <p class="subtitle">Automated vertical-video generation, running on your zero-cost box.</p>
-  </div>
+{% call ui.page_head('Dashboard', 'Automated vertical-video generation, running on your zero-cost box.') %}
   <a class="btn" href="/campaigns/new">+ New Campaign</a>
-</div>
+{% endcall %}
 
-{# ── System health strip ─────────────────────────────────────────────────── #}
-<div class="health">
-  <span class="hitem"><span class="dot2 {{ 'ok' if health.worker else 'bad' }}"></span>
-    Worker {{ 'running' if health.worker else 'stopped' }}</span>
-  <span class="hitem"><span class="dot2 {{ 'ok' if health.redis else 'bad' }}"></span>
-    Redis {{ 'connected' if health.redis else 'down' }}</span>
-  <span class="hitem">Queue: <b>{{ health.queue_depth if health.queue_depth is not none else '—' }}</b> waiting</span>
-  <span class="hitem">Buffer: <b>{{ health.buffer_ready }}</b> pre-rendered</span>
+{# ── System health strip (degraded = red when worker/redis down; auto-refreshes) ── #}
+{% set degraded = not health.worker or not health.redis %}
+<div class="health{{ ' degraded' if degraded }}" id="health-strip" role="status" aria-live="polite">
+  <span class="hitem"><span class="dot2 {{ 'ok' if health.worker else 'bad' }}" id="hd-worker"></span>
+    Worker <b id="hl-worker">{{ 'running' if health.worker else 'stopped' }}</b></span>
+  <span class="hitem"><span class="dot2 {{ 'ok' if health.redis else 'bad' }}" id="hd-redis"></span>
+    Redis <b id="hl-redis">{{ 'connected' if health.redis else 'down' }}</b></span>
+  <span class="hitem">Queue <b id="hv-queue">{{ health.queue_depth if health.queue_depth is not none else '—' }}</b> waiting</span>
+  <span class="hitem">Buffer <b id="hv-buffer">{{ health.buffer_ready }}</b> pre-rendered</span>
   <span class="hitem {{ 'warn' if health.disk_pct and health.disk_pct >= 85 }}">
-    Disk: <b>{{ health.disk_pct ~ '%' if health.disk_pct is not none else '—' }}</b> used</span>
+    Disk <b id="hv-disk">{{ health.disk_pct ~ '%' if health.disk_pct is not none else '—' }}</b></span>
   <span class="hitem {{ 'warn' if health.ai_budget and health.ai_calls >= health.ai_budget * 0.8 }}">
-    AI calls today: <b>{{ health.ai_calls }}{{ ' / ' ~ health.ai_budget if health.ai_budget }}</b></span>
+    AI today <b>{{ health.ai_calls }}{{ ' / ' ~ health.ai_budget if health.ai_budget }}</b>
+    {% if health.ai_budget %}
+    {% set aipct = (100 * health.ai_calls / health.ai_budget)|round(0,'floor')|int %}
+    <span class="meter {{ 'crit' if aipct >= 100 else ('warn' if aipct >= 80 else '') }}" style="width:70px">
+      <span style="width:{{ aipct if aipct < 100 else 100 }}%"></span></span>
+    {% endif %}
+  </span>
+  <span class="hitem live-stamp" title="Auto-refreshes every few seconds"><span class="live-dot" id="live-dot"></span> Live</span>
 </div>
+<p class="hint" id="degraded-note" style="margin:-12px 0 16px; color:var(--st-failed)"
+   {{ '' if degraded else 'hidden' }}>⚠ The factory is degraded — rendering and publishing are paused until the worker and Redis are back.</p>
 
-{% if counts.failed > 0 %}
-<div class="banner danger">
-  ⚠ {{ counts.failed }} task{{ 's' if counts.failed > 1 }} failed and need{{ '' if counts.failed > 1 else 's' }} attention.
-  <a href="/tasks">Review &amp; retry →</a>
+{# ── Triage inbox: what needs a human, in order ─────────────────────────────── #}
+{% set need = (attention_failed|length) + (attention_review|length) %}
+<div class="card triage" id="triage-card" {{ '' if need else 'hidden' }}>
+  <div class="card-head"><h3>Needs your attention</h3><span class="pill failed">{{ need }}</span></div>
+  <ul class="triage-list" id="triage-list">
+    {% for t in attention_failed %}
+    {% set camp = camp_by_id.get(t.campaign_id) %}
+    <li>
+      <span class="tri-dot failed"></span>
+      <div class="grow">
+        <b>{{ camp.topic_name if camp else 'C' ~ t.campaign_id }} · Ep {{ t.episode_number }}</b> failed
+        <div class="meta">{{ (t.error_message or 'Render failed — open Task Logs for details.')[:120] }}</div>
+      </div>
+      <form class="retry-form" data-task="{{ t.id }}"><button class="btn ghost sm" type="submit">↻ Retry</button></form>
+    </li>
+    {% endfor %}
+    {% for i in attention_review %}
+    {% set camp = camp_by_id.get(i.campaign_id) %}
+    <li>
+      <span class="tri-dot review"></span>
+      <div class="grow">
+        <b>{{ camp.topic_name if camp else 'C' ~ i.campaign_id }} · Ep {{ i.episode_number }}</b> awaiting your review
+        <div class="meta">{{ i.metadata_json.get('title','') }}</div>
+      </div>
+      <a class="btn sm" href="/assets?campaign={{ i.campaign_id }}">Review →</a>
+    </li>
+    {% endfor %}
+  </ul>
 </div>
-{% endif %}
-{% if counts.awaiting_review > 0 %}
-<div class="banner info">
-  🎬 {{ counts.awaiting_review }} video{{ 's' if counts.awaiting_review > 1 }} waiting for your review.
-  <a href="/assets">Preview &amp; approve →</a>
+<div class="card allclear" id="allclear-card" {{ '' if not need else 'hidden' }}>
+  <span class="ac-ico">✓</span>
+  <div><b>All clear — nothing needs you right now.</b>
+    <div class="meta">The factory is running on its own. Failed renders and videos awaiting review will surface here.</div></div>
 </div>
-{% endif %}
 
 <div class="stats">
-  <div class="stat"><div class="n">{{ channels|length }}</div><div class="l">Connected channels</div></div>
-  <div class="stat"><div class="n">{{ campaigns|selectattr('status.value','equalto','active')|list|length }}</div><div class="l">Active campaigns</div></div>
-  <div class="stat"><div class="n">{{ counts.published }}</div><div class="l">Videos published</div></div>
-  <div class="stat"><div class="n">{{ counts.working }}</div><div class="l">In pipeline</div></div>
-  <div class="stat"><div class="n">{{ counts.awaiting_review }}</div><div class="l">Awaiting review</div></div>
-  <div class="stat"><div class="n">{{ counts.failed }}</div><div class="l">Failed</div></div>
+  {{ ui.stat(channels|length, 'Connected channels', href='/channels', live='channels') }}
+  {{ ui.stat(campaigns|selectattr('status.value','equalto','active')|list|length, 'Active campaigns', tone='work', href='/campaigns', live='active_campaigns') }}
+  {{ ui.stat(counts.published, 'Videos published', tone='ok', live='published') }}
+  {{ ui.stat(counts.working, 'In pipeline', tone='work', href='/tasks', live='working') }}
+  {{ ui.stat(counts.awaiting_review, 'Awaiting review', tone='warn' if counts.awaiting_review else '', href='/assets', live='awaiting_review') }}
+  {{ ui.stat(counts.failed, 'Failed', tone='bad' if counts.failed else '', href='/tasks', live='failed') }}
+</div>
+
+{# ── Factory scorecard: trajectory, not just current counts ─────────────────── #}
+<div class="card">
+  <div class="card-head"><h3>Factory scorecard</h3><span class="meta">is the factory winning?</span></div>
+  <div class="scorecard mt">
+    <div class="sc-cell">
+      <div class="l">Published · 7 days</div>
+      <div class="n">{{ scorecard.published_7d }}</div>
+      <div class="spark-bars">
+        {% for v in scorecard.throughput %}
+        <span class="sb" style="height:{{ (100 * v / scorecard.throughput_max)|round|int if scorecard.throughput_max else 3 }}%"
+              title="{{ scorecard.throughput_days[loop.index0] }}: {{ v }}"></span>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="sc-cell">
+      <div class="l">Buffer runway</div>
+      <div class="n">{{ scorecard.ready }}<span class="u"> ready</span></div>
+      <div class="meta">{% if scorecard.runway_days is not none %}≈ {{ scorecard.runway_days }} day{{ 's' if scorecard.runway_days != 1 }} at current cadence{% else %}no active posting slots{% endif %}</div>
+    </div>
+    <div class="sc-cell">
+      <div class="l">Retention · this week</div>
+      {% if scorecard.retention_this is not none %}
+      {% set delta = scorecard.retention_this - (scorecard.retention_prev or scorecard.retention_this) %}
+      <div class="n">{{ scorecard.retention_this }}%
+        {% if scorecard.retention_prev is not none %}<span class="delta {{ 'up' if delta >= 0 else 'down' }}">{{ '▲' if delta >= 0 else '▼' }} {{ (delta if delta >= 0 else -delta)|round(1) }}</span>{% endif %}
+      </div>
+      <div class="meta">{% if scorecard.retention_prev is not none %}vs {{ scorecard.retention_prev }}% last week{% else %}avg % viewed{% endif %}</div>
+      {% else %}<div class="n muted">—</div><div class="meta">no published stats yet</div>{% endif %}
+    </div>
+    <div class="sc-cell">
+      <div class="l">Next publish</div>
+      {% if next_publish %}
+      <div class="n">~{{ next_publish.in_hours }}h</div>
+      <div class="meta">{{ next_publish.when }} · {{ next_publish.campaign }}</div>
+      {% else %}<div class="n muted">—</div><div class="meta">no upcoming slots</div>{% endif %}
+    </div>
+  </div>
 </div>
 
 <div class="card">
   <div class="flex between">
-    <h3>Recent tasks</h3>
-    <a href="/tasks">View all →</a>
+    <h3>Activity <span class="meta" id="since-note"></span></h3>
+    <a href="/tasks">Task Logs →</a>
   </div>
   {% if tasks %}
-  <table class="mt">
-    <thead><tr><th>Task</th><th>Episode</th><th>Status</th><th>Progress</th><th>Result</th></tr></thead>
-    <tbody>
-      {% for t in tasks %}
-      {% set camp = camp_by_id.get(t.campaign_id) %}
-      {% set chan = chan_by_id.get(camp.channel_id) if camp else none %}
-      <tr>
-        <td>#{{ t.id }}</td>
-        <td>{{ camp.topic_name if camp else 'C' ~ t.campaign_id }} · Ep {{ t.episode_number }}
-            <div class="meta">{{ chan.channel_name if chan else '' }}</div></td>
-        <td><span class="pill {{ t.status.value }}">{{ t.status.value.replace('_',' ').title() }}</span></td>
-        <td><div class="progress"><span style="width: {{ t.progress_pct }}%"></span></div></td>
-        <td>{% if t.published_url %}<a href="{{ t.published_url }}" target="_blank" rel="noopener">View ↗</a>{% endif %}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  {% set FK = {'COMPLETED': ('done', 'Published'), 'FAILED': ('failed', 'Failed'),
+               'AWAITING_REVIEW': ('review', 'Awaiting review'), 'SCHEDULED': ('scheduled', 'Rendered · scheduled'),
+               'PUBLISHING': ('working', 'Publishing'), 'RENDERING': ('working', 'Rendering'),
+               'AI_GENERATION': ('working', 'Writing script'), 'AUDIO_SYNCED': ('working', 'Audio synced'),
+               'PENDING_QUEUE': ('pending', 'Queued')} %}
+  <ul class="feed mt">
+    {% for t in tasks %}
+    {% set camp = camp_by_id.get(t.campaign_id) %}
+    {% set chan = chan_by_id.get(camp.channel_id) if camp else none %}
+    {% set ev = FK.get(t.status.value, ('pending', t.status.value.replace('_',' ')|title)) %}
+    <li class="feed-item" data-time="{{ t.updated_at.isoformat() }}Z">
+      <span class="feed-dot {{ ev[0] }}"></span>
+      <div class="grow">
+        <span class="feed-label">{{ ev[1] }}</span> —
+        <a href="/campaigns/{{ t.campaign_id }}/performance">{{ camp.topic_name if camp else 'C' ~ t.campaign_id }}</a> · Ep {{ t.episode_number }}
+        {% if chan %}<span class="meta">· {{ chan.channel_name }}</span>{% endif %}
+        {% if t.published_url %} · <a href="{{ t.published_url }}" target="_blank" rel="noopener">View ↗</a>{% endif %}
+      </div>
+      <span class="feed-when" data-reltime="{{ t.updated_at.isoformat() }}Z">{{ t.updated_at.strftime('%H:%M') }} UTC</span>
+    </li>
+    {% endfor %}
+  </ul>
   {% else %}
-  <div class="empty mt">
-    <p><b>Get started in 3 steps:</b></p>
-    <p>1. <a href="/channels">Connect a channel</a> {{ '✓' if channels }}<br>
-       2. <a href="/credentials">Add your API keys</a> {{ '✓' if user.gemini_api_key and user.pexels_api_key }}<br>
-       3. <a href="/campaigns/new">Create &amp; start a campaign</a></p>
-  </div>
+  {% call ui.empty('🚀', 'Get started in 3 steps', 'Your factory is ready — set it up once and it runs itself.') %}
+    <ul class="steps">
+      <li><span class="tick {{ 'done' if channels }}">{{ '✓' if channels else '1' }}</span> <a href="/channels">Connect a channel</a></li>
+      <li><span class="tick {{ 'done' if user.gemini_api_key and user.pexels_api_key }}">{{ '✓' if user.gemini_api_key and user.pexels_api_key else '2' }}</span> <a href="/credentials">Add your API keys</a></li>
+      <li><span class="tick">3</span> <a href="/campaigns/new">Create &amp; start a campaign</a></li>
+    </ul>
+  {% endcall %}
   {% endif %}
 </div>
+{% endblock %}
+{% block scripts %}
+<script>
+  (function () {
+    // Inline retry from the triage inbox (reuses the task retry endpoint).
+    document.querySelectorAll(".retry-form").forEach(function (f) {
+      f.addEventListener("submit", function (e) {
+        e.preventDefault();
+        var btn = f.querySelector("button"), id = f.dataset.task;
+        window.ui.busyButton(btn, "↻ Retrying…", function () {
+          return fetch("/api/tasks/" + id + "/retry", { method: "POST" })
+            .then(function (r) { if (!r.ok) throw new Error(); return r.json(); })
+            .then(function () {
+              window.ui.toast("Retry queued.", "success");
+              var li = f.closest("li"); if (li) li.remove();
+              if (!document.querySelectorAll("#triage-list li").length) {
+                var tc = document.getElementById("triage-card"), ac = document.getElementById("allclear-card");
+                if (tc) tc.hidden = true; if (ac) ac.hidden = false;
+              }
+            })
+            .catch(function () { window.ui.toast("Couldn't retry — open Task Logs.", "danger"); });
+        });
+      });
+    });
+    // "New since your last visit" — mark activity newer than the last check.
+    try {
+      var key = "aivf_last_visit", last = parseFloat(localStorage.getItem(key) || "0"), n = 0;
+      document.querySelectorAll(".feed-item").forEach(function (li) {
+        var t = Date.parse(li.dataset.time);
+        if (!isNaN(t) && last && t > last) { li.classList.add("is-new"); n++; }
+      });
+      var note = document.getElementById("since-note");
+      if (note && n > 0) note.textContent = "· " + n + " new since your last visit";
+      localStorage.setItem(key, String(Date.now()));
+    } catch (e) { /* private mode */ }
+  })();
+</script>
 {% endblock %}
