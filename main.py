@@ -1572,6 +1572,37 @@ def api_summary(user: CurrentUser, db: DbDep):
             "channels": channels, "active_campaigns": active}
 
 
+@app.get("/api/search")
+def api_search(user: CurrentUser, db: DbDep, q: str = ""):
+    """One read-only search across the whole workspace (channels, campaigns, episodes) for the ⌘K
+    palette — so 'find that thing' is one box, not 'which page do I search on?'. Tenant-scoped."""
+    q = q.strip()
+    if len(q) < 2:
+        return {"results": []}
+    like = f"%{q}%"
+    results: list[dict] = []
+    for c in db.scalars(select(Channel).where(
+            Channel.user_id == user.id, Channel.channel_name.ilike(like)).limit(5)):
+        results.append({"type": "Channel", "label": c.channel_name,
+                        "sub": c.platform.value, "href": f"/campaigns?channel={c.id}"})
+    for c in db.scalars(select(Campaign).where(
+            Campaign.user_id == user.id, Campaign.topic_name.ilike(like))
+            .order_by(Campaign.id.desc()).limit(6)):
+        results.append({"type": "Campaign", "label": c.topic_name,
+                        "sub": c.status.value, "href": f"/episodes?campaign={c.id}"})
+    camp_names = {c.id: c.topic_name for c in db.scalars(
+        select(Campaign).where(Campaign.user_id == user.id))}
+    for t in db.scalars(select(Task).where(
+            Task.user_id == user.id,
+            or_(Task.synopsis.ilike(like), cast(Task.episode_number, String).ilike(like)))
+            .order_by(Task.id.desc()).limit(8)):
+        topic = camp_names.get(t.campaign_id, f"C{t.campaign_id}")
+        label = f"Ep {t.episode_number} · {topic}"
+        results.append({"type": "Episode", "label": label,
+                        "sub": (t.synopsis or t.status.value)[:60], "href": f"/episodes/{t.id}"})
+    return {"results": results}
+
+
 @app.post("/api/tasks/{task_id}/retry")
 def retry_task(task_id: int, user: CurrentUser, db: DbDep, return_to: str = Form("")):
     """Retry a failed episode. If the rendered file still exists (e.g. the upload failed or the

@@ -573,8 +573,19 @@ scope · act where you see. Six phases, each additive (no route renamed/removed,
 - Verified: 165 tests (calendar test extended — campaign→episodes link, week labels, Today reset,
   clamped out-of-range week), ruff clean, docs guard green; Planner screenshotted.
 
-## Phase 6 — Global search ⌘K (planned)
-One palette + read-only endpoint across channels/campaigns/episodes.
+## Phase 6 — Global search ⌘K `DONE`
+- Command palette (⌘K / Ctrl-K, or "/") over one read-only `/api/search` endpoint spanning channels
+  / campaigns / episodes (tenant-scoped, per-type capped, min 2 chars, Vietnamese text included).
+- `ui.js`: debounced fetch with a request-sequence guard, keyboard nav (↑/↓/↵/Esc), results built
+  with textContent/DOM nodes only (XSS-safe); sidebar "🔎 Search ⌘K" button opens it for mouse/mobile.
+  Jumps straight to the right home (campaign → its Episodes, episode → its detail). ADR-037.
+- Verified: 166 tests (1 new — search spans types, tenant-scoped, min-length, palette present in
+  shell), ruff clean, docs guard green; palette screenshotted with live results.
+
+## UI/UX restructure — status
+All six phases DONE (Episode view · filter grammar · scope switcher · Episodes pipeline · Planner ·
+⌘K search). One episode now has one home; one filter language; one persistent scope; act where you
+see. All additive — no route renamed/removed, Task Logs & Asset Pool kept as specialized views.
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation

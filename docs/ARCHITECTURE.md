@@ -674,3 +674,18 @@ won't fill" into a one-click path to the episodes that need attention. A "render
 deliberately NOT added: forcing an out-of-band render would mean a new queue-enqueue endpoint and
 interact with the single-render lock / daily-cap logic — higher risk than this frontend-only phase
 warrants — so the empty-buffer case links to where the operator already has the controls instead.
+
+### ADR-037 — Global search palette (⌘K) (UI restructure, phase 6)
+**Decision:** a command palette (⌘K / Ctrl-K, or "/" when not typing) searches the whole workspace
+through one read-only `/api/search` endpoint that spans channels (name), campaigns (topic) and
+episodes (synopsis / episode number), tenant-scoped, capped per type, min 2 chars. The palette lives
+in `base.html` + `ui.js`: a debounced fetch with a monotonic request-sequence guard (so a slow
+response can't overwrite a newer query — same pattern as the Task Logs poller), keyboard navigation
+(↑/↓/↵/Esc), and results built with `textContent`/DOM nodes only (never innerHTML — the labels are
+user/AI data, honoring the XSS boundary). A sidebar "🔎 Search ⌘K" button opens it for mouse/mobile.
+**Why:** "which page do I search on?" was itself part of the fragmentation — each page searched only
+its own type. One palette over one endpoint makes finding anything a single reflex and jumps straight
+to the right home (a campaign → its Episodes, an episode → its detail view). Reusing the established
+request-sequence guard and the textContent-only build means it inherits the app's correctness and
+security conventions rather than inventing new ones; keeping the endpoint read-only and per-type-capped
+keeps it cheap on the single box.

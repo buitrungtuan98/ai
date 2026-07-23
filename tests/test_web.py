@@ -282,6 +282,20 @@ def test_scope_switcher_and_scoped_nav(client):
     assert f'value="{cid}" selected' in scoped  # the active channel is marked in the switcher
 
 
+def test_api_search_across_types(client):
+    """The ⌘K search endpoint spans channels, campaigns and episodes and is tenant-scoped."""
+    tid, _bid = _make_episode(client)  # campaign "Space" + ep1 synopsis "A test episode"
+    assert client.get("/api/search?q=a").json()["results"] == []  # <2 chars → nothing
+    camp_hits = client.get("/api/search?q=Space").json()["results"]
+    assert any(r["type"] == "Campaign" and r["href"].startswith("/episodes?campaign=")
+               for r in camp_hits)
+    ep_hits = client.get("/api/search?q=test").json()["results"]
+    assert any(r["type"] == "Episode" and r["href"] == f"/episodes/{tid}" for r in ep_hits)
+    # The palette itself is present in the shell.
+    home = client.get("/").text
+    assert 'id="cmdk"' in home and 'id="cmdk-open"' in home
+
+
 def test_ownership_guard_404(client):
     assert client.post("/campaigns/99999/delete", follow_redirects=False).status_code == 404
 

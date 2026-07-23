@@ -45,6 +45,7 @@
         <a href="/credentials" title="Credentials" class="{{ 'active' if nav=='credentials' else '' }}"><span class="ico">⚿</span> <span class="nav-text">Credentials</span></a>
       </nav>
       <div class="sidebar-tools">
+        <button class="btn ghost sm block" id="cmdk-open" type="button">🔎 Search <span class="kbd">⌘K</span></button>
         <button class="btn ghost sm block" id="theme-toggle-side" type="button">◐ Toggle theme</button>
       </div>
       {% if settings.MULTI_TENANT_MODE %}
@@ -79,6 +80,16 @@
     </div>
   </div>
   <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+
+  {# Global search palette (⌘K / Ctrl-K, or / ). Results come from /api/search. #}
+  <div class="cmdk-backdrop" id="cmdk" hidden>
+    <div class="cmdk" role="dialog" aria-modal="true" aria-label="Search everything">
+      <input id="cmdk-input" class="cmdk-input" type="search" autocomplete="off"
+             placeholder="Search channels, campaigns, episodes…" aria-label="Search everything">
+      <ul id="cmdk-results" class="cmdk-results"></ul>
+      <p class="cmdk-hint">↑↓ move · ↵ open · Esc close</p>
+    </div>
+  </div>
 
   <script src="{{ static_url('ui.js') }}" defer></script>
   {% block scripts %}{% endblock %}
