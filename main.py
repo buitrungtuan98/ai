@@ -26,7 +26,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, func, or_, select
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -1259,11 +1259,31 @@ def tasks_page(request: Request, user: CurrentUser, db: DbDep, campaign: int | N
         {"request": request, "user": user, "nav": "tasks", "scope_campaign": scope})
 
 
+_TASKS_PER_PAGE = 25
+
+
 @app.get("/api/tasks")
-def api_tasks(user: CurrentUser, db: DbDep):
-    rows = db.scalars(
-        select(Task).where(Task.user_id == user.id).order_by(Task.id.desc()).limit(50)
-    ).all()
+def api_tasks(user: CurrentUser, db: DbDep,
+              page: int = 1, q: str = "", campaign: int | None = None):
+    # Full task history, newest first, paginated — page 1 carries the live/active jobs. Scope (?campaign)
+    # and search (?q) run in SQL so they span ALL history, not just the page currently in the browser.
+    base = select(Task).where(Task.user_id == user.id)
+    if campaign:
+        base = base.where(Task.campaign_id == campaign)
+    q = q.strip()
+    if q:
+        like = f"%{q}%"
+        base = (base.outerjoin(Campaign, Task.campaign_id == Campaign.id)
+                    .outerjoin(Channel, Campaign.channel_id == Channel.id)
+                    .where(or_(cast(Task.id, String).ilike(like),
+                               cast(Task.status, String).ilike(like),
+                               Campaign.topic_name.ilike(like),
+                               Channel.channel_name.ilike(like))))
+    total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
+    pages = max(1, -(-total // _TASKS_PER_PAGE))  # ceil-divide
+    page = min(max(page, 1), pages)
+    rows = db.scalars(base.order_by(Task.id.desc())
+                      .limit(_TASKS_PER_PAGE).offset((page - 1) * _TASKS_PER_PAGE)).all()
     campaigns = {c.id: c for c in db.scalars(
         select(Campaign).where(Campaign.user_id == user.id)).all()}
     channels = {c.id: c for c in db.scalars(
@@ -1290,7 +1310,7 @@ def api_tasks(user: CurrentUser, db: DbDep):
             "can_retry": t.status == TaskStatus.FAILED,
             "updated_at": t.updated_at.isoformat() if t.updated_at else None,
         })
-    return {"tasks": out}
+    return {"tasks": out, "page": page, "pages": pages, "total": total}
 
 
 @app.get("/api/summary")

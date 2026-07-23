@@ -410,13 +410,28 @@ measured at TTS time (audio remains ground truth). Proposed by the AI designer.
 - **Visibility-aware polling**: both `/api/tasks` and `/api/summary` pollers pause when the tab is
   backgrounded and refresh on return; the task poller also adapts its interval (fast while a job is in
   flight, relaxed when everything is terminal). ADR-025 records the batch.
-- Deferred: Task Logs history pagination — the live poller replaces the whole `#task-rows` table each
-  tick, so server paging would fight the client render for low benefit; revisit only if a single user
-  accumulates enough non-terminal tasks to matter.
+- Initially deferred Task Logs history pagination — later delivered, see the next batch.
 - Verified: 139 tests, ruff clean, docs guard green; on a 48-asset / 36-episode seed the Asset Pool
   paged 24+24 with honest chip counts (16/19/13), Performance paged 20+13 with aggregates intact and
   the 🏆 winner row surviving onto page 2, `Cache-Control: …immutable` present on `?v=` and absent on
   the plain asset, all screenshotted at 375px & 1280px.
+
+## Task Logs history pagination `DONE`
+- Turns the live Task Logs feed from a truncated 50-row window into fully reachable, searchable history.
+- `/api/tasks` gained `?page=` (25/page, newest first), `?q=` (SQL `ilike` over id / status / campaign
+  topic / channel name) and `?campaign=` scope; returns `{tasks, page, pages, total}`; the old hard
+  `LIMIT 50` (which hid all older history) is removed.
+- `app.js`: debounced server-side search box + Newer/Older pager, a request-sequence guard so a slow
+  in-flight poll can't overwrite a newer pager/search action, adopts the server's clamped page, and
+  keeps the ADR-025 adaptive/visibility polling (history pages are all-terminal → auto-relax to slow).
+- Search + scope moved server-side on purpose: they now span the *whole* history (incl. Vietnamese
+  topic text), not just the rows currently in the browser. ADR-026 records the decision + the reversal
+  of the ADR-025 deferral.
+- Verified: 140 tests (1 new — `/api/tasks` pagination/search/scope), ruff clean, docs guard green; on
+  a 38-task seed page 1 showed 25 rows (newest #38/Ep129 first) + "Page 1 of 2 · 38 tasks", page 2
+  showed 13, `?page=99` clamped to 2, `q=Trần` matched 36 across both pages, `q=failed` found the lone
+  FAILED task (which lives on page 2) from page 1, and the pager collapsed on single-page results;
+  screenshotted at 375px & 1280px.
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation

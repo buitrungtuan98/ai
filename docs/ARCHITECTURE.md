@@ -470,4 +470,25 @@ serving-side complement to ADR-024's content hash: the hash makes each build a n
 zero-revalidation caching that is still instantly correct on deploy. Visibility-aware polling stops a
 backgrounded tab from hitting `/api/tasks` and `/api/summary` forever; the adaptive interval spends
 requests where they matter (an active render) and backs off when nothing is happening — meaningful on
-a single CPU-only box.
+a single CPU-only box. ADR-025 deliberately deferred paginating Task Logs (a *live* surface, unlike
+these two server-rendered pages); ADR-026 revisits that.
+
+### ADR-026 — Paginating the live Task Logs feed (server-side page + search + scope)
+**Decision:** Task Logs — the one client-rendered, continuously-polled table — now paginates on the
+server too. `/api/tasks` gained `?page=` (25/page, newest first), `?q=` (SQL `ilike` over id / status
+/ campaign topic / channel name), and `?campaign=` scope, and it returns `{tasks, page, pages, total}`;
+the hard `LIMIT 50` that previously *hid* all older history is gone. `app.js` drives it: a debounced
+search box and a Newer/Older pager that both re-issue the poll, a monotonic request-sequence guard so a
+slow in-flight poll can never overwrite the result of a newer click, and it adopts the server's clamped
+`page` from every response. The adaptive/visibility polling from ADR-025 is unchanged, and now has a
+pleasant side effect — history pages contain only terminal tasks, so the poller automatically relaxes
+to the slow interval while you browse them. **Why:** the earlier deferral was wrong once the real
+constraint was named. The client filter and the `LIMIT 50` meant search and history both silently
+stopped at the 50 newest rows — a long-running channel's older failures were simply unreachable and
+unsearchable. A live table can't hold unbounded history in the DOM, so the only correct fix is to move
+paging, search *and* scope into SQL where they span the whole history, and to keep the browser holding
+just one page. Search moved server-side rather than staying a client convenience specifically so it
+searches everything, not the 25 rows currently loaded; doing it in SQL also handles the Vietnamese
+topic text the operator actually types. The request-sequence guard is the one piece a static paginated
+page doesn't need — on a table that also refreshes itself every few seconds, without it a background
+poll racing a pager click would snap the user back to the wrong page.
