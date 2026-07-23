@@ -44,8 +44,9 @@
       <div class="form-row"><label>Topic name</label>
         <input name="topic_name" required placeholder="Amazing space facts" value="{{ campaign.topic_name if editing else (source.topic_name if dup else '') }}"></div>
       <div class="form-row"><label>Target channel</label>
+        {% set sel_channel = sel_channel if sel_channel is defined else None %}
         <select name="channel_id" required>
-          {% for c in channels %}<option value="{{ c.id }}" {{ 'selected' if editing and campaign.channel_id == c.id }}>{{ c.channel_name }} ({{ c.platform.value }})</option>{% endfor %}
+          {% for c in channels %}<option value="{{ c.id }}" {{ 'selected' if c.id == sel_channel }}>{{ c.channel_name }} ({{ c.platform.value }})</option>{% endfor %}
         </select>
       </div>
       <div class="form-row"><label>Total episodes</label>
@@ -500,6 +501,13 @@
       }
       // Valid → busy state on whichever button was clicked (persists through the navigation).
       const submitter = e.submitter;
+      // A disabled submit button is NOT serialized, so its name/value (e.g. start_now=1) would be
+      // dropped when we disable it below — carry the click through as a hidden field first.
+      if (submitter && submitter.name) {
+        const carry = document.createElement("input");
+        carry.type = "hidden"; carry.name = submitter.name; carry.value = submitter.value;
+        campaignForm.appendChild(carry);
+      }
       [saveBtn, document.getElementById("save-start")].forEach(function (b) { if (b) b.disabled = true; });
       const active = submitter || saveBtn;
       if (active) active.textContent = (submitter && submitter.name === "start_now")

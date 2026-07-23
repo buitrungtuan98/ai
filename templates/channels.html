@@ -4,7 +4,7 @@
 {% block content %}
 {% call ui.page_head('Channels', 'Connect and manage your YouTube channels and Facebook pages.') %}
   <a class="btn" href="/oauth/google/start">+ YouTube (OAuth)</a>
-  <button class="btn ghost" onclick="document.getElementById('fb-form').scrollIntoView({behavior:'smooth'})">+ Facebook Page</button>
+  <button class="btn ghost" onclick="var d=document.getElementById('fb-form'); d.open=true; d.scrollIntoView({behavior:'smooth'})">+ Facebook Page</button>
 {% endcall %}
 
 {% if total_all %}
@@ -45,20 +45,22 @@
 {% call ui.empty('◉', 'No channels connected yet', 'Connect a YouTube channel or Facebook page — every campaign publishes to one of these.') %}
   <div class="row-actions" style="justify-content:center">
     <a class="btn" href="/oauth/google/start">+ YouTube (OAuth)</a>
-    <button class="btn ghost" onclick="document.getElementById('fb-form').scrollIntoView({behavior:'smooth'})">+ Facebook Page</button>
+    <button class="btn ghost" onclick="var d=document.getElementById('fb-form'); d.open=true; d.scrollIntoView({behavior:'smooth'})">+ Facebook Page</button>
   </div>
 {% endcall %}
 {% endif %}
 
-<div class="card mt" id="fb-form">
-  <h3>Add a Facebook Page</h3>
-  <p class="subtitle">Provide the Page ID and a permanent Page Access Token. Stored encrypted at rest.</p>
-  <form method="post" action="/channels/facebook" class="mt">
-    {% call ui.field('Page name') %}<input name="channel_name" required placeholder="My Page">{% endcall %}
-    {% call ui.field('Page ID') %}<input name="page_id" required placeholder="1234567890">{% endcall %}
-    {% call ui.field('Permanent Page Access Token') %}<input name="page_access_token" required type="password">{% endcall %}
-    {% call ui.field('Avatar URL (optional)') %}<input name="avatar_url" placeholder="https://…">{% endcall %}
-    <button class="btn" type="submit">Connect Page</button>
-  </form>
-</div>
+<details class="disclosure mt" id="fb-form">
+  <summary>Add a Facebook Page</summary>
+  <div class="disclosure-body">
+    <p class="subtitle">Provide the Page ID and a permanent Page Access Token. Stored encrypted at rest.</p>
+    <form method="post" action="/channels/facebook" class="mt">
+      {% call ui.field('Page name') %}<input name="channel_name" required placeholder="My Page">{% endcall %}
+      {% call ui.field('Page ID') %}<input name="page_id" required placeholder="1234567890">{% endcall %}
+      {% call ui.field('Permanent Page Access Token') %}<input name="page_access_token" required type="password">{% endcall %}
+      {% call ui.field('Avatar URL (optional)') %}<input name="avatar_url" placeholder="https://…">{% endcall %}
+      <button class="btn" type="submit">Connect Page</button>
+    </form>
+  </div>
+</details>
 {% endblock %}

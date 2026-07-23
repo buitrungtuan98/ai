@@ -613,16 +613,26 @@ def campaigns_page(request: Request, user: CurrentUser, db: DbDep, channel: int 
 
 
 @app.get("/campaigns/new", response_class=HTMLResponse)
-def campaign_new_form(request: Request, user: CurrentUser, db: DbDep, from_id: int | None = None):
+def campaign_new_form(request: Request, user: CurrentUser, db: DbDep,
+                      from_id: int | None = None, channel: int | None = None):
     """New-campaign form. With ?from_id=<campaign>, prefills from an owned campaign (Duplicate —
-    e.g. same horror persona in another language to another channel)."""
+    e.g. same horror persona in another language to another channel). With ?channel=<id> (carried
+    from the scoped list), preselects that channel. A fresh form seeds its defaults from the user's
+    Settings (new-campaign defaults) so the common choices are already right."""
     channels = db.scalars(select(Channel).where(Channel.user_id == user.id)).all()
     ctx: dict = {"request": request, "user": user, "channels": channels, "nav": "campaigns"}
+    sel_channel: int | None = None
     if from_id is not None:
         source = db.get(Campaign, from_id)
         if source is not None and source.user_id == user.id:
             ctx["source"] = source
             ctx["cfg"] = source.config_json or {}
+            sel_channel = source.channel_id  # Duplicate targets the source's channel by default
+    if sel_channel is None and channel is not None:  # follow the scoped channel if the user owns it
+        ch = db.get(Channel, channel)
+        if ch is not None and ch.user_id == user.id:
+            sel_channel = channel
+    ctx["sel_channel"] = sel_channel
     return templates.TemplateResponse(request, "campaign_new.html", ctx)
 
 
@@ -871,6 +881,14 @@ def _campaigns_redirect(channel_id) -> RedirectResponse:
                             status_code=303)
 
 
+def _campaign_return(return_to: str) -> str | None:
+    """Safe internal campaign-hub path (`/campaigns/<digits>` or `/campaigns/<digits>/<tab>`) if
+    `return_to` is one, else None — lets a hub action land back on the hub instead of the list."""
+    import re
+
+    return return_to if re.fullmatch(r"/campaigns/\d+(?:/[a-z]+)?", return_to or "") else None
+
+
 @app.post("/campaigns")
 def create_campaign(user: CurrentUser, db: DbDep, form: dict = Depends(_campaign_form),
                     start_now: str = Form("")):
@@ -901,6 +919,7 @@ def campaign_settings(request: Request, user: CurrentUser, db: DbDep,
         request, "campaign_new.html",
         {"request": request, "user": user, "channels": channels, "nav": "campaigns",
          "campaign": campaign, "cfg": campaign.config_json or {}, "hub_active": "settings",
+         "sel_channel": campaign.channel_id,
          "channel": db.get(Channel, campaign.channel_id),
          "asset_count": _buffer_counts(db, user.id).get(campaign.id, {"ready": 0, "awaiting_review": 0})},
     )
@@ -928,10 +947,13 @@ def update_campaign(user: CurrentUser, db: DbDep, campaign=Depends(get_owned_cam
 
 @app.post("/campaigns/{campaign_id}/start")
 def start_campaign(campaign=Depends(get_owned_campaign), db=Depends(get_db),
-                   scope_channel: str = Form("")):
+                   scope_channel: str = Form(""), return_to: str = Form("")):
     campaign.status = CampaignStatus.active
     db.commit()
     video_worker.hydrate_buffers(db)  # queue the first episodes immediately
+    dest = _campaign_return(return_to)  # started from the hub → stay on the hub and watch it render
+    if dest is not None:
+        return RedirectResponse(dest, status_code=303)
     return _campaigns_redirect(scope_channel.strip() or None)
 
 

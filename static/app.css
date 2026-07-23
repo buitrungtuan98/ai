@@ -646,7 +646,12 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
   input[type="checkbox"], input[type="radio"], input[type="range"] { min-height: 0; }
 
   .savebar { border-radius: var(--radius) var(--radius) 0 0; margin-left: calc(-1 * var(--main-pad));
-    margin-right: calc(-1 * var(--main-pad)); }
+    margin-right: calc(-1 * var(--main-pad));
+    /* Clear the 60px fixed bottom tab bar so the save/cancel buttons are never hidden under it. */
+    bottom: calc(60px + env(safe-area-inset-bottom, 0px)); }
+  /* Hub tab bar scrolls sideways on narrow screens instead of wrapping to a second row. */
+  .hub-tabs { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .hub-tab { white-space: nowrap; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }

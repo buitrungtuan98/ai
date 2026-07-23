@@ -11,7 +11,7 @@
   {{ ui.pill(campaign.status.value) }}
   {% if campaign.status.value in ['pending','failed'] %}
   <form method="post" action="/campaigns/{{ campaign.id }}/start">
-    <input type="hidden" name="scope_channel" value="{{ campaign.channel_id }}">
+    <input type="hidden" name="return_to" value="/campaigns/{{ campaign.id }}">
     <button class="btn sm" type="submit">▶ Start</button></form>
   {% endif %}
   <a class="btn ghost sm" href="/campaigns/new?from_id={{ campaign.id }}" title="Copy this campaign (e.g. another language/channel)">⧉ Duplicate</a>
