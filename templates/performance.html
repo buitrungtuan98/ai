@@ -5,46 +5,68 @@
 {% set hub_active = 'overview' %}
 {% include "_campaign_hub.html" %}
 
+{# ── Now & next — what this campaign is doing and when it posts (the operational answer) ── #}
+<div class="card">
+  <div class="flex between">
+    {{ ui.sched_facts(campaign.config_json) }}
+    <a class="hint nowrap" href="/campaigns/{{ campaign.id }}/settings">Change schedule →</a>
+  </div>
+  <div class="stats mt nn-strip">
+    <div class="stat"><div class="n {{ 'work' if op and op.rendering }}">{% if op and op.rendering %}Ep {{ op.rendering.episode_number }}{% if op.rendering.progress_pct %} · {{ op.rendering.progress_pct }}%{% endif %}{% else %}—{% endif %}</div><div class="l">Rendering now</div></div>
+    <div class="stat"><div class="n">{{ op.queued if op else 0 }}</div><div class="l">Queued</div></div>
+    <div class="stat"><div class="n {{ 'bad' if op and op.next_slot and op.ready == 0 }}">{{ op.ready if op else 0 }}</div><div class="l">Ready buffer</div></div>
+    <div class="stat"><div class="n">{% if op and op.next_slot %}{{ op.next_slot.when }}{% else %}—{% endif %}</div><div class="l">Next post</div></div>
+  </div>
+  {% if campaign.status.value == 'pending' %}
+  <p class="hint mt-sm">Not started yet. <b>▶ Start</b> (top-right) begins pre-rendering episodes into the buffer; they then run on the schedule above.</p>
+  {% elif campaign.status.value == 'active' and op and op.next_slot and op.ready == 0 %}
+  <p class="hint mt-sm" style="color:var(--st-failed)">⚠ Buffer is empty — the next slot ({{ op.next_slot.when }}) will be missed until an episode finishes rendering.</p>
+  {% elif campaign.status.value == 'failed' %}
+  <p class="hint mt-sm" style="color:var(--st-failed)">Last run failed — open the <a href="/campaigns/{{ campaign.id }}/episodes">Episodes</a> tab for the error, then <b>▶ Start</b> to retry.</p>
+  {% endif %}
+</div>
+
 {# Scorecard — the campaign's results at a glance; retention (avg % viewed) is the Shorts metric. #}
-<div class="grid cols-3">
+<div class="grid cols-3 mt">
   {{ ui.stat(episodes|length, 'Episodes') }}
   {{ ui.stat(measured_count, 'Measured', 'work' if measured_count else '') }}
   {% if best_ret is not none %}{{ ui.stat('🏆 ' ~ best_ret ~ '%', 'Best retention', 'ok') }}{% else %}{{ ui.stat('—', 'Best retention') }}{% endif %}
 </div>
 
+{# ── Learning & results — playbook + A/B variants + retention trend, one card, one empty state ── #}
+{% set ns = namespace(vals=[]) %}
+{% for t in episodes %}
+  {% if t.stats_json and t.stats_json.get('avg_pct_viewed') is not none %}
+    {% set ns.vals = ns.vals + [t.stats_json.get('avg_pct_viewed')] %}
+  {% endif %}
+{% endfor %}
 <div class="card mt">
   <div class="card-head">
-    <h3>Channel Playbook</h3>
-    <span class="meta">auto-learned; refreshed weekly from real stats — refine it by rejecting videos with a reason</span>
+    <h3>Learning &amp; results</h3>
+    <span class="meta">what this channel has learned from its own real stats</span>
   </div>
+  {% if not learning and not variants and ns.vals|length < 2 %}
+  {% call ui.empty('📈', 'No insights yet', 'The playbook, A/B variant comparison and retention trend appear automatically once episodes publish and gather ~3 days of stats (≥5 published for the playbook).') %}{% endcall %}
+  {% else %}
+
+  {% if learning.get('playbook') or learning %}
+  <h4 class="sub-h">Channel playbook <span class="meta">— auto-learned; refine it by rejecting videos with a reason</span></h4>
   {% if learning.get('playbook') %}
-  <ul class="mt" style="margin:0; padding-left:1.1em;">
+  <ul class="mt-sm" style="margin:0; padding-left:1.1em;">
     {% for lesson in learning.get('playbook', []) %}<li style="margin-bottom:6px;">{{ lesson }}</li>{% endfor %}
   </ul>
-  {% if learning.get('best_examples') %}
-  <p class="hint mt-sm">Top performers used as examples: {{ learning.get('best_examples')|join(' · ') }}</p>
-  {% endif %}
+  {% if learning.get('best_examples') %}<p class="hint mt-sm">Top performers used as examples: {{ learning.get('best_examples')|join(' · ') }}</p>{% endif %}
   <p class="hint">Last updated: {{ learning.get('distilled_at', '—') }}</p>
   {% else %}
-  {% call ui.empty('📈', 'No playbook yet', 'It appears automatically once ≥5 published episodes have ~3 days of stats.') %}{% endcall %}
+  <p class="hint mt-sm">No playbook yet — it appears once ≥5 published episodes have ~3 days of stats.</p>
   {% endif %}
   {% if learning.get('reject_reasons') %}
   <div class="loop-note mt-sm">↺ <b>Your feedback is shaping this channel.</b> These avoid-notes came from videos you rejected, and now steer every new script:
     <span class="meta">{{ learning.get('reject_reasons')|join(' · ') }}</span></div>
   {% endif %}
-  {% if learning %}
-  <form method="post" action="/campaigns/{{ campaign.id }}/learning/reset" class="mt"
-        data-confirm="Clear everything this channel has learned? The playbook and avoid-notes are lost.">
-    <button class="btn danger sm" type="submit">Reset learning</button>
-  </form>
   {% endif %}
-</div>
 
-<div class="card mt">
-  <div class="card-head">
-    <h3>A/B Variant Results</h3>
-    <span class="meta">which metadata style actually retains viewers</span>
-  </div>
+  <h4 class="sub-h mt">A/B Variant Results <span class="meta">— which metadata style actually retains viewers</span></h4>
   {% if variants %}
   {% set best_v = (variants | selectattr('avg_retention') | sort(attribute='avg_retention') | last | default(none)) %}
   {% set max_ret = (variants | selectattr('avg_retention') | map(attribute='avg_retention') | max) if best_v else 100 %}
@@ -63,19 +85,11 @@
   </div>
   <p class="hint mt">Each episode rotates through title/description variants A→B→C; this compares their real performance. Give it ~9+ measured episodes (3 per variant) before trusting a winner.</p>
   {% else %}
-  {% call ui.empty('🔬', 'No variant data yet', 'It appears once published episodes (with A/B testing on) have stats.') %}{% endcall %}
+  <p class="hint mt-sm">No variant data yet — appears once published episodes (with A/B testing on) have stats.</p>
   {% endif %}
-</div>
 
-{% set ns = namespace(vals=[]) %}
-{% for t in episodes %}
-  {% if t.stats_json and t.stats_json.get('avg_pct_viewed') is not none %}
-    {% set ns.vals = ns.vals + [t.stats_json.get('avg_pct_viewed')] %}
-  {% endif %}
-{% endfor %}
-{% if ns.vals|length >= 2 %}
-<div class="card mt">
-  <div class="card-head"><h3>Retention trend</h3><span class="meta">avg % viewed · oldest → newest measured episode</span></div>
+  {% if ns.vals|length >= 2 %}
+  <h4 class="sub-h mt">Retention trend <span class="meta">— avg % viewed · oldest → newest measured episode</span></h4>
   {% set W = 600 %}{% set H = 60 %}{% set n = ns.vals|length %}
   {% set pts = namespace(s='') %}
   {% for v in ns.vals %}
@@ -87,8 +101,16 @@
     <polyline points="{{ pts.s|trim }}" fill="none" stroke="var(--st-working)" stroke-width="2" vector-effect="non-scaling-stroke"/>
   </svg>
   <div class="flex between"><span class="hint">{{ ns.vals[0] }}%</span><span class="hint">{{ ns.vals[-1] }}%</span></div>
+  {% endif %}
+
+  {% if learning %}
+  <form method="post" action="/campaigns/{{ campaign.id }}/learning/reset" class="mt"
+        data-confirm="Clear everything this channel has learned? The playbook and avoid-notes are lost.">
+    <button class="btn danger sm" type="submit">Reset learning</button>
+  </form>
+  {% endif %}
+  {% endif %}
 </div>
-{% endif %}
 
 <p class="hint mt">Every episode — with preview, stage and per-episode stats — lives under the
   <a href="/campaigns/{{ campaign.id }}/episodes">🎬 Episodes</a> tab. Stats refresh daily for videos

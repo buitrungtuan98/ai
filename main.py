@@ -355,47 +355,84 @@ def _scorecard(db, user_id: int) -> dict:
     }
 
 
-def _next_publish(db, user_id: int):
-    """Soonest upcoming posting slot across active auto-publish campaigns (each in its own tz)."""
+def _next_slot(campaign) -> dict | None:
+    """The soonest upcoming posting slot for ONE active auto-publish campaign, in its own timezone.
+    Returns {in_hours, slot, when} or None (continuous / review / no slots / no upcoming day)."""
     from datetime import timedelta
 
     from workers.scheduler import WEEKDAY_KEYS, local_now
 
+    cfg = campaign.config_json or {}
+    if not cfg.get("auto_publish", True):
+        return None
+    slots = sorted(cfg.get("posting_slots") or [])
+    if not slots:
+        return None
+    allowed = cfg.get("posting_days") or []
+    now_local = local_now(cfg.get("timezone"))
+    for dd in range(0, 8):
+        day = now_local + timedelta(days=dd)
+        if allowed and WEEKDAY_KEYS[day.weekday()] not in allowed:
+            continue
+        for s in slots:
+            try:
+                hh, mm = (int(x) for x in s.split(":"))
+            except ValueError:
+                continue
+            cand = day.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if cand > now_local:
+                return {"in_hours": round((cand - now_local).total_seconds() / 3600, 1),
+                        "slot": s, "when": cand.strftime("%a %H:%M")}
+    return None
+
+
+def _next_publish(db, user_id: int):
+    """Soonest upcoming posting slot across active campaigns (each in its own tz) — the earliest of
+    the per-campaign `_next_slot`s, tagged with the campaign name."""
     active = db.scalars(select(Campaign).where(
         Campaign.user_id == user_id, Campaign.status == CampaignStatus.active)).all()
     best = None
     for c in active:
-        cfg = c.config_json or {}
-        if not cfg.get("auto_publish", True):
-            continue
-        slots = sorted(cfg.get("posting_slots") or [])
-        if not slots:
-            continue
-        allowed = cfg.get("posting_days") or []
-        now_local = local_now(cfg.get("timezone"))
-        found = None
-        for dd in range(0, 8):
-            day = now_local + timedelta(days=dd)
-            if allowed and WEEKDAY_KEYS[day.weekday()] not in allowed:
-                continue
-            for s in slots:
-                try:
-                    hh, mm = (int(x) for x in s.split(":"))
-                except ValueError:
-                    continue
-                cand = day.replace(hour=hh, minute=mm, second=0, microsecond=0)
-                if cand > now_local:
-                    found = (cand, s)
-                    break
-            if found:
-                break
-        if not found:
-            continue
-        hours = (found[0] - now_local).total_seconds() / 3600
-        if best is None or hours < best["in_hours"]:
-            best = {"in_hours": round(hours, 1), "slot": found[1],
-                    "campaign": c.topic_name, "when": found[0].strftime("%a %H:%M")}
+        ns = _next_slot(c)
+        if ns is not None and (best is None or ns["in_hours"] < best["in_hours"]):
+            best = {**ns, "campaign": c.topic_name}
     return best
+
+
+# Task statuses that mean "an episode is actively rendering right now" (one machine-wide at a time).
+_RENDERING_STATUSES = (TaskStatus.AI_GENERATION, TaskStatus.AUDIO_SYNCED, TaskStatus.RENDERING)
+
+
+def _campaign_ops(db, user_id: int, campaigns) -> dict:
+    """Per-campaign operational snapshot — the "what's it doing now / next" facts the cards, the hub
+    strip and the dashboard "Running now" panel all render: the in-flight render task (with its
+    progress), queued count, ready-buffer + awaiting-review tallies, and the next posting slot."""
+    ops = {c.id: {"rendering": None, "queued": 0, "ready": 0, "awaiting_review": 0, "next_slot": None}
+           for c in campaigns}
+    ids = list(ops)
+    if not ids:
+        return ops
+    for t in db.scalars(select(Task).where(
+            Task.user_id == user_id, Task.campaign_id.in_(ids),
+            Task.status.in_(_RENDERING_STATUSES)).order_by(Task.id.desc())):
+        if ops[t.campaign_id]["rendering"] is None:  # newest in-flight render wins
+            ops[t.campaign_id]["rendering"] = t
+    for cid, n in db.execute(select(Task.campaign_id, func.count()).where(
+            Task.user_id == user_id, Task.campaign_id.in_(ids),
+            Task.status == TaskStatus.PENDING_QUEUE).group_by(Task.campaign_id)).all():
+        ops[cid]["queued"] = n
+    for cid, st, n in db.execute(select(
+            BufferPoolItem.campaign_id, BufferPoolItem.status, func.count())
+            .where(BufferPoolItem.campaign_id.in_(ids))
+            .group_by(BufferPoolItem.campaign_id, BufferPoolItem.status)).all():
+        if st == BufferStatus.ready:
+            ops[cid]["ready"] = n
+        elif st == BufferStatus.awaiting_review:
+            ops[cid]["awaiting_review"] = n
+    for c in campaigns:
+        if c.status == CampaignStatus.active:
+            ops[c.id]["next_slot"] = _next_slot(c)
+    return ops
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -427,6 +464,8 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
                 Task.episode_number.in_({e for _, e in rev_pairs}))):
             if (t.campaign_id, t.episode_number) in rev_pairs:
                 review_ids[(t.campaign_id, t.episode_number)] = t.id
+    # "Running now" panel: one row per active campaign (what each is doing + when it posts next).
+    active_campaigns = [c for c in campaigns if c.status == CampaignStatus.active]
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -438,6 +477,8 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
             "attention_failed": attention_failed, "attention_review": attention_review,
             "review_ids": review_ids,
             "scorecard": _scorecard(db, user.id), "next_publish": _next_publish(db, user.id),
+            "active_running": active_campaigns,
+            "ops": _campaign_ops(db, user.id, active_campaigns),
             "camp_by_id": {c.id: c for c in campaigns},
             "chan_by_id": {c.id: c for c in channels},
         },
@@ -599,6 +640,10 @@ def campaigns_page(request: Request, user: CurrentUser, db: DbDep, channel: int 
     if q:
         stmt = stmt.where(Campaign.topic_name.ilike(f"%{q}%"))
     campaigns = db.scalars(stmt.order_by(Campaign.id.desc())).all()
+    # Operational sort: the ones that are running (or need starting) first, finished ones last —
+    # newest-first within each group. So "what's live" is at the top, not buried by creation order.
+    _rank = {"active": 0, "pending": 1, "failed": 2, "completed": 3}
+    campaigns = sorted(campaigns, key=lambda c: (_rank.get(c.status.value, 9), -c.id))
     channels = {c.id: c for c in db.scalars(select(Channel).where(Channel.user_id == user.id)).all()}
     chips = [{"label": "All", "value": "", "count": total_all}] + [
         {"label": s.title(), "value": s, "count": status_counts.get(s, 0)}
@@ -607,7 +652,7 @@ def campaigns_page(request: Request, user: CurrentUser, db: DbDep, channel: int 
         request,
         "campaigns.html",
         {"request": request, "user": user, "campaigns": campaigns, "channels": channels, "nav": "campaigns",
-         "asset_counts": _buffer_counts(db, user.id),
+         "ops": _campaign_ops(db, user.id, campaigns),
          "scope_channel": channels.get(channel) if channel else None,
          "chips": chips, "status": status, "q": q, "total_all": total_all,
          "scope_hidden": {"channel": channel} if channel else {}},
@@ -1562,6 +1607,7 @@ def campaign_overview(request: Request, user: CurrentUser, db: DbDep,
          "best_id": best.id if best else None,
          "best_ret": best.stats_json.get("avg_pct_viewed") if best else None,
          "measured_count": len(measured), "variants": ab_variant_summary(episodes),
+         "op": _campaign_ops(db, user.id, [campaign])[campaign.id],  # Now & next strip
          "hub_active": "overview", **_hub_context(db, user, campaign)},
     )
 
@@ -1615,6 +1661,48 @@ def upcoming_slot_cells(campaign: Campaign, days: int = 7, week: int = 0) -> lis
     return cells
 
 
+def _calendar_row_cells(campaign: Campaign, ready_eps: list[int], week: int = 0,
+                        days: int = 7) -> list[dict] | None:
+    """Richer calendar cells for the week planner: per day, per slot, what will HAPPEN — not just
+    the time. Assigns the campaign's ready buffer episodes (lowest-numbered first, the scheduler's
+    real rule) to upcoming slots in chronological order; slots past that are 'missed' (buffer will be
+    empty). Past slots render for reference. Returns per-day {gate, slots:[{t,state,ep}]} or None
+    (non-slotted). The episode projection assumes the buffer doesn't change — honest caveat in the UI."""
+    from datetime import timedelta
+
+    from workers.scheduler import WEEKDAY_KEYS, local_now
+
+    cfg = campaign.config_json or {}
+    slots = sorted(cfg.get("posting_slots") or [])
+    if not slots or not cfg.get("auto_publish", True):
+        return None
+    allowed = cfg.get("posting_days") or []
+    now_l = local_now(cfg.get("timezone"))
+    start = now_l + timedelta(days=week * 7)
+    pool = list(ready_eps)  # lowest episode number first (mutated as slots consume it)
+    rows: list[dict] = []
+    for d in range(days):
+        day = start + timedelta(days=d)
+        if allowed and WEEKDAY_KEYS[day.weekday()] not in allowed:
+            rows.append({"gate": True, "slots": []})
+            continue
+        cells = []
+        for s in slots:
+            try:
+                hh, mm = (int(x) for x in s.split(":"))
+            except ValueError:
+                continue
+            slot_dt = day.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if slot_dt < now_l:
+                cells.append({"t": s, "state": "past", "ep": None})
+            elif pool:
+                cells.append({"t": s, "state": "filled", "ep": pool.pop(0)})
+            else:
+                cells.append({"t": s, "state": "missed", "ep": None})
+        rows.append({"gate": False, "slots": cells})
+    return rows
+
+
 @app.get("/calendar", response_class=HTMLResponse)
 def calendar_page(request: Request, user: CurrentUser, db: DbDep, week: int = 0,
                   channel: int | None = None):
@@ -1628,15 +1716,20 @@ def calendar_page(request: Request, user: CurrentUser, db: DbDep, week: int = 0,
     if channel:  # scope to one channel (from the workspace scope switcher)
         camp_q = camp_q.where(Campaign.channel_id == channel)
     campaigns = db.scalars(camp_q).all()
-    ready_counts = dict(db.execute(
-        select(BufferPoolItem.campaign_id, func.count())
-        .where(BufferPoolItem.status == BufferStatus.ready)
-        .group_by(BufferPoolItem.campaign_id)
-    ).all())
+    chan_by_id = {c.id: c for c in db.scalars(select(Channel).where(Channel.user_id == user.id)).all()}
+    # Ready buffer episode numbers per campaign (lowest first) — the pool the planner assigns to slots.
+    ready_by_camp: dict[int, list[int]] = {}
+    for cid, epn in db.execute(
+            select(BufferPoolItem.campaign_id, BufferPoolItem.episode_number)
+            .where(BufferPoolItem.status == BufferStatus.ready)
+            .order_by(BufferPoolItem.episode_number)).all():
+        ready_by_camp.setdefault(cid, []).append(epn)
     slotted, unslotted = [], []
     for c in campaigns:
-        cells = upcoming_slot_cells(c, week=week)
-        entry = {"campaign": c, "ready": ready_counts.get(c.id, 0),
+        cells = _calendar_row_cells(c, ready_by_camp.get(c.id, []), week=week)
+        entry = {"campaign": c, "ready": len(ready_by_camp.get(c.id, [])),
+                 "channel": chan_by_id.get(c.channel_id),
+                 "fmt": (c.config_json or {}).get("video_format", "short"),
                  "tz": (c.config_json or {}).get("timezone") or settings.TIMEZONE,
                  "mode": "review" if not (c.config_json or {}).get("auto_publish", True) else "continuous"}
         if cells is not None:
@@ -1645,7 +1738,9 @@ def calendar_page(request: Request, user: CurrentUser, db: DbDep, week: int = 0,
         else:
             unslotted.append(entry)
     base = local_now() + timedelta(days=week * 7)
-    day_headers = [(base + timedelta(days=d)).strftime("%a %d/%m") for d in range(7)]
+    # Header cells carry a `today` flag so the current day's column is highlighted (only week 0, d 0).
+    day_headers = [{"label": (base + timedelta(days=d)).strftime("%a %d/%m"),
+                    "today": week == 0 and d == 0} for d in range(7)]
     label = "This week" if week == 0 else (f"In {week} week{'s' if week != 1 else ''}" if week > 0
                                            else f"{-week} week{'s' if week != -1 else ''} ago")
     return templates.TemplateResponse(

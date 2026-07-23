@@ -84,6 +84,46 @@
 </div>
 {%- endmacro %}
 
+{# Compact schedule/format facts for a campaign, read from its config_json. One definition, reused on
+   the campaign card, the hub header and the dashboard "Running now" row. #}
+{% macro sched_facts(cfg) -%}
+{% set fmt = cfg.get('video_format', 'short') %}
+{% set slots = cfg.get('posting_slots') or [] %}
+{% set days = cfg.get('posting_days') or [] %}
+<div class="facts">
+  <span class="fact">{{ '▬ Long 16:9' if fmt == 'long' else '▮ Short 9:16' }}</span>
+  <span class="fact">{{ cfg.get('language', 'en')|upper }}</span>
+  {%- if not cfg.get('auto_publish', true) %}
+  <span class="fact">👁 Review-first</span>
+  {%- elif slots %}
+  <span class="fact">🗓 {{ slots|join(', ') }} · {{ days|map('capitalize')|join(',') if days else 'Daily' }}</span>
+  {%- else %}
+  <span class="fact">⚡ Continuous</span>
+  {%- endif %}
+</div>
+{%- endmacro %}
+
+{# Operational "now / next" line for a campaign. `op` = {rendering(task), queued, ready,
+   awaiting_review, next_slot}; `status` = campaign status value; `cfg` = config_json. #}
+{% macro now_next(op, status, cfg) -%}
+{% if op and op.rendering %}
+<p class="nownext work">▶ Rendering Ep {{ op.rendering.episode_number }}{% if op.rendering.progress_pct %} · {{ op.rendering.progress_pct }}%{% endif %}{% if op.queued %} · {{ op.queued }} queued{% endif %}</p>
+{% elif status == 'pending' %}
+<p class="nownext muted">Not started — ▶ Start begins pre-rendering.</p>
+{% elif status == 'failed' %}
+<p class="nownext bad">Last run failed — ▶ Start to retry.</p>
+{% elif status == 'completed' %}
+<p class="nownext muted">✓ Campaign complete.</p>
+{% elif op and op.next_slot %}
+{% if op.ready %}<p class="nownext">⏭ Next post {{ op.next_slot.when }} · {{ op.ready }} ready</p>
+{% else %}<p class="nownext bad">⚠ Buffer empty — next slot ({{ op.next_slot.when }}) will be missed</p>{% endif %}
+{% elif not cfg.get('auto_publish', true) %}
+<p class="nownext">👁 Review-first — {{ (op.ready + op.awaiting_review) if op else 0 }} in buffer</p>
+{% else %}
+<p class="nownext">⚡ Continuous — publishes as it renders</p>
+{% endif %}
+{%- endmacro %}
+
 {# Shared filter grammar used on every list page (Campaigns / Channels / Asset Pool …): status chips
    with true counts + a server-side search box, all URL-driven. `action` is the page path; `chips` is
    a list of {label, value, count}; `current` is the active status value ('' = All); `q` is the

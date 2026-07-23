@@ -683,6 +683,37 @@ see. All additive — no route renamed/removed, Task Logs & Asset Pool kept as s
   clamps durations + prompt designed for long), ruff clean, docs guard green; the format-aware inputs
   and the `video_format=long` propose request verified in a browser.
 
+## Operational visibility — show "now / next", not just "how it went" `DONE`
+Reorder the operator-facing surfaces to answer ① what needs me → ② what's happening now →
+③ what happens next → ④ how it's going. Shared read-only helpers `_next_slot` / `_campaign_ops`
+and macros `sched_facts` / `now_next` feed all four surfaces. ADR-043.
+- **Batch E — campaign cards are status boards**: each card shows format+language+schedule chips and
+  a live "▶ Rendering Ep N · %" / "⏭ Next post <when> · N ready" / "⚠ Buffer empty — slot will be
+  missed" / "Not started" line; the list is sorted active→pending→failed→completed (was creation
+  order) and action buttons are pinned to the card bottom so they align. Verified: 176 tests, ruff
+  clean; cards checked in a browser.
+- **Batch F — hub Overview is status-first**: leads with a "Now & next" strip (Rendering now ·
+  Queued · Ready buffer · Next post + the schedule facts + a "Change schedule →" link), a
+  plain-language explainer for pending/failed campaigns, and folds the two often-empty cards
+  (playbook, A/B) plus the retention trend into ONE "Learning & results" card with a single empty
+  state — so opening a young campaign no longer shows two empty cards above the fold. Verified: 176
+  tests, ruff clean; active + pending hubs checked in a browser.
+- **Batch G — dashboard hierarchy + per-campaign view**: new "Running now" card — one row per
+  active campaign showing what it's doing (▶ Rendering Ep N · % / ⏭ Next post / ⚠ Buffer empty)
+  with a "N to review" chip + Open link — the operational per-campaign view the home page lacked.
+  De-duplicated the numeric bands (the health strip is now infra-only; the buffer count lives once
+  in the scorecard runway). Reading order: health → needs-attention → Running now → stat tiles →
+  scorecard → activity. `/api/summary` JSON keys unchanged. Verified: 176 tests, ruff clean;
+  dashboard checked in a browser.
+- **Batch H — calendar is a week planner**: each cell shows what will HAPPEN, not just the time —
+  `_calendar_row_cells` assigns ready buffer episodes (lowest-numbered first, the scheduler's real
+  rule) to upcoming slots, so a cell reads ● 21:00 Ep 8 (will publish) / ○ 18:00 (empty buffer —
+  will be missed, amber) / dimmed past / — gate. Today's column is highlighted; rows gained channel
+  + format and link to the hub; a legend explains the marks. Honest caveat: episode projections
+  assume the buffer doesn't change. Verified: 176 tests (calendar link assertion → hub), ruff clean;
+  planner checked in a browser.
+- Verified overall: 176 tests, ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

@@ -171,6 +171,9 @@ code { font-family: var(--font-mono); font-size: .92em; background: var(--surfac
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
   padding: var(--sp-5); box-shadow: var(--shadow-1); }
 .card h3 { margin: 0 0 var(--sp-1); font-size: var(--fs-md); }
+/* Subsection heading inside a card (e.g. the merged Learning & results sections). */
+.sub-h { font-size: var(--fs-base); font-weight: var(--fw-semibold); margin: 0 0 var(--sp-1); }
+.sub-h .meta { font-weight: 400; }
 .card .meta, .meta { color: var(--muted); font-size: var(--fs-sm); }
 .card-head { display: flex; align-items: baseline; justify-content: space-between;
   gap: var(--sp-3); margin-bottom: var(--sp-2); flex-wrap: wrap; }
@@ -331,6 +334,23 @@ tr.win-row { background: var(--st-success-bg); }
 .runway.ok { color: var(--st-success); } .runway.low { color: var(--st-review); }
 .runway.none { color: var(--st-failed); }
 
+/* Content-calendar week planner: per-slot fill state, today highlight, weekday gate. */
+.cal-table { width: 100%; border-collapse: collapse; }
+.cal-table th, .cal-table td { padding: var(--sp-2) var(--sp-3); text-align: left; vertical-align: top;
+  border-bottom: 1px solid var(--border); font-size: var(--fs-sm); }
+.cal-table th { color: var(--muted); font-weight: var(--fw-semibold); }
+.cal-table th.cell, .cal-table td.cell { text-align: center; min-width: 78px; }
+.cal-table td.gate { background: var(--surface-2); }
+.cal-table .today { background: var(--primary-weak); }
+.cal-table th.today { color: var(--text); }
+.slot { white-space: nowrap; padding: 2px 0; }
+.slot.filled { color: var(--st-working); font-weight: var(--fw-medium); }
+.slot.missed { color: var(--st-review); font-weight: var(--fw-medium); }
+.slot.past { color: var(--text-subtle); }
+.cal-ep { color: var(--muted); font-size: var(--fs-xs); }
+.slot-key.filled { color: var(--st-working); }
+.slot-key.missed { color: var(--st-review); }
+
 /* ── 14. Media ─────────────────────────────────────────────────────────────── */
 video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm); background: #000;
   margin-top: var(--sp-3); display: block; }
@@ -475,6 +495,28 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 .scope-note { font-size: var(--fs-sm); color: var(--muted); background: var(--surface-2);
   border: 1px solid var(--border); border-radius: var(--radius-sm); padding: var(--sp-2) var(--sp-3);
   margin-bottom: var(--sp-5); }
+
+/* Compact fact chips + operational "now / next" line (campaign card, hub header, dashboard row) */
+.facts { display: flex; flex-wrap: wrap; gap: var(--sp-1); margin-top: var(--sp-2); }
+.fact { font-size: var(--fs-xs); color: var(--muted); background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 2px var(--sp-2); white-space: nowrap; }
+.nownext { font-size: var(--fs-sm); margin-top: var(--sp-2); color: var(--text); }
+.nownext.work { color: var(--st-working); font-weight: var(--fw-medium); }
+.nownext.bad { color: var(--st-failed); font-weight: var(--fw-medium); }
+.nownext.muted { color: var(--muted); }
+/* Campaign cards: equal-height with the action row pinned to the bottom so buttons align. */
+.campaign-card { display: flex; flex-direction: column; }
+.campaign-card .row-actions { margin-top: auto; padding-top: var(--sp-3); }
+/* Now & next strip: reuse .stats tiles but with a smaller number (values are short text, not big
+   counts) so "Ep 6 · 62%" / "Thu 21:00" fit on one line. */
+.nn-strip .n { font-size: var(--fs-lg); }
+/* Dashboard "Running now" — one operational row per active campaign. */
+.run-list { list-style: none; margin: 0; padding: 0; }
+.run-row { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-3) 0;
+  border-top: 1px solid var(--border); }
+.run-row:first-child { border-top: none; }
+.run-row .grow { min-width: 0; }
+.run-row .nownext { margin-top: 2px; }
 
 /* Campaign-hub tab row (links to the campaign's scoped Assets / Tasks / Edit) */
 .hub-tabs { display: flex; gap: var(--sp-1); flex-wrap: wrap; border-bottom: 1px solid var(--border);
