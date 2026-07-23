@@ -497,6 +497,24 @@ support, stronger QC. Everything stays automation-first and zero-cost (free tier
 - Verified: 155 tests (5 new — profiles/geometry, caption dims, chapter_lines, long prompt branch,
   web format+duration bounds; +1 ffmpeg-gated 16:9 scene render), ruff clean, docs guard green.
 
+## Batch E — QC upgrades `DONE`
+- **Deterministic QC**: `run_deterministic_qc` adds free, no-API checks on the master —
+  `media.max_black_span` (ffmpeg blackdetect) and `media.max_silence_span` (silencedetect) — failing
+  the gate on a >2.5s black stretch or >3.5s silence.
+- Runs inside the Auto-QC gate beside the vision judge; the episode advances only if BOTH pass (issues
+  merged into the stored QC report). Fails CLOSED on catastrophic breakage, per-detector fail-OPEN so
+  a probe glitch never blocks a good render — and it still guards when the vision API fails open.
+- Considered and left out (YAGNI): caption-overflow (needs a render-and-measure pass, not deterministic)
+  and hook-present (already enforced by the script prompt + critic). ADR-031 records it.
+- Verified: 157 tests (2 new units — flags black/silence, per-detector fail-open; +1 ffmpeg-gated real
+  black+silent master), ruff clean, docs guard green.
+
+## Pipeline v2 — status
+All five batches (A script depth · C sound · B edit rhythm · D long-format · E QC) are DONE, each
+committed with tests green + docs. Still automation-first and zero-cost (free tiers only); the
+render-concurrency-1 lock and CPU-only constraints are untouched. Follow-ups noted inline: per-user
+Gemini budget setting (awaiting go), and multi-call chaptered generation for very long videos.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

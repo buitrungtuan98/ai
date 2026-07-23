@@ -492,16 +492,21 @@ def render_task(task_id: int) -> None:
             )
             if not auto_qc:
                 break
+            # Free deterministic checks (black/silence) run alongside the vision judge — they catch
+            # catastrophic breakage even when the vision API fails open.
+            det = qc.run_deterministic_qc(result.master_path)
             verdict = qc.run_final_qc(
                 result.master_path, api_key=gemini_key, model=gemini_model,
                 context=f"The narration language is '{cfg.get('language', 'en')}'.",
             )
-            qc_report = {**verdict.as_dict(), "attempts": attempt}
-            if verdict.passed:
+            passed = det.passed and verdict.passed
+            issues = det.issues + verdict.issues
+            qc_report = {"passed": passed, "score": verdict.score, "issues": issues, "attempts": attempt}
+            if passed:
                 break
             if attempt == 1:
                 logger.info("Auto-QC rejected episode %s (score %s, issues %s) — re-rendering once",
-                            task.episode_number, verdict.score, verdict.issues)
+                            task.episode_number, verdict.score, issues)
                 _safe_remove(result.master_path, result.thumbnail_path)
         qc_failed = qc_report is not None and not qc_report["passed"]
         _record_clip_usage(db, channel.id, result.used_clip_ids)  # so future episodes vary footage

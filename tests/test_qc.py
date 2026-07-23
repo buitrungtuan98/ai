@@ -144,3 +144,34 @@ def test_judge_video_frames_audio_prompt(monkeypatch):
     ai.judge_video_frames(["f.jpg"], api_key="k")
     assert captured["audio_path"] is None
     assert "VOICE" not in captured["prompt"]
+
+
+def test_deterministic_qc_flags_black_and_silence(monkeypatch):
+    """Free ffmpeg checks fail CLOSED on a mostly-black or long-silent master."""
+    from core import qc
+
+    monkeypatch.setattr(qc.media, "max_black_span", lambda p: 0.2)
+    monkeypatch.setattr(qc.media, "max_silence_span", lambda p: 0.5)
+    clean = qc.run_deterministic_qc("m.mp4")
+    assert clean.passed and clean.issues == []
+
+    monkeypatch.setattr(qc.media, "max_black_span", lambda p: 5.0)
+    black = qc.run_deterministic_qc("m.mp4")
+    assert not black.passed and any("black" in i for i in black.issues)
+
+    monkeypatch.setattr(qc.media, "max_black_span", lambda p: 0.0)
+    monkeypatch.setattr(qc.media, "max_silence_span", lambda p: 9.0)
+    silent = qc.run_deterministic_qc("m.mp4")
+    assert not silent.passed and any("silence" in i for i in silent.issues)
+
+
+def test_deterministic_qc_fails_open_on_detector_error(monkeypatch):
+    """A detector outage must never block a render — each check fails open individually."""
+    from core import qc
+
+    def boom(p):
+        raise RuntimeError("ffmpeg down")
+
+    monkeypatch.setattr(qc.media, "max_black_span", boom)
+    monkeypatch.setattr(qc.media, "max_silence_span", boom)
+    assert qc.run_deterministic_qc("m.mp4").passed

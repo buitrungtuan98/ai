@@ -576,3 +576,20 @@ stays safe under the render-concurrency-1 lock (hard constraint 1); long campaig
 form) to keep a small daily cap and buffer rather than the pipeline enforcing a new limit. Deferred:
 multi-call chaptered *generation* (outline + per-chapter) — single-call generation with a raised scene
 cap is enough for a first cut, and the repair loop absorbs the occasional oversized draft.
+
+### ADR-031 — Deterministic QC: free black/silence gates beside the vision judge
+**Decision:** `run_deterministic_qc` adds two free, no-API checks on the finished master —
+`media.max_black_span` (ffmpeg `blackdetect`) and `media.max_silence_span` (`silencedetect`) — and
+fails the gate when a continuous black stretch exceeds 2.5s or a continuous silence exceeds 3.5s. The
+worker runs it inside the Auto-QC gate alongside `run_final_qc`; the episode advances only if BOTH
+pass, and their issues are merged into the stored QC report. It fails CLOSED on clearly-broken output
+(like the render's own `voice_check`), but each detector fails OPEN individually so a probe glitch
+never blocks a good render. **Why:** the vision QC is graded and deliberately fails *open* (a Gemini
+outage must not halt the factory), which means a catastrophically broken master — all-black footage, a
+muted audio track — could sail through when the API is down or simply scores it leniently. A black or
+silent stretch is exactly the kind of failure that is cheap and unambiguous to detect deterministically
+from ffmpeg, so it belongs in a free gate that runs regardless of the vision API's health. Two precise
+detectors beat a handful of fuzzy ones: caption-overflow and "hook-present" were considered and left
+out — the former needs a render-and-measure pass (not deterministic from the master), and the latter is
+already enforced upstream by the script prompt + critic, so adding flaky versions here would only
+produce false rejects (YAGNI).

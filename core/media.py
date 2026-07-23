@@ -38,6 +38,44 @@ def probe_audio_stats(path: str) -> dict:
     return stats
 
 
+def max_black_span(path: str) -> float:
+    """Longest continuous fully-black stretch in seconds (0.0 if none), via ffmpeg blackdetect —
+    the deterministic basis for catching a broken/black render. Raises on an unreadable file."""
+    out = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostats", "-i", path,
+         "-vf", "blackdetect=d=0.5:pic_th=0.98", "-an", "-f", "null", "-"],
+        capture_output=True, text=True, check=True,
+    )
+    spans: list[float] = []
+    for line in out.stderr.splitlines():  # blackdetect reports on stderr
+        marker = "black_duration:"
+        if marker in line:
+            try:
+                spans.append(float(line.split(marker, 1)[1].strip().split()[0]))
+            except (ValueError, IndexError):
+                pass
+    return max(spans, default=0.0)
+
+
+def max_silence_span(path: str) -> float:
+    """Longest continuous silence in seconds (0.0 if none), via ffmpeg silencedetect — the
+    deterministic basis for catching a muted/broken audio track. Raises on an unreadable file."""
+    out = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostats", "-i", path,
+         "-af", "silencedetect=noise=-40dB:d=1.0", "-f", "null", "-"],
+        capture_output=True, text=True, check=True,
+    )
+    spans: list[float] = []
+    for line in out.stderr.splitlines():  # silencedetect reports on stderr
+        marker = "silence_duration:"
+        if marker in line:
+            try:
+                spans.append(float(line.split(marker, 1)[1].strip().split()[0]))
+            except (ValueError, IndexError):
+                pass
+    return max(spans, default=0.0)
+
+
 def probe_video_meta(path: str) -> dict:
     """Return {width, height, duration, codec, fps} for the first video stream."""
     out = subprocess.run(

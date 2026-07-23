@@ -178,6 +178,23 @@ def test_probe_audio_stats_and_voice_check(tmp_path):
     assert voice_check(tone, "some words to speak here") is None
 
 
+def test_deterministic_qc_catches_black_and_silence(tmp_path):
+    """The free ffmpeg detectors (blackdetect / silencedetect) + parsing must flag a fully black,
+    silent master on real ffmpeg — the class of catastrophic breakage vision QC can miss."""
+    from core import qc
+
+    d = str(tmp_path)
+    broken = os.path.join(d, "broken.mp4")
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=black:s=320x240:d=3",
+         "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+         "-t", "3", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", broken],
+        check=True, capture_output=True,
+    )
+    result = qc.run_deterministic_qc(broken)
+    assert not result.passed and result.issues  # black and/or silence flagged
+
+
 def test_extract_audio_stream_copy(tmp_path):
     """Audio-aware final QC pulls the master's AAC track out without re-encoding."""
     from core import media
