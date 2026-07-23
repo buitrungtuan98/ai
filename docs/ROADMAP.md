@@ -398,6 +398,26 @@ measured at TTS time (audio remains ground truth). Proposed by the AI designer.
   screenshotted, main-column centring measured (1400 cap, balanced gutters at 1920), container-query
   stacking asserted, cache-bust hashes confirmed on all three static files.
 
+## Quick wins + pagination `DONE`
+- **Asset Pool pagination + server-side filter**: `?status=`/`?page=`, 24 cards/page; filter chips
+  are now `<a>` links (URL is the source of truth) with true whole-scope per-status counts from a
+  `GROUP BY status` query, replacing the client-side hide-only buttons; Newer/Older pager.
+- **Performance episode pagination**: 20 rows/page (newest first); the A/B variant summary, retention
+  sparkline and best-episode 🏆 still read the full episode list so no metric is distorted by paging.
+- **Immutable static caching**: `CachedStaticFiles` adds `Cache-Control: public, max-age=31536000,
+  immutable` for `?v=`-hashed requests only (plain `/static/app.css` stays uncached) — the
+  serving-side complement to the ADR-024 content hash.
+- **Visibility-aware polling**: both `/api/tasks` and `/api/summary` pollers pause when the tab is
+  backgrounded and refresh on return; the task poller also adapts its interval (fast while a job is in
+  flight, relaxed when everything is terminal). ADR-025 records the batch.
+- Deferred: Task Logs history pagination — the live poller replaces the whole `#task-rows` table each
+  tick, so server paging would fight the client render for low benefit; revisit only if a single user
+  accumulates enough non-terminal tasks to matter.
+- Verified: 139 tests, ruff clean, docs guard green; on a 48-asset / 36-episode seed the Asset Pool
+  paged 24+24 with honest chip counts (16/19/13), Performance paged 20+13 with aggregates intact and
+  the 🏆 winner row surviving onto page 2, `Cache-Control: …immutable` present on `?v=` and absent on
+  the plain asset, all screenshotted at 375px & 1280px.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

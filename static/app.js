@@ -102,6 +102,17 @@
       .catch(function () { btn.disabled = false; btn.textContent = "↻ Retry"; });
   });
 
+  var TERMINAL = { COMPLETED: 1, FAILED: 1, AWAITING_REVIEW: 1, SCHEDULED: 1 };
+  var pollTimer = null;
+  function nextDelay() {
+    // Fast while an episode is actually in flight; relaxed when everything is settled.
+    var active = lastTasks.some(function (t) { return !TERMINAL[t.status]; });
+    return active ? 3000 : 15000;
+  }
+  function scheduleNext() {
+    clearTimeout(pollTimer);
+    if (!document.hidden) pollTimer = setTimeout(poll, nextDelay());  // pause when backgrounded
+  }
   function poll() {
     fetch("/api/tasks", { headers: { "Accept": "application/json" } })
       .then(function (r) {
@@ -109,11 +120,15 @@
         return r.json();
       })
       .then(function (d) { lastTasks = d.tasks || []; render(lastTasks); })
-      .catch(function () { /* transient — try again next tick */ });
+      .catch(function () { /* transient — try again next tick */ })
+      .finally(scheduleNext);
   }
 
   if (filterEl) filterEl.addEventListener("input", function () { render(lastTasks); });
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) clearTimeout(pollTimer);
+    else poll();   // immediate refresh + resume on return to foreground
+  });
 
   poll();
-  setInterval(poll, 3000);
 })();

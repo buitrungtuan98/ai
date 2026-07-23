@@ -444,3 +444,30 @@ with zero operator action. This also fixed four smaller bugs found in the audit:
 identity card bound to the wrong form in multi-tenant mode (now a stable id), the login page ignored the
 saved theme (added the no-FOUC head script), and the skip-link revealed on mobile taps (now
 `:focus-visible`, keyboard-only).
+
+### ADR-025 — Server-side pagination + filtering, immutable static caching, visibility-aware polling
+**Decision:** the two unbounded list surfaces now paginate on the server. The Asset Pool takes
+`?status=`/`?page=` and renders 24 cards per page behind filter chips whose counts are true
+per-status tallies over the *whole* scope (a `GROUP BY status` query, not a count of the current
+page); the chips are plain `<a>` links (URL is the single source of truth — shareable, back-button
+correct, no JS state), replacing the old client-side buttons that only hid already-loaded DOM. The
+Performance episode table paginates the same way (20 rows/page, newest first) while its aggregates —
+A/B variant summary, retention sparkline, best-episode 🏆 — keep reading the *full* episode list, so
+pagination never distorts a metric. Page clamping (`min(max(page,1),pages)`) makes out-of-range URLs
+safe. Separately, `CachedStaticFiles` sends `Cache-Control: public, max-age=31536000, immutable` but
+**only** for requests carrying the `?v=` content hash — a plain `/static/app.css` request stays
+uncached — so hashed URLs are cached forever and non-versioned fetches never go stale. Finally both
+JS pollers became visibility-aware: they clear their timer on `visibilitychange` when the tab is
+hidden and refresh immediately on return, and the task poller additionally adapts its interval (fast
+while a job is in flight, relaxed once every task is terminal).
+**Why:** the list pages loaded every asset/episode a campaign ever produced into one DOM — fine at a
+handful, a real cost once a long-running channel accumulates hundreds. Bounding the query at the
+database is the only fix that scales; doing the counts as a scoped `GROUP BY` keeps the chips honest
+regardless of which page you're on. Keeping the filter in the URL (rather than JS) makes every view
+linkable and lets the server send only the rows it means to show. The immutable-cache header is the
+serving-side complement to ADR-024's content hash: the hash makes each build a new URL, and
+`immutable` tells the browser it never needs to revalidate that URL — together they give
+zero-revalidation caching that is still instantly correct on deploy. Visibility-aware polling stops a
+backgrounded tab from hitting `/api/tasks` and `/api/summary` forever; the adaptive interval spends
+requests where they matter (an active render) and backs off when nothing is happening — meaningful on
+a single CPU-only box.

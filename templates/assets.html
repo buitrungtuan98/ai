@@ -28,14 +28,15 @@
 <p class="scope-note">Assets for channel <b>{{ scope_channel.channel_name }}</b>. <a href="/assets">Show all →</a></p>
 {% endif %}
 
-{% if items %}
-<div class="filter-bar" id="asset-filter">
-  <button type="button" class="chip active" data-filter="all">All ({{ items|length }})</button>
-  <button type="button" class="chip" data-filter="awaiting_review">Awaiting review ({{ items|selectattr('status.value','equalto','awaiting_review')|list|length }})</button>
-  <button type="button" class="chip" data-filter="ready">Ready ({{ items|selectattr('status.value','equalto','ready')|list|length }})</button>
-  <button type="button" class="chip" data-filter="consumed">Published ({{ items|selectattr('status.value','equalto','consumed')|list|length }})</button>
+{% if total_all %}
+<div class="filter-bar">
+  <a class="chip {{ 'active' if not status }}" href="/assets?{{ scope_qs }}">All ({{ total_all }})</a>
+  <a class="chip {{ 'active' if status=='awaiting_review' }}" href="/assets?{{ scope_qs }}status=awaiting_review">Awaiting review ({{ status_counts.get('awaiting_review', 0) }})</a>
+  <a class="chip {{ 'active' if status=='ready' }}" href="/assets?{{ scope_qs }}status=ready">Ready ({{ status_counts.get('ready', 0) }})</a>
+  <a class="chip {{ 'active' if status=='consumed' }}" href="/assets?{{ scope_qs }}status=consumed">Published ({{ status_counts.get('consumed', 0) }})</a>
 </div>
 <p class="hint" style="margin:-8px 0 16px">Keyboard: <b>J</b>/<b>K</b> move · <b>A</b> approve · <b>R</b> reject.</p>
+{% if items %}
 <div class="grid cols-3">
   {% for i in items %}
   {% set camp = camp_by_id.get(i.campaign_id) %}
@@ -109,6 +110,16 @@
   </div>
   {% endfor %}
 </div>
+{% if pages > 1 %}
+<div class="pager">
+  {% if page > 1 %}<a class="btn ghost sm" href="/assets?{{ scope_qs }}{{ 'status=' ~ status ~ '&' if status }}page={{ page - 1 }}">← Newer</a>{% else %}<span class="btn ghost sm pager-off">← Newer</span>{% endif %}
+  <span class="meta">Page {{ page }} of {{ pages }}</span>
+  {% if page < pages %}<a class="btn ghost sm" href="/assets?{{ scope_qs }}{{ 'status=' ~ status ~ '&' if status }}page={{ page + 1 }}">Older →</a>{% else %}<span class="btn ghost sm pager-off">Older →</span>{% endif %}
+</div>
+{% endif %}
+{% else %}
+<div class="empty" style="padding:var(--sp-8)">No items match this filter. <a href="/assets?{{ scope_qs }}">Show all →</a></div>
+{% endif %}
 {% else %}
 {% call ui.empty('▦', 'Buffer pool is empty', 'Active campaigns pre-render episodes here; review-mode campaigns park each video here for your approval before it publishes.', '/campaigns', 'View campaigns') %}{% endcall %}
 {% endif %}
@@ -116,20 +127,6 @@
 {% block scripts %}
 <script>
 (function () {
-  // Filter chips — client-side show/hide by status.
-  const bar = document.getElementById("asset-filter");
-  function apply(f) {
-    document.querySelectorAll(".asset-card").forEach(function (c) {
-      c.hidden = !(f === "all" || c.dataset.status === f);
-    });
-    kbdIdx = -1; highlight();
-  }
-  if (bar) bar.addEventListener("click", function (e) {
-    const b = e.target.closest("[data-filter]"); if (!b) return;
-    bar.querySelectorAll(".chip").forEach(function (c) { c.classList.remove("active"); });
-    b.classList.add("active"); apply(b.dataset.filter);
-  });
-
   // Reject-reason quick-pick — fill the reason input from a learned-reason chip.
   document.addEventListener("click", function (e) {
     const chip = e.target.closest(".reason-chip"); if (!chip) return;

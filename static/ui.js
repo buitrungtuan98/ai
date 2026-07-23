@@ -231,13 +231,25 @@
     });
   }
 
+  // Visibility-aware loop: no polling while the tab is backgrounded (saves server load + phone
+  // battery); an immediate refresh + resume when it comes back to the foreground.
+  var summaryTimer = null;
+  function stopSummary() { clearTimeout(summaryTimer); summaryTimer = null; }
+  function startSummary() {
+    stopSummary();
+    (function loop() { summaryTimer = setTimeout(function () { pollSummary(); loop(); }, 6000); })();
+  }
   function init() {
     initTheme();
     initNav();
     initConfirmForms();
     initRelTimes();
     pollSummary();
-    setInterval(pollSummary, 6000);
+    startSummary();
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden) stopSummary();
+      else { pollSummary(); startSummary(); }
+    });
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
   else init();

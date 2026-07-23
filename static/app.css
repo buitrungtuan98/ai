@@ -507,6 +507,10 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 .identity-card .id-ico { font-size: 20px; }
 .identity-card #identity-text { font-size: var(--fs-sm); line-height: 1.5; }
 
+/* Pagination controls */
+.pager { display: flex; align-items: center; justify-content: center; gap: var(--sp-4); margin-top: var(--sp-6); }
+.pager-off { opacity: .4; pointer-events: none; }
+
 /* Search box */
 .search { max-width: 360px; margin-bottom: var(--sp-5); }
 
