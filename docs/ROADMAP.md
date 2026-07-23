@@ -533,9 +533,15 @@ scope · act where you see. Six phases, each additive (no route renamed/removed,
   incl. hostile-path rejection), ruff clean, docs guard green; review/failed/published states
   screenshotted at 1280px + mobile.
 
-## Phase 2 — One filter grammar (planned)
-Shared filter-bar macro (status chips + true counts · server search · scope × clear) on Campaigns,
-Channels, Asset Pool, Task Logs — all server-side + URL-driven.
+## Phase 2 — One filter grammar `DONE`
+- Shared `filter_bar` macro (status chips with true counts + server-side search) now renders
+  identically on Campaigns, Channels and Asset Pool; all URL-driven via a `query_string` global.
+- Chip counts are scope-based (search-independent — "how many exist here"); search + status narrow
+  the visible rows + paging count. Asset Pool keeps `pool_total` so an empty search shows "no match",
+  not "empty pool". Campaigns' old client-side search removed. ADR-033.
+- Task Logs already had server search; its stage chips land with the Phase-4 pipeline (stage tabs).
+- Verified: 163 tests (3 new — campaigns filter+search+chip counts, channels search, assets search
+  incl. no-match), ruff clean, docs guard green; campaigns filter bar screenshotted.
 
 ## Phase 3 — Persistent scope switcher (planned)
 Topbar channel→campaign dropdown carried across Dashboard / Episodes / Calendar / lists.

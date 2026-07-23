@@ -425,7 +425,9 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 @keyframes livepulse { 0% { box-shadow: 0 0 0 0 var(--st-success); } 100% { box-shadow: 0 0 0 7px transparent; } }
 
 /* Filter / reason chips + keyboard-review highlight */
-.filter-bar { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-bottom: var(--sp-5); }
+.filter-bar { display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center; margin-bottom: var(--sp-5); }
+.filter-search { margin-left: auto; margin-bottom: 0; }
+.filter-search .search { margin-bottom: 0; }
 .chip { background: var(--surface-2); border: 1px solid var(--border); color: var(--muted);
   padding: 6px 12px; border-radius: var(--radius-pill); font-size: var(--fs-sm); font-weight: var(--fw-medium);
   cursor: pointer; font-family: inherit; }

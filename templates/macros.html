@@ -83,3 +83,21 @@
   {% if hint %}<p class="hint">{{ hint }}</p>{% endif %}
 </div>
 {%- endmacro %}
+
+{# Shared filter grammar used on every list page (Campaigns / Channels / Asset Pool …): status chips
+   with true counts + a server-side search box, all URL-driven. `action` is the page path; `chips` is
+   a list of {label, value, count}; `current` is the active status value ('' = All); `q` is the
+   current search text; `hidden` carries scope params (e.g. channel) so they survive filtering. #}
+{% macro filter_bar(action, chips, current='', q='', placeholder='🔎 Search…', hidden={}) -%}
+<div class="filter-bar">
+  {%- for ch in chips %}
+  <a class="chip {{ 'active' if current == ch.value }}"
+     href="{{ action }}?{{ query_string(status=ch.value, q=q, **hidden) }}">{{ ch.label }}{% if ch.get('count') is not none %} ({{ ch.count }}){% endif %}</a>
+  {%- endfor %}
+  <form method="get" action="{{ action }}" class="filter-search" role="search">
+    {%- for k, v in hidden.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
+    {%- if current %}<input type="hidden" name="status" value="{{ current }}">{% endif %}
+    <input class="search" type="search" name="q" value="{{ q }}" placeholder="{{ placeholder }}" aria-label="{{ placeholder }}">
+  </form>
+</div>
+{%- endmacro %}

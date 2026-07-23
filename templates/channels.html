@@ -7,6 +7,8 @@
   <button class="btn ghost" onclick="document.getElementById('fb-form').scrollIntoView({behavior:'smooth'})">+ Facebook Page</button>
 {% endcall %}
 
+{% if total_all %}
+{{ ui.filter_bar('/channels', chips, current=status, q=q, placeholder='🔎 Search channels…') }}
 {% if channels %}
 <div class="grid cols-3">
   {% for c in channels %}
@@ -36,6 +38,9 @@
   </div>
   {% endfor %}
 </div>
+{% else %}
+<div class="empty" style="padding:var(--sp-8)">No channels match this filter. <a href="/channels">Show all →</a></div>
+{% endif %}
 {% else %}
 {% call ui.empty('◉', 'No channels connected yet', 'Connect a YouTube channel or Facebook page — every campaign publishes to one of these.') %}
   <div class="row-actions" style="justify-content:center">

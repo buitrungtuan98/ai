@@ -28,13 +28,8 @@
 <p class="scope-note">Assets for channel <b>{{ scope_channel.channel_name }}</b>. <a href="/assets">Show all →</a></p>
 {% endif %}
 
-{% if total_all %}
-<div class="filter-bar">
-  <a class="chip {{ 'active' if not status }}" href="/assets?{{ scope_qs }}">All ({{ total_all }})</a>
-  <a class="chip {{ 'active' if status=='awaiting_review' }}" href="/assets?{{ scope_qs }}status=awaiting_review">Awaiting review ({{ status_counts.get('awaiting_review', 0) }})</a>
-  <a class="chip {{ 'active' if status=='ready' }}" href="/assets?{{ scope_qs }}status=ready">Ready ({{ status_counts.get('ready', 0) }})</a>
-  <a class="chip {{ 'active' if status=='consumed' }}" href="/assets?{{ scope_qs }}status=consumed">Published ({{ status_counts.get('consumed', 0) }})</a>
-</div>
+{% if pool_total %}
+{{ ui.filter_bar('/assets', chips, current=status, q=q, placeholder='🔎 Search assets…', hidden=scope_hidden) }}
 <p class="hint" style="margin:-8px 0 16px">Keyboard: <b>J</b>/<b>K</b> move · <b>A</b> approve · <b>R</b> reject.</p>
 {% if items %}
 <div class="grid cols-3">
@@ -118,7 +113,7 @@
 </div>
 {% endif %}
 {% else %}
-<div class="empty" style="padding:var(--sp-8)">No items match this filter. <a href="/assets?{{ scope_qs }}">Show all →</a></div>
+<div class="empty" style="padding:var(--sp-8)">No items match this filter. <a href="/assets?{{ query_string(**scope_hidden) }}">Show all →</a></div>
 {% endif %}
 {% else %}
 {% call ui.empty('▦', 'Buffer pool is empty', 'Active campaigns pre-render episodes here; review-mode campaigns park each video here for your approval before it publishes.', '/campaigns', 'View campaigns') %}{% endcall %}

@@ -81,6 +81,17 @@ templates.env.globals["settings"] = settings  # e.g. MULTI_TENANT_MODE toggles t
 templates.env.globals["voice_choices"] = VOICE_CHOICES  # campaign form: per-language voice picker
 
 
+def _query_string(**params: object) -> str:
+    """Build a URL query string from kwargs, dropping empty/None values and URL-encoding — so the
+    shared filter-bar macro can compose chip/search links (status + search + scope) safely."""
+    from urllib.parse import urlencode
+
+    return urlencode({k: v for k, v in params.items() if v not in (None, "", [])})
+
+
+templates.env.globals["query_string"] = _query_string
+
+
 _asset_versions: dict[str, str] = {}
 
 
@@ -395,23 +406,40 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
 
 
 # ── Channels Manager ─────────────────────────────────────────────────────────
+_CHANNEL_STATUS_FILTERS = ("active", "expired")
+
+
 @app.get("/channels", response_class=HTMLResponse)
-def channels_page(request: Request, user: CurrentUser, db: DbDep):
-    channels = db.scalars(select(Channel).where(Channel.user_id == user.id)).all()
+def channels_page(request: Request, user: CurrentUser, db: DbDep, status: str = "", q: str = ""):
+    status_counts = {s.value: n for s, n in db.execute(
+        select(Channel.status, func.count())
+        .where(Channel.user_id == user.id).group_by(Channel.status)).all()}
+    total_all = sum(status_counts.values())
+    status = status if status in _CHANNEL_STATUS_FILTERS else ""
+    q = q.strip()
+    stmt = select(Channel).where(Channel.user_id == user.id)
+    if status:
+        stmt = stmt.where(Channel.status == ChannelStatus(status))
+    if q:
+        stmt = stmt.where(Channel.channel_name.ilike(f"%{q}%"))
+    channels = db.scalars(stmt).all()
     # Rollup: campaigns per channel (total + active) for the drill-down links.
     camp_counts: dict = {}
-    for chid, status, n in db.execute(
+    for chid, cstatus, n in db.execute(
         select(Campaign.channel_id, Campaign.status, func.count())
         .where(Campaign.user_id == user.id).group_by(Campaign.channel_id, Campaign.status)
     ).all():
         d = camp_counts.setdefault(chid, {"total": 0, "active": 0})
         d["total"] += n
-        if status == CampaignStatus.active:
+        if cstatus == CampaignStatus.active:
             d["active"] += n
+    chips = [{"label": "All", "value": "", "count": total_all}] + [
+        {"label": s.title(), "value": s, "count": status_counts.get(s, 0)}
+        for s in _CHANNEL_STATUS_FILTERS]
     return templates.TemplateResponse(
         request, "channels.html",
         {"request": request, "user": user, "channels": channels, "nav": "channels",
-         "camp_counts": camp_counts},
+         "camp_counts": camp_counts, "chips": chips, "status": status, "q": q, "total_all": total_all},
     )
 
 
@@ -511,19 +539,39 @@ def _google_flow(scopes: list[str], redirect_path: str):
 
 
 # ── Campaigns Manager ────────────────────────────────────────────────────────
+_CAMPAIGN_STATUS_FILTERS = ("active", "pending", "failed", "completed")
+
+
 @app.get("/campaigns", response_class=HTMLResponse)
-def campaigns_page(request: Request, user: CurrentUser, db: DbDep, channel: int | None = None):
-    q = select(Campaign).where(Campaign.user_id == user.id)
+def campaigns_page(request: Request, user: CurrentUser, db: DbDep, channel: int | None = None,
+                   status: str = "", q: str = ""):
+    conds = [Campaign.user_id == user.id]
     if channel:  # scoped to one channel (drill-down from Channels)
-        q = q.where(Campaign.channel_id == channel)
-    campaigns = db.scalars(q).all()
+        conds.append(Campaign.channel_id == channel)
+    # True per-status counts for the chips (over the current scope, before the status filter).
+    status_counts = {s.value: n for s, n in db.execute(
+        select(Campaign.status, func.count()).where(*conds).group_by(Campaign.status)).all()}
+    total_all = sum(status_counts.values())
+    status = status if status in _CAMPAIGN_STATUS_FILTERS else ""
+    q = q.strip()
+    stmt = select(Campaign).where(*conds)
+    if status:
+        stmt = stmt.where(Campaign.status == CampaignStatus(status))
+    if q:
+        stmt = stmt.where(Campaign.topic_name.ilike(f"%{q}%"))
+    campaigns = db.scalars(stmt.order_by(Campaign.id.desc())).all()
     channels = {c.id: c for c in db.scalars(select(Channel).where(Channel.user_id == user.id)).all()}
+    chips = [{"label": "All", "value": "", "count": total_all}] + [
+        {"label": s.title(), "value": s, "count": status_counts.get(s, 0)}
+        for s in _CAMPAIGN_STATUS_FILTERS]
     return templates.TemplateResponse(
         request,
         "campaigns.html",
         {"request": request, "user": user, "campaigns": campaigns, "channels": channels, "nav": "campaigns",
          "asset_counts": _buffer_counts(db, user.id),
-         "scope_channel": channels.get(channel) if channel else None},
+         "scope_channel": channels.get(channel) if channel else None,
+         "chips": chips, "status": status, "q": q, "total_all": total_all,
+         "scope_hidden": {"channel": channel} if channel else {}},
     )
 
 
@@ -938,31 +986,40 @@ _ASSETS_PER_PAGE = 24
 def assets_page(request: Request, user: CurrentUser, db: DbDep,
                 flash: str = "", flash_reason: str = "",
                 campaign: int | None = None, channel: int | None = None,
-                status: str = "", page: int = 1):
-    conds = [Campaign.user_id == user.id]
-    if campaign:  # drill-down scope from a campaign
-        conds.append(BufferPoolItem.campaign_id == campaign)
-    if channel:   # drill-down scope from a channel
-        conds.append(BufferPoolItem.channel_id == channel)
+                status: str = "", page: int = 1, q: str = ""):
+    q = q.strip()
+    # Scope conditions (channel/campaign drill-down) — chip counts are computed over THIS, without the
+    # search, so the chips read as "how many exist here" (consistent with Campaigns/Channels). Search +
+    # status narrow only the visible items and the paging count.
+    scope_conds = [Campaign.user_id == user.id]
+    if campaign:
+        scope_conds.append(BufferPoolItem.campaign_id == campaign)
+    if channel:
+        scope_conds.append(BufferPoolItem.channel_id == channel)
 
-    def scoped(stmt):
+    def joined(stmt, conds):
         return stmt.select_from(BufferPoolItem).join(
             Campaign, BufferPoolItem.campaign_id == Campaign.id).where(*conds)
 
-    # True per-status tallies for the filter chips (whole scope, not just the current page).
     status_counts = {s.value: n for s, n in db.execute(
-        scoped(select(BufferPoolItem.status, func.count())).group_by(BufferPoolItem.status)).all()}
-    total_all = sum(status_counts.values())
+        joined(select(BufferPoolItem.status, func.count()), scope_conds)
+        .group_by(BufferPoolItem.status)).all()}
+    pool_total = sum(status_counts.values())  # is there anything in this scope at all?
+    total_all = pool_total                    # chip "All" count (scope, search-independent)
 
     status = status if status in _ASSET_STATUS_FILTERS else ""
-    total = status_counts.get(status, 0) if status else total_all
+    # Filtered conditions drive the visible items + the paging count (status + search applied).
+    item_conds = list(scope_conds)
+    if status:
+        item_conds.append(BufferPoolItem.status == BufferStatus(status))
+    if q:
+        item_conds.append(or_(Campaign.topic_name.ilike(f"%{q}%"),
+                              cast(BufferPoolItem.episode_number, String).ilike(f"%{q}%")))
+    total = db.scalar(joined(select(func.count()), item_conds)) or 0
     pages = max(1, -(-total // _ASSETS_PER_PAGE))  # ceil-divide
     page = min(max(page, 1), pages)
-
-    item_q = scoped(select(BufferPoolItem))
-    if status:
-        item_q = item_q.where(BufferPoolItem.status == BufferStatus(status))
-    items = db.scalars(item_q.order_by(BufferPoolItem.id.desc())
+    items = db.scalars(joined(select(BufferPoolItem), item_conds)
+                       .order_by(BufferPoolItem.id.desc())
                        .limit(_ASSETS_PER_PAGE).offset((page - 1) * _ASSETS_PER_PAGE)).all()
 
     campaigns = db.scalars(select(Campaign).where(Campaign.user_id == user.id)).all()
@@ -973,6 +1030,16 @@ def assets_page(request: Request, user: CurrentUser, db: DbDep,
                    if i.status in (BufferStatus.ready, BufferStatus.awaiting_review)
                    and i.video_path and os.path.exists(i.video_path)}
     scope_qs = (f"campaign={campaign}&" if campaign else (f"channel={channel}&" if channel else ""))
+    if q:  # keep the search term on pager links too
+        from urllib.parse import quote
+
+        scope_qs += f"q={quote(q)}&"
+    scope_hidden = {"campaign": campaign} if campaign else ({"channel": channel} if channel else {})
+    chips = [{"label": "All", "value": "", "count": total_all},
+             {"label": "Awaiting review", "value": "awaiting_review",
+              "count": status_counts.get("awaiting_review", 0)},
+             {"label": "Ready", "value": "ready", "count": status_counts.get("ready", 0)},
+             {"label": "Published", "value": "consumed", "count": status_counts.get("consumed", 0)}]
     return templates.TemplateResponse(
         request, "assets.html",
         {"request": request, "user": user, "items": items, "nav": "assets",
@@ -980,6 +1047,7 @@ def assets_page(request: Request, user: CurrentUser, db: DbDep,
          "scope_campaign": camp_by_id.get(campaign) if campaign else None,
          "scope_channel": chan_by_id.get(channel) if channel else None,
          "status": status, "status_counts": status_counts, "total_all": total_all,
+         "pool_total": pool_total, "chips": chips, "q": q, "scope_hidden": scope_hidden,
          "page": page, "pages": pages, "scope_qs": scope_qs,
          # Post-action feedback (whitelisted — never echo arbitrary input back into the page).
          "flash": flash if flash in ("publish", "rerender", "rejected", "missing") else "",

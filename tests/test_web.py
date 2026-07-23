@@ -190,6 +190,50 @@ def test_asset_action_return_to_episode(client):
     assert r3.headers["location"].startswith("/assets?flash=rejected")
 
 
+def test_campaigns_filter_and_search(client):
+    """Campaigns get server-side status chips (true counts) + text search — the shared filter grammar."""
+    from database.db_session import SessionLocal
+    from database.models import Campaign, Channel
+    from database.types import CampaignStatus
+
+    client.post("/channels/facebook", data={"channel_name": "P", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    db = SessionLocal()
+    ch = db.query(Channel).first()
+    db.add_all([
+        Campaign(user_id=ch.user_id, channel_id=ch.id, topic_name="Space Facts", total_episodes=5,
+                 status=CampaignStatus.active),
+        Campaign(user_id=ch.user_id, channel_id=ch.id, topic_name="Ocean Myths", total_episodes=5,
+                 status=CampaignStatus.pending),
+    ])
+    db.commit()
+    db.close()
+
+    r = client.get("/campaigns")
+    assert "Active (1)" in r.text and "Pending (1)" in r.text and "All (2)" in r.text
+    assert "Space Facts" in client.get("/campaigns?status=active").text
+    assert "Ocean Myths" not in client.get("/campaigns?status=active").text
+    assert "Ocean Myths" in client.get("/campaigns?q=ocean").text
+    assert "Space Facts" not in client.get("/campaigns?q=ocean").text
+
+
+def test_channels_filter_and_search(client):
+    client.post("/channels/facebook", data={"channel_name": "Alpha Page", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    client.post("/channels/facebook", data={"channel_name": "Beta Page", "page_id": "2", "page_access_token": "t"},
+                follow_redirects=False)
+    r = client.get("/channels")
+    assert "All (2)" in r.text
+    assert "Alpha Page" in client.get("/channels?q=alpha").text
+    assert "Beta Page" not in client.get("/channels?q=alpha").text
+
+
+def test_assets_search(client):
+    _make_episode(client)  # campaign "Space" with an awaiting-review buffer item
+    assert "asset-card" in client.get("/assets?q=Space").text
+    assert "No items match this filter" in client.get("/assets?q=zzznomatch").text
+
+
 def test_ownership_guard_404(client):
     assert client.post("/campaigns/99999/delete", follow_redirects=False).status_code == 404
 

@@ -610,3 +610,20 @@ already exists (Task ⋈ BufferPoolItem by campaign+episode), so it ships withou
 publish pipeline. Reusing the existing action routes via `return_to` (rather than duplicating them)
 keeps one definition of each action and one set of tests; the allowlist guard means a crafted
 `return_to` can only ever bounce within the app, never to an external host.
+
+### ADR-033 — One filter grammar across list pages (UI restructure, phase 2)
+**Decision:** a single `filter_bar` Jinja macro — status chips with true counts + a server-side
+search box, all URL-driven — now renders identically on Campaigns, Channels and Asset Pool (Task Logs
+already had server search; its stage chips arrive with the Phase-4 pipeline). Chip counts are computed
+over the page's *scope* (channel/campaign drill-down) and are search-independent, so they always read
+"how many exist here"; the search term and active status narrow only the visible rows and the paging
+count. A `query_string()` template global builds the chip/search hrefs (dropping empty params,
+URL-encoding), and Asset Pool keeps a separate `pool_total` (scope count, ignoring search) so an
+empty search result shows "no match" rather than the "buffer pool is empty" state. Campaigns' old
+client-side, only-shown-above-3 search box is gone. **Why:** the pages had four different filter
+models (client hide-search on Campaigns, server chips on Assets, server search on Task Logs, nothing
+on Channels), which is the concrete source of the "fragmented, hard to filter" complaint. One macro +
+one URL convention means every list filters the same way, every filtered view is linkable and
+back-button correct (same principle as the pagination ADRs), and the server sends only the rows it
+means to show. Keeping chip counts scope-based rather than search-filtered avoids the confusing
+"counts jump around as I type" behavior and keeps the empty-vs-no-match distinction honest.
