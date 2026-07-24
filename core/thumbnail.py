@@ -1,14 +1,61 @@
 """Thumbnail generation (PIL). Reuses the caption module's font loader + wrap (DRY)."""
 from __future__ import annotations
 
+import logging
 import os
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter, ImageStat
 
 from core.captions import MARGIN_PX, VIDEO_H, VIDEO_W, _load_font, wrap_text
 from core.ffmpeg_runner import extract_frame
 
+logger = logging.getLogger(__name__)
+
 TITLE_FONT_PX = 96
+# Candidate frame positions (fraction of duration) when we know the length — spread across the body,
+# skipping the very start/end where intros/outros and fades live.
+_FRAME_SAMPLES = (0.12, 0.3, 0.5, 0.68, 0.85)
+
+
+def _frame_score(img: Image.Image) -> float:
+    """Higher = a better thumbnail frame: rich in edge detail (not blurry/near-black) and colourful.
+    Edge stddev dominates; colour (mean RGB channel spread) is a lighter tie-breaker."""
+    edges = img.convert("L").filter(ImageFilter.FIND_EDGES)
+    sharp = ImageStat.Stat(edges).stddev[0]
+    color = sum(ImageStat.Stat(img).stddev) / 3.0
+    return sharp + 0.3 * color
+
+
+def _select_frame(video_path: str, frame_png: str, at_fraction: float, duration: float | None) -> None:
+    """Write the chosen candidate frame to `frame_png`. With a known duration, sample several frames
+    and keep the sharpest/most-colourful (avoids a blurry or near-black mid-video grab); otherwise
+    fall back to one fixed-offset frame. Fully fail-open — any error yields the single-frame path."""
+    if not duration or duration <= 0:
+        extract_frame(video_path, frame_png, at_seconds=max(0.5, at_fraction * 10))
+        return
+    best_score, best_tmp = None, None
+    tmps: list[str] = []
+    try:
+        for i, frac in enumerate(_FRAME_SAMPLES):
+            tmp = f"{frame_png}.cand{i}.png"
+            try:
+                extract_frame(video_path, tmp, at_seconds=max(0.3, frac * duration))
+                with Image.open(tmp) as raw:
+                    score = _frame_score(raw.convert("RGB"))
+            except Exception:  # noqa: BLE001 — a bad seek/decode on one candidate must not fail all
+                continue
+            tmps.append(tmp)
+            if best_score is None or score > best_score:
+                best_score, best_tmp = score, tmp
+        if best_tmp is None:  # every candidate failed — fall back to a single fixed grab
+            extract_frame(video_path, frame_png, at_seconds=max(0.5, at_fraction * duration))
+            return
+        os.replace(best_tmp, frame_png)
+        tmps.remove(best_tmp)
+    finally:
+        for t in tmps:
+            if os.path.exists(t):
+                os.remove(t)
 
 
 def generate_thumbnail(
@@ -17,17 +64,17 @@ def generate_thumbnail(
     title: str,
     *,
     at_fraction: float = 0.15,
+    duration: float | None = None,
     logo_path: str | None = None,
     font_path: str | None = None,
     width: int = VIDEO_W,
     height: int = VIDEO_H,
 ) -> str:
     """Grab a representative frame, darken the lower area, and draw a wrapped bold title. `width`/
-    `height` set the thumbnail geometry (default vertical 1080×1920; 1920×1080 for long-form)."""
+    `height` set the thumbnail geometry (default vertical 1080×1920; 1920×1080 for long-form). When
+    `duration` is given, the frame is the sharpest/most-colourful of several candidates."""
     frame_png = out_path + ".frame.png"
-    # A frame ~15% in avoids a black intro. Duration is not always known here, so use a small fixed
-    # offset if fraction can't be applied by the caller.
-    extract_frame(video_path, frame_png, at_seconds=max(0.5, at_fraction * 10))
+    _select_frame(video_path, frame_png, at_fraction, duration)
 
     try:
         with Image.open(frame_png) as raw:

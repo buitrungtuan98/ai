@@ -936,6 +936,57 @@ def test_channel_profile_save_validate_and_prefill(client):
     assert 'data-current="vi-VN-HoaiMyNeural"' in page          # voice from profile
 
 
+def test_campaign_invalid_timezone_dropped(client):
+    """A campaign saved with a bogus timezone stores None (server default) rather than a bad value
+    the scheduler would silently misread as UTC."""
+    from database.db_session import SessionLocal
+    from database.models import Campaign, Channel
+
+    client.post("/channels/facebook", data={"channel_name": "TZ", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    db = SessionLocal()
+    cid = db.query(Channel).first().id
+    db.close()
+    client.post("/campaigns", data={
+        "topic_name": "Bad TZ", "channel_id": str(cid), "total_episodes": "5",
+        "language": "en", "timezone": "Not/AZone", "posting_slots": "21:00",
+    }, follow_redirects=False)
+    db = SessionLocal()
+    cfg = db.query(Campaign).filter_by(topic_name="Bad TZ").one().config_json
+    db.close()
+    assert cfg["timezone"] is None
+
+
+def test_timezone_picker_is_grouped_dropdown(client):
+    """The campaign form renders the grouped timezone <select> (not free text), with the Vietnam
+    zone and a live UTC offset."""
+    client.post("/channels/facebook", data={"channel_name": "P", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    page = client.get("/campaigns/new").text
+    assert 'name="timezone"' in page and "<optgroup" in page
+    assert 'value="Asia/Ho_Chi_Minh"' in page and "UTC+07:00" in page
+
+
+def test_autopilot_thresholds_kept_consistent(client):
+    """Saving contradictory review thresholds (approve ≤ reject) is corrected at save so the stored
+    config the page shows is exactly the one the engine acts on (approve strictly above reject)."""
+    from database.db_session import SessionLocal
+    from database.models import Channel
+
+    client.post("/channels/facebook", data={"channel_name": "AP", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    db = SessionLocal()
+    cid = db.query(Channel).first().id
+    db.close()
+    client.post(f"/channels/{cid}/autopilot", data={
+        "mode": "copilot", "interval_hours": "3", "approve_min": "5", "reject_max": "6"},
+        follow_redirects=False)
+    db = SessionLocal()
+    rv = db.query(Channel).first().autopilot_json["review"]
+    db.close()
+    assert rv["reject_max"] == 6 and rv["approve_min"] == 7  # bumped above reject
+
+
 def test_propose_forwards_channel_profile(client, monkeypatch):
     """AI Propose sends the selected channel so the designer localizes to its audience."""
     from core import ai_engine
@@ -1114,6 +1165,33 @@ def test_reject_reason_feeds_learning(client, tmp_path):
     t2 = db.query(Task).filter_by(campaign_id=cam.id, episode_number=1).one()
     assert "mở đầu chậm quá" in t2.error_message
     db.close()
+
+
+def test_episode_view_shows_retention_dropoff(client):
+    """The Episode view renders the retention curve and names the scene where most viewers left."""
+    from database.db_session import SessionLocal
+    from database.models import Task
+    from database.types import TaskStatus
+
+    cam = _seed_campaign(client)
+    db = SessionLocal()
+    t = Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=1,
+             status=TaskStatus.COMPLETED, synopsis="s",
+             published_url="https://youtube.com/shorts/x",
+             render_json={"scenes": [{"index": 0, "start": 0.0, "end": 4.0, "dur": 4.0, "label": "intro"},
+                                     {"index": 1, "start": 4.0, "end": 10.0, "dur": 6.0, "label": "the twist"}],
+                          "duration": 10.0},
+             stats_json={"views": 500, "avg_pct_viewed": 55.0, "likes": 20,
+                         "retention_curve": [[0.0, 1.0], [0.4, 0.7], [1.0, 0.6]],
+                         "drop_summary": "Biggest drop-off at 0:04 (scene 2 — “the twist”)"})
+    db.add(t)
+    db.commit()
+    db.refresh(t)
+    tid = t.id
+    db.close()
+    page = client.get(f"/episodes/{tid}").text
+    assert "Audience retention" in page
+    assert "the twist" in page and "−30%" in page  # the 1.0→0.7 fall at 40% = scene 2
 
 
 def test_performance_page_and_reset(client):

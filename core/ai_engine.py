@@ -1098,13 +1098,18 @@ def distill_playbook(
     performance_summary: str,
     current_playbook: list[str] | None = None,
     reject_reasons: list[str] | None = None,
+    drop_notes: list[str] | None = None,
     model: str = DEFAULT_MODEL,
 ) -> PlaybookUpdate:
-    """Turn episode stats + operator feedback into an updated, bounded channel playbook."""
+    """Turn episode stats + operator feedback into an updated, bounded channel playbook. `drop_notes`
+    are per-episode retention drop-off findings (scene where viewers left) — the SAME daily call now
+    also learns WHERE episodes lose people, not just that they did (no extra API call)."""
     prompt = (
         f"EPISODE PERFORMANCE DATA:\n{performance_summary}\n\n"
         f"CURRENT PLAYBOOK:\n" + ("\n".join(f"- {p}" for p in (current_playbook or [])) or "(empty)") +
         "\n\nOPERATOR REJECTION NOTES:\n" + ("\n".join(f"- {r}" for r in (reject_reasons or [])) or "(none)") +
+        "\n\nRETENTION DROP-OFF POINTS (where viewers left — fix these scene types):\n"
+        + ("\n".join(f"- {d}" for d in (drop_notes or [])) or "(none)") +
         "\n\nProduce the updated playbook and pick the strongest hooks/titles as best_examples."
     )
     return generate_structured(prompt=prompt, schema=PlaybookUpdate, api_key=api_key,

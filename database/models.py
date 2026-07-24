@@ -174,6 +174,9 @@ class Task(Base):
     synopsis: Mapped[str | None] = mapped_column(String(300))
     # Platform performance (views, avg_pct_viewed, likes, fetched_at) — feeds the playbook distiller.
     stats_json: Mapped[dict | None] = mapped_column(JSON)
+    # Render facts that outlive the buffer item: scene map (start/end/label) + duration, so the
+    # retention curve fetched later can be attributed to the scene that lost viewers.
+    render_json: Mapped[dict | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()

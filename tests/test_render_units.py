@@ -71,6 +71,25 @@ def test_prefer_unused_reorders_footage():
     assert [c.id for c in prefer_unused(pool, set())] == [1, 2, 3]
 
 
+def test_in_episode_dedupe_gives_scenes_distinct_leads():
+    """produce()'s in-episode accumulation (grow the seen-set by each scene's consumed clips) makes
+    consecutive scenes lead with different clips even when the footage pool is shared."""
+    from math import ceil
+    from types import SimpleNamespace
+
+    from core.video_factory import SHOT_TARGET_S, prefer_unused
+
+    pool = [SimpleNamespace(id=i, duration=5.0) for i in range(6)]  # same pool every scene
+    episode_seen: set[int] = set()
+    leads = []
+    for _si in range(3):
+        found = prefer_unused(list(pool), episode_seen)
+        leads.append(found[0].id)
+        d_i = 6.0  # ceil(6/3) = 2 clips reserved per scene
+        episode_seen.update(c.id for c in found[:max(1, ceil(d_i / SHOT_TARGET_S))])
+    assert len(set(leads)) == 3  # each scene leads with a distinct clip
+
+
 def test_render_profiles_and_long_geometry():
     from core.video_factory import (LONG_PROFILE, SHORT_PROFILE, build_scene_args, resolve_profile)
 
@@ -155,15 +174,35 @@ def test_voice_check_flags_broken_tts(monkeypatch):
 def test_build_concat_args_copy_and_loudnorm():
     from core.video_factory import LOUDNORM_FILTER, build_concat_args
 
-    # loudnorm off → pure stream copy, nothing re-encoded.
+    # loudnorm off → pure stream copy, nothing re-encoded; +faststart for instant preview.
     assert build_concat_args("l.txt", "m.mp4", loudnorm=False) == [
-        "-f", "concat", "-safe", "0", "-i", "l.txt", "-c", "copy", "m.mp4"]
+        "-f", "concat", "-safe", "0", "-i", "l.txt", "-c", "copy",
+        "-movflags", "+faststart", "m.mp4"]
 
     # Default: -14 LUFS normalization — audio-only re-encode, video still copied.
     args = build_concat_args("l.txt", "m.mp4")
     assert args[args.index("-af") + 1] == LOUDNORM_FILTER
     assert args[args.index("-c:v") + 1] == "copy"
+    assert args[args.index("-movflags") + 1] == "+faststart"  # moov atom up front
     assert "loudnorm=I=-14" in LOUDNORM_FILTER
+
+
+def test_scene_encode_quality_and_fade():
+    from core.video_factory import LONG_PROFILE, build_scene_args
+
+    a = build_scene_args(["c.mp4"], "a.mp3", "s.ass", "o.mp4", 5.0, None)
+    fc = a[a.index("-filter_complex") + 1]
+    assert "flags=lanczos" in fc                    # sharper upscaling than default bilinear
+    assert a[a.index("-crf") + 1] == "21"           # higher quality than the old 23
+    assert "1:a" in a and "afade" not in fc         # no fade by default: audio mapped straight
+
+    # fade_out_s > 0 fades video + audio over the tail (used on the last long-form scene).
+    b = build_scene_args(["c.mp4"], "a.mp3", "s.ass", "o.mp4", 10.0, None,
+                         profile=LONG_PROFILE, fade_out_s=1.5)
+    fcb = b[b.index("-filter_complex") + 1]
+    assert "fade=t=out:st=8.500:d=1.500" in fcb     # video fades over the last 1.5s
+    assert "afade=t=out:st=8.500:d=1.500" in fcb    # audio fades in lockstep
+    assert "[aout]" in b and "1:a" not in b         # audio now comes from the faded chain
 
 
 def test_build_concat_args_with_music_keeps_video_copy():
@@ -322,6 +361,87 @@ def test_pexels_skips_zero_duration(monkeypatch):
     monkeypatch.setitem(sys.modules, "requests", fake_requests)  # search_videos does `import requests`
     clips = pexels.search_videos("q", "key")
     assert [c.id for c in clips] == [2]  # only the positive-duration clip survives
+
+
+def test_best_file_orientation_and_resolution():
+    """The chosen rendition matches the requested orientation and is the SMALLEST that clears the
+    resolution floor (sharp, not a wasteful 4K download); largest is the fallback when none clear it."""
+    from core.pexels import _best_file
+
+    files = [
+        {"link": "sd", "width": 540, "height": 960},      # portrait, below floor
+        {"link": "hd", "width": 1080, "height": 1920},    # portrait, exactly the floor
+        {"link": "4k", "width": 2160, "height": 3840},    # portrait, wastefully large
+        {"link": "land", "width": 1920, "height": 1080},  # landscape
+    ]
+    # Portrait target: smallest portrait rendition ≥1080 short side → the 1080×1920 "hd".
+    assert _best_file(files, "portrait", 1080)["link"] == "hd"
+    # Landscape target: the landscape rendition (its short side 1080 clears the floor).
+    assert _best_file(files, "landscape", 1080)["link"] == "land"
+    # Floor no rendition can meet → largest portrait as best effort.
+    assert _best_file(files, "portrait", 4000)["link"] == "4k"
+
+
+def test_search_videos_resolution_floor_sorts_last(monkeypatch):
+    """A clip whose best rendition is below the output resolution drops behind full-res ones."""
+    import sys
+
+    from core import pexels
+
+    payload = {"videos": [
+        {"id": 1, "duration": 8, "video_files": [{"link": "lo", "width": 540, "height": 960}]},
+        {"id": 2, "duration": 8, "video_files": [{"link": "hi", "width": 1080, "height": 1920}]},
+    ]}
+
+    class R:
+        def raise_for_status(self): pass
+        def json(self): return payload
+
+    fake_requests = type("m", (), {"get": staticmethod(lambda *a, **k: R())})
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+    clips = pexels.search_videos("q", "key")
+    assert [c.id for c in clips] == [2, 1]  # full-res first, sub-1080 last
+
+
+def test_thumbnail_frame_score_prefers_detail_and_colour():
+    """The frame scorer ranks a detailed, colourful frame above a flat near-black one."""
+    from PIL import Image
+
+    from core.thumbnail import _frame_score
+
+    black = Image.new("RGB", (64, 64), (2, 2, 2))
+    # A noisy, colourful frame: high edge detail + channel spread.
+    rich = Image.new("RGB", (64, 64))
+    rich.putdata([((x * 37) % 256, (y * 53) % 256, (x * y) % 256)
+                  for y in range(64) for x in range(64)])
+    assert _frame_score(rich) > _frame_score(black)
+
+
+def test_thumbnail_selects_best_of_sampled_frames(monkeypatch, tmp_path):
+    """With a known duration, _select_frame samples several offsets and keeps the highest-scoring
+    frame; the losing candidates are cleaned up."""
+    from PIL import Image
+
+    from core import thumbnail
+
+    # Fake extract_frame: write a black frame everywhere except at the 0.5 sample (the "good" one).
+    def fake_extract(video, out, at_seconds):
+        color = (200, 120, 40) if abs(at_seconds - 0.5 * 10.0) < 0.01 else (0, 0, 0)
+        img = Image.new("RGB", (32, 32))
+        if color[0]:  # give the good frame real detail so it scores highest
+            img.putdata([((x * 41) % 256, (y * 29) % 256, (x + y) % 256)
+                         for y in range(32) for x in range(32)])
+        else:
+            img.paste(color, (0, 0, 32, 32))
+        img.save(out)
+
+    monkeypatch.setattr(thumbnail, "extract_frame", fake_extract)
+    frame = str(tmp_path / "f.png")
+    thumbnail._select_frame("v.mp4", frame, 0.15, 10.0)
+    import os
+    assert os.path.exists(frame)
+    # candidate temp files are cleaned up (only the chosen frame remains)
+    assert not [p for p in os.listdir(tmp_path) if ".cand" in p]
 
 
 def test_color_grade_in_scene_graph():

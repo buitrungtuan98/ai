@@ -39,7 +39,7 @@ from auth.dependencies import (
     get_owned_campaign,
     get_owned_channel,
 )
-from core import autopilot
+from core import autopilot, retention, timezones
 from core.config import settings
 from core.tts import VOICE_CHOICES
 from database.db_session import get_db, init_db
@@ -80,6 +80,9 @@ app.mount("/static", CachedStaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 templates.env.globals["settings"] = settings  # e.g. MULTI_TENANT_MODE toggles the sign-out chip
 templates.env.globals["voice_choices"] = VOICE_CHOICES  # campaign form: per-language voice picker
+templates.env.globals["voice_names"] = {  # id → short friendly name for compact chips
+    v: label.split(" — ")[0] for vs in VOICE_CHOICES.values() for v, label in vs}
+templates.env.globals["tz_choices"] = timezones.tz_choices  # grouped timezone picker (offsets live)
 
 
 def _query_string(**params: object) -> str:
@@ -611,16 +614,7 @@ def dismiss_autopilot_action(action_id: int, user: CurrentUser, db: DbDep):
 
 
 _PROFILE_LANGS = ("vi", "en", "es")
-
-
-def _valid_timezone(tz: str) -> bool:
-    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-
-    try:
-        ZoneInfo(tz)
-        return True
-    except (ZoneInfoNotFoundError, ValueError):
-        return False
+_valid_timezone = timezones.is_valid  # single definition of "is this a real IANA zone" (DRY)
 
 
 def _channel_profile_cfg(channel) -> dict:
@@ -680,6 +674,10 @@ def set_channel_autopilot(channel=Depends(get_owned_channel), db=Depends(get_db)
     if reject_max.strip().isdigit():
         review["reject_max"] = max(0, min(int(reject_max), 9))
     if review:
+        # Keep stored values consistent with how the engine reads them: approve must sit strictly
+        # above reject, so the saved config the page shows is exactly the one the AI acts on.
+        if "approve_min" in review and "reject_max" in review:
+            review["approve_min"] = min(10, max(review["approve_min"], review["reject_max"] + 1))
         cfg["review"] = review
     channel.autopilot_json = cfg
     db.commit()
@@ -962,7 +960,9 @@ def _build_campaign_config(
         "catchphrase_open": catchphrase_open or None,
         "catchphrase_close": catchphrase_close or None,
         "continuity": continuity if continuity in ("none", "no_repeat", "serial") else "none",
-        "timezone": timezone.strip() or None,
+        # Validate like the profile: a bad zone is dropped to None (server default) rather than
+        # silently stored and then misinterpreted as UTC by the scheduler.
+        "timezone": timezone.strip() if timezone.strip() and _valid_timezone(timezone.strip()) else None,
         # Cinema Polish + critic loop — "on"/"off" strings so an absent field means ON (default).
         "motion": "off" if motion == "off" else "on",
         "caption_theme": caption_theme if caption_theme in ("classic", "highlight", "boxed", "neon") else "highlight",
@@ -1673,11 +1673,17 @@ def episode_view(request: Request, user: CurrentUser, db: DbDep, task_id: int,
         buffer and buffer.status in (BufferStatus.ready, BufferStatus.awaiting_review)
         and buffer.video_path and os.path.exists(buffer.video_path))
     stage_index = _STAGE_INDEX.get(task.status.value)
+    # Retention drop-off markers: attribute the measured curve to the scene that lost viewers.
+    curve = (task.stats_json or {}).get("retention_curve")
+    scenes = (task.render_json or {}).get("scenes")
+    retention_drops = (
+        retention.drop_points(curve, scenes) if curve and scenes else [])
     return templates.TemplateResponse(
         request, "episode.html",
         {"request": request, "user": user, "nav": "episodes", "task": task, "campaign": campaign,
          "channel": channel, "buffer": buffer, "previewable": previewable,
          "stages": _EPISODE_STAGES, "stage_index": stage_index,
+         "retention_curve": curve, "retention_drops": retention_drops,
          "failed": task.status == TaskStatus.FAILED,
          "flash": flash if flash in ("publish", "rerender", "rejected", "missing") else "",
          "flash_reason": flash_reason[:200]},

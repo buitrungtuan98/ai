@@ -816,6 +816,49 @@ A full-site review (13 pages × desktop/mobile + code checks) turned up a handfu
   (badge shows on the sidebar, Settings cross-link renders, overview pages HTTP 200); 198 tests, ruff
   clean, docs green.
 
+## Timezone picker + channel-page fixes + quality lift `DONE`
+Follow-up round: a real timezone dropdown, channel-page bugs, and automatic quality improvements
+across footage/encode/learning.
+- **Batch O — timezone dropdown + channel-page bugs** `DONE`: free-text IANA entry was error-prone
+  (a typo was silently dropped on the profile, or silently misread as UTC by the scheduler on a
+  campaign). New `core/timezones.py` is the single source of a friendly, region-grouped `<select>`
+  (Việt Nam + SEA first) with **live DST-correct UTC offsets**, used by both the channel profile and
+  the campaign Distribution tab; a stored legacy zone stays selectable; campaign save now validates
+  the zone like the profile already did. Channel-page fixes: (B1) disclosure summaries no longer
+  scatter/interleave — label + value are one flex unit that wraps cleanly; (B2) the profile voice
+  picker filters to the selected language (no more en voice on a vi channel); (B3) the voice chip
+  shows the friendly name ("Hoài My") not the raw id; (B4) autopilot review thresholds are made
+  consistent at save (approve strictly above reject) so stored = shown = used; (B6) the profile
+  summary falls back to audience/language when there's no vision line; (B7) opening one card's
+  disclosure no longer stretches its row-mate into an empty box. Verified in a browser at 1280/375px,
+  dark + light; 205 tests (7 new), ruff clean, docs green.
+- **Batch P — footage & vision quality** `DONE`: (P1) `_best_file` was a real bug — it always chose
+  a portrait rendition (long-form 16:9 got a cropped strip) and always the largest file (4K downloads
+  wasting bandwidth + ARM decode). Now it matches the requested orientation and picks the SMALLEST
+  rendition clearing the 1080 short-side floor. (P2) clips whose best rendition is below that floor
+  sort last (they'd upscale to soft footage). (P3) in-episode dedupe — a growing seen-set steers
+  later scenes off the clips earlier scenes consumed, so overlapping-keyword scenes no longer share a
+  lead clip. (P4) smart thumbnail — with the duration known, the cover is the sharpest/most-colourful
+  of 5 sampled frames (edge + colour score) instead of one blind mid-video grab. All zero-cost,
+  CPU-safe, fail-open. 210 tests (5 new), ruff clean, docs green.
+- **Batch Q — encode & finish polish** `DONE`: (Q1) scene scaling uses `lanczos` and CRF drops 23→21
+  — a sharper source survives the platforms' re-encode better (~+20% file, same speed class). (Q2)
+  the final master gets `+faststart` (moov atom up front) so the Review player + platforms start
+  streaming instantly. (Q3) long-form fades video+audio over the last scene's final 1.5s for a real
+  ending, riding the existing encode (no new pass); shorts stay abrupt so the last-frame→first-frame
+  loop drives rewatches. See ADR-046. 211 tests (1 new), ruff clean, docs green; the real ffmpeg path
+  is exercised by the Docker/CI integration test (skipped in this sandbox — no ffmpeg).
+- **Batch R — retention-curve learning** `DONE`: the loop learned from one number per video
+  (`avg_pct_viewed`); now it also uses YouTube's free second-by-second retention curve. (R1) the Task
+  stores a `render_json` scene map (start/end + caption-hook label) at render time — it outlives the
+  buffer item. (R2) `analytics_service.fetch_youtube_retention` pulls the curve for measured episodes
+  (bounded, best-effort) into `stats_json`. (R3) the pure `core/retention.py` attributes the steepest
+  drop-offs to the scene playing there ("Biggest drop-off at 0:08 (scene 2 — 'Background context')"),
+  shown on the Episode view (curve + drop markers) and fed into the EXISTING daily playbook-distiller
+  call — the scriptwriter now learns WHERE it loses people, at **zero new AI calls**. See ADR-047.
+  Browser-verified (curve renders, drops attributed to scenes); 217 tests (6 new), ruff clean, docs
+  green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

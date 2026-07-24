@@ -84,6 +84,28 @@
 </div>
 {%- endmacro %}
 
+{# Grouped IANA timezone picker. `current` = the stored zone (or none); a stored value outside the
+   curated set is kept selectable under a "Saved" group so a legacy/custom zone is never lost.
+   `default_note` labels the blank (= server default) option. Offsets come from tz_choices() live. #}
+{% macro tz_select(name, current='', default_note='') -%}
+{% set cur = current or '' %}
+{% set ns = namespace(found=false) %}
+<select name="{{ name }}">
+  <option value="">— Server default{% if default_note %} ({{ default_note }}){% endif %} —</option>
+  {%- for group, zones in tz_choices() %}
+  <optgroup label="{{ group }}">
+    {%- for tz, label in zones %}
+    <option value="{{ tz }}" {{ 'selected' if cur == tz }}>{{ label }}</option>
+    {%- if cur == tz %}{% set ns.found = true %}{% endif %}
+    {%- endfor %}
+  </optgroup>
+  {%- endfor %}
+  {%- if cur and not ns.found %}
+  <optgroup label="Saved"><option value="{{ cur }}" selected>{{ cur }}</option></optgroup>
+  {%- endif %}
+</select>
+{%- endmacro %}
+
 {# Compact schedule/format facts for a campaign, read from its config_json. One definition, reused on
    the campaign card, the hub header and the dashboard "Running now" row. #}
 {% macro sched_facts(cfg) -%}

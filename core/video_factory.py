@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from math import ceil
 
 from core import media, pexels, safety_filter, tts
 from core.ai_engine import VideoScript
@@ -75,6 +76,7 @@ class RenderResult:
     branding_applied: bool = False
     policy_warnings: list[str] = field(default_factory=list)
     used_clip_ids: list[int] = field(default_factory=list)  # Pexels ids used → per-channel dedupe
+    scene_map: list[dict] = field(default_factory=list)  # [{index,start,end,dur,label}] → retention
 
 
 # ── Pure, testable helpers ───────────────────────────────────────────────────
@@ -198,12 +200,16 @@ def build_scene_args(
     color_grade: str | None = None,
     shot_durations: list[float] | None = None,
     profile: RenderProfile = SHORT_PROFILE,
+    fade_out_s: float = 0.0,
 ) -> list[str]:
     """Build the ffmpeg args (after the `ffmpeg` binary) for one re-encoded scene.
 
     When `shot_durations` is given, each clip is trimmed to its shot length before scaling — this is
     what turns a pile of clips into an edited cut rhythm. Omit it (the default) for the legacy
-    play-each-clip-in-full behavior. `profile` sets the output geometry (default vertical 1080×1920)."""
+    play-each-clip-in-full behavior. `profile` sets the output geometry (default vertical 1080×1920).
+    `fade_out_s` > 0 fades video + audio out over the final seconds (used on the last long-form scene
+    for a real ending; shorts stay abrupt to drive loop rewatches). No extra pass — it rides this
+    scene's existing single encode."""
     branding = branding or Branding()
     w, h, fps = profile.width, profile.height, profile.fps
     args: list[str] = []
@@ -221,7 +227,7 @@ def build_scene_args(
     for i in range(len(clip_paths)):
         trim = f"trim=0:{shot_durations[i]:.3f}," if shot_durations else ""
         filters.append(
-            f"[{i}:v]{trim}scale={w}:{h}:force_original_aspect_ratio=increase,"
+            f"[{i}:v]{trim}scale={w}:{h}:force_original_aspect_ratio=increase:flags=lanczos,"
             f"crop={w}:{h},setsar=1,fps={fps},setpts=PTS-STARTPTS[v{i}]"
         )
     if len(clip_paths) == 1:
@@ -251,12 +257,22 @@ def build_scene_args(
     if wm_idx is not None:
         filters.append(f"{cur}[{wm_idx}:v]overlay=W-w-40:40[vo]")
         cur = "[vo]"
-    filters.append(f"{cur}ass={ass_path}[vout]")
+    # Captions burn in last so text is never faded/graded/mirrored. When a tail fade is requested,
+    # it rides after the captions (whole composited frame fades) and the audio fades in lockstep.
+    if fade_out_s and fade_out_s > 0 and duration > 0:
+        st = max(0.0, duration - fade_out_s)
+        filters.append(f"{cur}ass={ass_path}[vcap]")
+        filters.append(f"[vcap]fade=t=out:st={st:.3f}:d={fade_out_s:.3f}[vout]")
+        filters.append(f"[{audio_idx}:a]afade=t=out:st={st:.3f}:d={fade_out_s:.3f}[aout]")
+        audio_map = "[aout]"
+    else:
+        filters.append(f"{cur}ass={ass_path}[vout]")
+        audio_map = f"{audio_idx}:a"
 
     args += [
         "-filter_complex", ";".join(filters),
-        "-map", "[vout]", "-map", f"{audio_idx}:a",
-        "-c:v", "libx264", "-preset", settings.FFMPEG_PRESET, "-crf", "23",
+        "-map", "[vout]", "-map", audio_map,
+        "-c:v", "libx264", "-preset", settings.FFMPEG_PRESET, "-crf", "21",
         "-pix_fmt", "yuv420p", "-r", str(fps), "-vsync", "cfr",
         "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "128k",
         "-t", f"{duration:.3f}", "-video_track_timescale", "30000",
@@ -279,14 +295,18 @@ def build_concat_args(
     re-encoded once when needed: to mix looped, ducked background music under the narration and/or
     to normalize the final mix to -14 LUFS (`loudnorm`), so every episode publishes at the same
     perceived volume."""
+    # +faststart moves the moov atom to the front so the Review-page player (and platforms) can
+    # start streaming immediately instead of waiting for the whole file. Cheap: no video re-encode.
     if not music_path and not loudnorm:
-        return ["-f", "concat", "-safe", "0", "-i", list_file, "-c", "copy", out_path]
+        return ["-f", "concat", "-safe", "0", "-i", list_file, "-c", "copy",
+                "-movflags", "+faststart", out_path]
     if not music_path:
         return [
             "-f", "concat", "-safe", "0", "-i", list_file,
             "-af", LOUDNORM_FILTER,
             "-map", "0:v", "-map", "0:a",
             "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-b:a", "128k",
+            "-movflags", "+faststart",
             out_path,
         ]
     out_label = "[mix]" if loudnorm else "[aout]"
@@ -309,6 +329,7 @@ def build_concat_args(
         "-filter_complex", mix,
         "-map", "0:v", "-map", "[aout]",
         "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-b:a", "128k", "-shortest",
+        "-movflags", "+faststart",
         out_path,
     ]
 
@@ -474,6 +495,10 @@ def produce(
         # download). Collecting all scenes before rendering is what lets Auto-QC vet the WHOLE
         # episode's footage in one batched vision call instead of one call per scene.
         plans: list[dict] = []
+        # In-episode footage dedupe: `recent_clip_ids` avoids clips this CHANNEL used in prior
+        # episodes; `episode_seen` grows as we go so two scenes in THIS episode don't lead with the
+        # same clip (scenes with overlapping keywords otherwise would). Reordering only — fail-open.
+        episode_seen: set[int] = set(recent_clip_ids or ())
         for si, scene in enumerate(script.scenes):
             # Safety filter narration before TTS (policy lives in safety_filter). If the filter
             # emptied a non-empty narration (whole scene was blacklisted), do NOT fall back to the
@@ -508,10 +533,13 @@ def produce(
             safety_filter.assert_licensed_footage("pexels")
             orientation = "landscape" if profile.width > profile.height else "portrait"
             found = prefer_unused(
-                search_footage(scene.pexels_keywords, pexels_api_key, orientation), recent_clip_ids)
+                search_footage(scene.pexels_keywords, pexels_api_key, orientation), episode_seen)
             if not found:
                 raise RuntimeError(
                     f"No Pexels footage for scene {si} (keywords={scene.pexels_keywords!r})")
+            # Reserve the clips this scene will consume (≈ its duration / the shot target) so later
+            # scenes are steered off them. Over-reserving is harmless — prefer_unused only reorders.
+            episode_seen.update(c.id for c in found[:max(1, ceil(d_i / SHOT_TARGET_S))])
             pre: dict[int, str] = {}
             if vet_batch is not None and len(found) > 1:
                 p = ws.path(f"scene_{si}_vet_0.mp4")
@@ -560,9 +588,12 @@ def produce(
             scene_out = ws.path(f"scene_{si}.mp4")
             # Motion effect seeded by episode so different episodes don't share an identical rhythm.
             effect = MOTION_EFFECTS[(motion_seed + si) % len(MOTION_EFFECTS)] if motion else None
+            # Long-form gets a real ending: fade the final scene's tail. Shorts stay abrupt so the
+            # last frame cuts back to the first — the seamless loop is what drives Shorts rewatches.
+            fade = min(1.5, d_i) if profile.name == "long" and si == len(plans) - 1 else 0.0
             args = build_scene_args(clip_paths, plan["audio"], ass_path, scene_out, d_i, branding,
                                     motion_effect=effect, color_grade=color_grade,
-                                    shot_durations=shot_durations, profile=profile)
+                                    shot_durations=shot_durations, profile=profile, fade_out_s=fade)
             run_ffmpeg(
                 args, total_duration=d_i,
                 on_progress=lambda p, s=si: report("scenes", 30 + (s + p / 100) / n_scenes * 70),
@@ -592,9 +623,15 @@ def produce(
                 metadata["description"] = "\n".join(chapters) + "\n\n" + metadata.get("description", "")
         thumb = os.path.join(output_dir, f"episode_{episode_number}.jpg")
         generate_thumbnail(master, thumb, metadata["title"],
+                           duration=sum(durations),  # sample across the video for the best frame
                            logo_path=branding.watermark_path,
                            width=profile.width, height=profile.height)
         report("thumb", 100)
+
+    # Scene map (absolute-timed spans + caption-hook labels) so a retention curve fetched days later
+    # can be blamed on the scene that lost viewers. Built from the audio-ground-truth durations.
+    from core import retention
+    scene_labels = [getattr(sc, "caption_hook", None) or "" for sc in script.scenes]
 
     return RenderResult(
         master_path=master,
@@ -604,6 +641,7 @@ def produce(
         scene_count=n_scenes,
         branding_applied=branding.active,
         used_clip_ids=used_clip_ids,
+        scene_map=retention.scene_map(durations, scene_labels),
     )
 
 

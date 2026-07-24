@@ -557,6 +557,9 @@ def render_task(task_id: int) -> None:
                 _safe_remove(result.master_path, result.thumbnail_path)
         qc_failed = qc_report is not None and not qc_report["passed"]
         _record_clip_usage(db, channel.id, result.used_clip_ids)  # so future episodes vary footage
+        # Persist the scene map + duration on the Task (it outlives the buffer item) so the retention
+        # curve fetched days later can be attributed to the scene that lost viewers.
+        task.render_json = {"scenes": result.scene_map, "duration": result.duration}
         _set_status(db, task, TaskStatus.AUDIO_SYNCED, 88)
 
         # Carry distribution settings into the stored metadata so the publish step (now or after

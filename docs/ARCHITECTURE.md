@@ -870,3 +870,40 @@ operator's head into something the whole system acts on — for free (the profil
 calls we already make; verification reuses the Analytics quota we already spend on retention). All
 inputs are validated/whitelisted (language, voice against the TTS catalog, timezone via ZoneInfo) so
 a bad value is dropped, never stored, and can never break rendering or the scheduler.
+
+### ADR-046 — Output-quality tuning: sharper footage, instant preview, format-aware endings
+**Decision:** a round of zero-cost, CPU-only render-quality improvements that change no architecture,
+only how the existing single-pass encode is parameterised. (Footage) `pexels._best_file` now picks
+the rendition matching the OUTPUT orientation and the smallest one clearing the 1080 short-side floor
+— fixing a real bug where long-form 16:9 could get a portrait rendition (cropped to a strip) and every
+clip pulled the largest (4K) file, wasting bandwidth and ARM decode; sub-floor clips sort last so we
+never upscale to soft footage. Footage dedupe now also spans scenes WITHIN an episode (a growing
+seen-set), not just across episodes. (Encode) scene scaling uses `lanczos` and CRF drops 23→21 — a
+sharper source survives the platforms' own re-encode better, at ~+20% file size and the same speed
+class. (Finish) the final master gets `+faststart` (moov atom up front) so the Review player and the
+platforms start streaming immediately. (Ending) long-form fades video+audio over the final 1.5s of
+the last scene — but SHORTS deliberately stay abrupt, because a Short's last frame cutting back to its
+first is a seamless loop, and loop rewatches are exactly the retention signal the algorithm rewards.
+**Why:** these are the highest-leverage quality wins that don't spend a cent or a second of extra CPU
+and don't touch the render-concurrency-1 / CPU-only constraints — the fade rides the last scene's
+existing encode (no new pass), faststart is a cheap atom move on a stream copy, and the footage/scale
+changes are pure parameter choices. Everything fails open: a bad candidate frame, a missing rendition,
+or a short final scene each degrade to the prior behaviour rather than failing the render.
+
+### ADR-047 — Retention-curve learning: learn WHERE viewers leave, not just that they did
+**Decision:** the self-improvement loop learned from one number per video (`avg_pct_viewed`). YouTube
+Analytics also exposes, for free, the second-by-second retention curve (`elapsedVideoTimeRatio` ×
+`audienceWatchRatio`) — we now use it. (R1) At render time the Task stores a `render_json` scene map
+(each scene's absolute start/end + its caption-hook label) — it outlives the buffer item, which is
+deleted on publish. (R2) `analytics_service` fetches the curve for measured episodes (one small extra
+report per video, bounded, best-effort) and stores it on `stats_json`. (R3) `core/retention.py` (pure,
+0 AI/0 IO) attributes the steepest drop-offs to the scene playing at that video-time, producing a
+human line — "Biggest drop-off at 0:08 (scene 2 — 'Background context')". That line shows on the
+Episode view (curve + markers) AND is fed into the EXISTING daily playbook-distiller call as extra
+evidence, so the scriptwriter learns which scene *types* lose people — at **zero new AI calls**.
+**Why:** retention is the king metric for Shorts, and "this episode kept 55%" can't be acted on, but
+"viewers leave during the background-context scene" can. The curve is already paid for (same Analytics
+quota we spend on the average), the scene map is already computed during render (we just persist it),
+and the analysis is deterministic — so a genuinely useful learning signal is added for free, inside
+the existing loop, with no new quota, no new AI call, and full fail-open behaviour (a missing curve or
+scene map simply omits the insight).
