@@ -1167,6 +1167,33 @@ def test_reject_reason_feeds_learning(client, tmp_path):
     db.close()
 
 
+def test_episode_view_shows_retention_dropoff(client):
+    """The Episode view renders the retention curve and names the scene where most viewers left."""
+    from database.db_session import SessionLocal
+    from database.models import Task
+    from database.types import TaskStatus
+
+    cam = _seed_campaign(client)
+    db = SessionLocal()
+    t = Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=1,
+             status=TaskStatus.COMPLETED, synopsis="s",
+             published_url="https://youtube.com/shorts/x",
+             render_json={"scenes": [{"index": 0, "start": 0.0, "end": 4.0, "dur": 4.0, "label": "intro"},
+                                     {"index": 1, "start": 4.0, "end": 10.0, "dur": 6.0, "label": "the twist"}],
+                          "duration": 10.0},
+             stats_json={"views": 500, "avg_pct_viewed": 55.0, "likes": 20,
+                         "retention_curve": [[0.0, 1.0], [0.4, 0.7], [1.0, 0.6]],
+                         "drop_summary": "Biggest drop-off at 0:04 (scene 2 — “the twist”)"})
+    db.add(t)
+    db.commit()
+    db.refresh(t)
+    tid = t.id
+    db.close()
+    page = client.get(f"/episodes/{tid}").text
+    assert "Audience retention" in page
+    assert "the twist" in page and "−30%" in page  # the 1.0→0.7 fall at 40% = scene 2
+
+
 def test_performance_page_and_reset(client):
     from database.db_session import SessionLocal
     from database.models import Campaign, Task

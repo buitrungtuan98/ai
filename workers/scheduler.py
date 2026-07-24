@@ -238,6 +238,10 @@ def maybe_distill_campaign(db, campaign: Campaign, now: datetime | None = None) 
         f"likes {t.stats_json.get('likes', '?')}"
         for t in rows
     ]
+    # Retention drop-off findings (scene where each episode lost viewers) — the same distiller call
+    # now also learns WHERE episodes lose people, at zero extra API cost.
+    drop_notes = [f"Ep {t.episode_number}: {t.stats_json['drop_summary']}"
+                  for t in rows if t.stats_json.get("drop_summary")]
     try:
         update = distill_playbook(
             api_key=api_key,
@@ -245,6 +249,7 @@ def maybe_distill_campaign(db, campaign: Campaign, now: datetime | None = None) 
             performance_summary="\n".join(summary_lines),
             current_playbook=learning.get("playbook"),
             reject_reasons=learning.get("reject_reasons"),
+            drop_notes=drop_notes,
         )
     except Exception:  # noqa: BLE001 — learning must never break the factory
         logger.warning("Playbook distillation failed for campaign %s", campaign.id, exc_info=True)

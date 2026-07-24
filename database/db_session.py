@@ -75,6 +75,7 @@ _COLUMN_UPGRADES: dict[str, dict[str, str]] = {
         "synopsis": "VARCHAR(300)",
         "stats_json": "TEXT",
         "ab_variant": "VARCHAR(8)",
+        "render_json": "TEXT",
     },
     "campaigns": {
         "learning_json": "TEXT",

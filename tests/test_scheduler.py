@@ -177,6 +177,41 @@ def test_collect_stats_eligibility(session, user, channel, monkeypatch):
     assert an.collect_stats(session, now=now) == 0
 
 
+def test_collect_stats_stores_retention_drop(session, user, channel, monkeypatch):
+    """When a curve is available and the task has its scene map, collect_stats attributes the biggest
+    drop-off to a scene and stores the summary alongside the base stats."""
+    from datetime import timedelta
+
+    from database.models import Campaign, Task
+    from database.types import CampaignStatus, TaskStatus
+    from services import analytics_service as an
+
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="R", total_episodes=9,
+                   status=CampaignStatus.active)
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    now = datetime.utcnow()
+    t = Task(campaign_id=cam.id, user_id=user.id, episode_number=1, status=TaskStatus.COMPLETED,
+             published_video_id="vidR", finished_at=now - timedelta(days=3),
+             render_json={"scenes": [{"index": 0, "start": 0.0, "end": 4.0, "dur": 4.0, "label": "intro"},
+                                     {"index": 1, "start": 4.0, "end": 10.0, "dur": 6.0, "label": "the twist"}],
+                          "duration": 10.0})
+    session.add(t)
+    session.commit()
+
+    monkeypatch.setattr(an, "fetch_youtube_stats",
+                        lambda ch, ids: {"vidR": {"views": 500, "likes": 20, "avg_pct_viewed": 55.0}})
+    monkeypatch.setattr(an, "fetch_youtube_geography", lambda ch, ids: {})
+    # Curve holds, then falls hard at 40% (= 4.0s → start of "the twist").
+    monkeypatch.setattr(an, "fetch_youtube_retention",
+                        lambda ch, ids: {"vidR": [[0.0, 1.0], [0.4, 0.7], [1.0, 0.6]]})
+    assert an.collect_stats(session, now=now) == 1
+    session.refresh(t)
+    assert t.stats_json["retention_curve"] == [[0.0, 1.0], [0.4, 0.7], [1.0, 0.6]]
+    assert "the twist" in t.stats_json["drop_summary"] and "0:04" in t.stats_json["drop_summary"]
+
+
 def test_maybe_distill_guards_and_updates(session, user, channel, monkeypatch):
     from datetime import timedelta
     from database.models import Campaign, Task
@@ -196,17 +231,25 @@ def test_maybe_distill_guards_and_updates(session, user, channel, monkeypatch):
     assert sch.maybe_distill_campaign(session, cam, now=now) is False
 
     for ep in range(1, 6):
+        stats = {"views": 100 * ep, "avg_pct_viewed": 50 + ep, "likes": ep,
+                 "fetched_at": now.isoformat()}
+        if ep == 3:  # one episode carries a retention drop finding
+            stats["drop_summary"] = "Biggest drop-off at 0:12 (scene 3 — “the twist”)"
         session.add(Task(campaign_id=cam.id, user_id=user.id, episode_number=ep,
-                         status=TaskStatus.COMPLETED, synopsis=f"story {ep}",
-                         stats_json={"views": 100 * ep, "avg_pct_viewed": 50 + ep, "likes": ep,
-                                     "fetched_at": now.isoformat()}))
+                         status=TaskStatus.COMPLETED, synopsis=f"story {ep}", stats_json=stats))
     session.commit()
 
     # maybe_distill_campaign imports distill_playbook at call time, so patch it at its source.
-    monkeypatch.setattr(ai, "distill_playbook", lambda **k: ai.PlaybookUpdate(
-        playbook=["Open with a question"], best_examples=["story 5"]))
+    captured = {}
+
+    def fake_distill(**k):
+        captured.update(k)
+        return ai.PlaybookUpdate(playbook=["Open with a question"], best_examples=["story 5"])
+
+    monkeypatch.setattr(ai, "distill_playbook", fake_distill)
 
     assert sch.maybe_distill_campaign(session, cam, now=now) is True
+    assert captured["drop_notes"] == ["Ep 3: Biggest drop-off at 0:12 (scene 3 — “the twist”)"]
     session.refresh(cam)
     assert cam.learning_json["playbook"] == ["Open with a question"]
     assert cam.learning_json["best_examples"] == ["story 5"]

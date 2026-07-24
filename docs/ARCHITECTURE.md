@@ -889,3 +889,21 @@ and don't touch the render-concurrency-1 / CPU-only constraints — the fade rid
 existing encode (no new pass), faststart is a cheap atom move on a stream copy, and the footage/scale
 changes are pure parameter choices. Everything fails open: a bad candidate frame, a missing rendition,
 or a short final scene each degrade to the prior behaviour rather than failing the render.
+
+### ADR-047 — Retention-curve learning: learn WHERE viewers leave, not just that they did
+**Decision:** the self-improvement loop learned from one number per video (`avg_pct_viewed`). YouTube
+Analytics also exposes, for free, the second-by-second retention curve (`elapsedVideoTimeRatio` ×
+`audienceWatchRatio`) — we now use it. (R1) At render time the Task stores a `render_json` scene map
+(each scene's absolute start/end + its caption-hook label) — it outlives the buffer item, which is
+deleted on publish. (R2) `analytics_service` fetches the curve for measured episodes (one small extra
+report per video, bounded, best-effort) and stores it on `stats_json`. (R3) `core/retention.py` (pure,
+0 AI/0 IO) attributes the steepest drop-offs to the scene playing at that video-time, producing a
+human line — "Biggest drop-off at 0:08 (scene 2 — 'Background context')". That line shows on the
+Episode view (curve + markers) AND is fed into the EXISTING daily playbook-distiller call as extra
+evidence, so the scriptwriter learns which scene *types* lose people — at **zero new AI calls**.
+**Why:** retention is the king metric for Shorts, and "this episode kept 55%" can't be acted on, but
+"viewers leave during the background-context scene" can. The curve is already paid for (same Analytics
+quota we spend on the average), the scene map is already computed during render (we just persist it),
+and the analysis is deterministic — so a genuinely useful learning signal is added for free, inside
+the existing loop, with no new quota, no new AI call, and full fail-open behaviour (a missing curve or
+scene map simply omits the insight).

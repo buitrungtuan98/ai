@@ -39,7 +39,7 @@ from auth.dependencies import (
     get_owned_campaign,
     get_owned_channel,
 )
-from core import autopilot, timezones
+from core import autopilot, retention, timezones
 from core.config import settings
 from core.tts import VOICE_CHOICES
 from database.db_session import get_db, init_db
@@ -1673,11 +1673,17 @@ def episode_view(request: Request, user: CurrentUser, db: DbDep, task_id: int,
         buffer and buffer.status in (BufferStatus.ready, BufferStatus.awaiting_review)
         and buffer.video_path and os.path.exists(buffer.video_path))
     stage_index = _STAGE_INDEX.get(task.status.value)
+    # Retention drop-off markers: attribute the measured curve to the scene that lost viewers.
+    curve = (task.stats_json or {}).get("retention_curve")
+    scenes = (task.render_json or {}).get("scenes")
+    retention_drops = (
+        retention.drop_points(curve, scenes) if curve and scenes else [])
     return templates.TemplateResponse(
         request, "episode.html",
         {"request": request, "user": user, "nav": "episodes", "task": task, "campaign": campaign,
          "channel": channel, "buffer": buffer, "previewable": previewable,
          "stages": _EPISODE_STAGES, "stage_index": stage_index,
+         "retention_curve": curve, "retention_drops": retention_drops,
          "failed": task.status == TaskStatus.FAILED,
          "flash": flash if flash in ("publish", "rerender", "rejected", "missing") else "",
          "flash_reason": flash_reason[:200]},

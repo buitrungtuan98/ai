@@ -816,7 +816,7 @@ A full-site review (13 pages × desktop/mobile + code checks) turned up a handfu
   (badge shows on the sidebar, Settings cross-link renders, overview pages HTTP 200); 198 tests, ruff
   clean, docs green.
 
-## Timezone picker + channel-page fixes + quality lift `WIP`
+## Timezone picker + channel-page fixes + quality lift `DONE`
 Follow-up round: a real timezone dropdown, channel-page bugs, and automatic quality improvements
 across footage/encode/learning.
 - **Batch O — timezone dropdown + channel-page bugs** `DONE`: free-text IANA entry was error-prone
@@ -848,8 +848,16 @@ across footage/encode/learning.
   ending, riding the existing encode (no new pass); shorts stay abrupt so the last-frame→first-frame
   loop drives rewatches. See ADR-046. 211 tests (1 new), ruff clean, docs green; the real ffmpeg path
   is exercised by the Docker/CI integration test (skipped in this sandbox — no ffmpeg).
-- Batch R — retention-curve learning (per-scene durations, retention curve fetch, drop-point
-  analysis fed to the playbook distiller) `TODO`
+- **Batch R — retention-curve learning** `DONE`: the loop learned from one number per video
+  (`avg_pct_viewed`); now it also uses YouTube's free second-by-second retention curve. (R1) the Task
+  stores a `render_json` scene map (start/end + caption-hook label) at render time — it outlives the
+  buffer item. (R2) `analytics_service.fetch_youtube_retention` pulls the curve for measured episodes
+  (bounded, best-effort) into `stats_json`. (R3) the pure `core/retention.py` attributes the steepest
+  drop-offs to the scene playing there ("Biggest drop-off at 0:08 (scene 2 — 'Background context')"),
+  shown on the Episode view (curve + drop markers) and fed into the EXISTING daily playbook-distiller
+  call — the scriptwriter now learns WHERE it loses people, at **zero new AI calls**. See ADR-047.
+  Browser-verified (curve renders, drops attributed to scenes); 217 tests (6 new), ruff clean, docs
+  green.
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation

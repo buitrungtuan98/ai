@@ -76,6 +76,7 @@ class RenderResult:
     branding_applied: bool = False
     policy_warnings: list[str] = field(default_factory=list)
     used_clip_ids: list[int] = field(default_factory=list)  # Pexels ids used → per-channel dedupe
+    scene_map: list[dict] = field(default_factory=list)  # [{index,start,end,dur,label}] → retention
 
 
 # ── Pure, testable helpers ───────────────────────────────────────────────────
@@ -627,6 +628,11 @@ def produce(
                            width=profile.width, height=profile.height)
         report("thumb", 100)
 
+    # Scene map (absolute-timed spans + caption-hook labels) so a retention curve fetched days later
+    # can be blamed on the scene that lost viewers. Built from the audio-ground-truth durations.
+    from core import retention
+    scene_labels = [getattr(sc, "caption_hook", None) or "" for sc in script.scenes]
+
     return RenderResult(
         master_path=master,
         thumbnail_path=thumb,
@@ -635,6 +641,7 @@ def produce(
         scene_count=n_scenes,
         branding_applied=branding.active,
         used_clip_ids=used_clip_ids,
+        scene_map=retention.scene_map(durations, scene_labels),
     )
 
 

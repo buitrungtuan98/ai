@@ -499,10 +499,12 @@ def test_distill_playbook(monkeypatch):
     monkeypatch.setattr(ai, "_call_gemini", fake_call)
     update = ai.distill_playbook(api_key="k",
                                  performance_summary="Ep 1: retention 80%\nEp 2: retention 40%",
-                                 current_playbook=["old lesson"], reject_reasons=["too slow"])
+                                 current_playbook=["old lesson"], reject_reasons=["too slow"],
+                                 drop_notes=["Ep 2: Biggest drop-off at 0:12 (scene 3 — “the twist”)"])
     assert update.playbook == ["Hooks phrased as questions win"]
     assert "retention 80%" in captured["prompt"] and "old lesson" in captured["prompt"]
     assert "too slow" in captured["prompt"]
+    assert "scene 3 — “the twist”" in captured["prompt"]  # drop-off notes reach the same call
 
 
 def test_build_script_prompt_episode_memory():

@@ -119,6 +119,26 @@
     {{ ui.stat(task.stats_json.get('views', '—'), 'Views') }}
     {{ ui.stat(task.stats_json.get('likes', '—'), 'Likes') }}
   </div>
+  {% if retention_curve and retention_curve|length >= 2 %}
+  <h4 class="sub-h mt">Audience retention <span class="meta">— % still watching across the video; ✕ marks where most left</span></h4>
+  {% set W = 600 %}{% set H = 70 %}
+  {% set pts = namespace(s='') %}
+  {% for pos, val in retention_curve %}
+    {% set x = (pos * W)|round(1) %}{% set y = (H - (val * H))|round(1) %}
+    {% set pts.s = pts.s ~ x ~ ',' ~ y ~ ' ' %}
+  {% endfor %}
+  <svg class="spark mt-sm" viewBox="0 0 {{ W }} {{ H }}" preserveAspectRatio="none" role="img" aria-label="Audience retention curve">
+    <polyline points="{{ pts.s|trim }}" fill="none" stroke="var(--st-working)" stroke-width="2" vector-effect="non-scaling-stroke"/>
+    {% for d in retention_drops %}
+    <line x1="{{ (d.at_pct/100*W)|round(1) }}" y1="0" x2="{{ (d.at_pct/100*W)|round(1) }}" y2="{{ H }}"
+          stroke="var(--st-failed)" stroke-width="1" stroke-dasharray="3 3" vector-effect="non-scaling-stroke"/>
+    {% endfor %}
+  </svg>
+  {% for d in retention_drops %}
+  <p class="hint" style="color:var(--st-failed)">✕ −{{ d.drop_pct }}% at {{ (d.at_seconds // 60)|int }}:{{ '%02d'|format((d.at_seconds % 60)|int) }} — scene {{ (d.scene_index or 0) + 1 }} <b>“{{ d.label }}”</b></p>
+  {% endfor %}
+  {% if not retention_drops %}<p class="hint">No sharp drop-off — retention holds across the video. 👍</p>{% endif %}
+  {% endif %}
   {% else %}
   <p class="hint">Stats refresh daily for videos 2–30 days old.</p>
   {% endif %}
