@@ -774,8 +774,12 @@ agree. ADR-045.
   voice vs the TTS catalog, timezone via ZoneInfo). Verified: 193 tests (3 new — profile
   save/validate/prefill, propose forwards the profile), ruff clean, docs guard green; editor +
   channel-switch re-localization checked in a browser.
-- K2 — country signal hardening (YouTube `defaultAudioLanguage`/`defaultLanguage` + a manual
-  localization checklist) `TODO`
+- **K2 — country signal hardening** `DONE`: YouTube uploads now declare
+  `defaultAudioLanguage`/`defaultLanguage` (BCP-47, from the campaign language) — the strongest
+  classifier signal for which audience a video targets; the render carries the language into the
+  buffer metadata for it. The profile box gained a one-time manual localization checklist (YouTube
+  Studio country, Facebook Page region). Verified: 194 tests (1 new — upload declares the language,
+  drops unknown values), ruff clean, docs guard green; live upload is operator-verified (RUNBOOK).
 - K3 — audience-geography verification (views-by-country + "Audience match" + autopilot mismatch
   proposal) `TODO`
 

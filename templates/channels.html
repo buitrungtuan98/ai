@@ -45,7 +45,14 @@
     <details class="disclosure mt-sm" {% if pr %}open{% endif %}>
       <summary>🌍 Channel profile{% if pr.vision %}: <b>{{ pr.vision }}</b>{% endif %}</summary>
       <div class="disclosure-body">
-        <p class="hint">Who this channel is for. Seeds every new campaign (language, voice, timezone) and tells AI Propose &amp; the autopilot strategist the channel's audience &amp; vision — so each video is localized to its country.</p>
+        <p class="hint">Who this channel is for. Seeds every new campaign (language, voice, timezone) and tells AI Propose &amp; the autopilot strategist the channel's audience &amp; vision — so each video is localized to its country. Uploads declare the spoken language automatically.</p>
+        <details class="disclosure"><summary>One-time localization checklist (do this in the platform)</summary>
+          <div class="disclosure-body"><ul class="crit-list">
+            <li>YouTube Studio → Settings → Channel → set <b>Country of residence</b> to this audience's country.</li>
+            <li>Keep titles, descriptions &amp; hashtags in the target language (the AI already does this from the profile).</li>
+            <li>Facebook Page → set the Page's <b>country/region</b> and primary language to match.</li>
+          </ul></div>
+        </details>
         <form method="post" action="/channels/{{ c.id }}/profile">
           <div class="grid cols-2">
             {% call ui.field('Audience / market', hint='e.g. Vietnam, United States') %}<input name="audience" value="{{ pr.audience or '' }}" placeholder="Vietnam">{% endcall %}

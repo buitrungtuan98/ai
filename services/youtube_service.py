@@ -90,6 +90,12 @@ def upload_video(channel: Channel, video_path: str, metadata: dict, user: User |
             "selfDeclaredMadeForKids": False,
         },
     }
+    # Declare the spoken + metadata language (BCP-47) — the clearest signal to YouTube's classifier
+    # of which audience this video targets, so it seeds the right country (ADR-045).
+    lang = metadata.get("language")
+    if lang in ("en", "vi", "es"):
+        body["snippet"]["defaultLanguage"] = lang
+        body["snippet"]["defaultAudioLanguage"] = lang
     media = MediaFileUpload(video_path, chunksize=-1, resumable=True, mimetype="video/mp4")
     request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
 
