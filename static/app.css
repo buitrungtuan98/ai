@@ -695,8 +695,9 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
   /* Bottom tab bar — one-thumb access to the busiest destinations */
   .tabbar { display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: var(--z-topbar);
     height: 60px; background: var(--surface); border-top: 1px solid var(--border); box-shadow: var(--shadow-2); }
-  .tabbar a { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 2px; color: var(--muted); font-size: 11px; font-weight: var(--fw-medium); position: relative; }
+  .tabbar a, .tabbar button.tab-more { flex: 1; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 2px; color: var(--muted); font-size: 11px; font-weight: var(--fw-medium);
+    position: relative; background: none; border: 0; cursor: pointer; font-family: inherit; }
   .tabbar a.active { color: var(--primary); }
   .tabbar .ico { font-size: 18px; }
   .tabbar .nav-badge { position: absolute; top: 8px; left: 55%; margin: 0; }

@@ -341,7 +341,7 @@ def test_retry_publish_vs_render_flash(client, tmp_path):
 
 def test_scope_switcher_and_scoped_nav(client):
     """The topbar scope switcher appears once channels exist, and an active channel scope is carried
-    onto the scope-aware nav links (Campaigns / Asset Pool / Task Logs)."""
+    onto the scope-aware primary nav links (Campaigns / Episodes)."""
     assert 'id="scope-switcher"' not in client.get("/").text  # no channels → no switcher
     client.post("/channels/facebook", data={"channel_name": "Chan A", "page_id": "1", "page_access_token": "t"},
                 follow_redirects=False)
@@ -355,8 +355,23 @@ def test_scope_switcher_and_scoped_nav(client):
     home = client.get("/").text
     assert 'id="scope-switcher"' in home and "Chan A" in home
     scoped = client.get(f"/campaigns?channel={cid}").text
-    assert f'href="/assets?channel={cid}"' in scoped and f'href="/tasks?channel={cid}"' in scoped
+    assert f'href="/campaigns?channel={cid}"' in scoped and f'href="/episodes?channel={cid}"' in scoped
     assert f'value="{cid}" selected' in scoped  # the active channel is marked in the switcher
+
+
+def test_nav_facets_link_to_their_owner(client):
+    """The demoted lenses stay reachable + traceable: Calendar is a view of Campaigns (mutual links),
+    and the render log + Review show an 'up to Episodes' path; Episodes surfaces both facets."""
+    client.post("/channels/facebook", data={"channel_name": "P", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    campaigns = client.get("/campaigns").text
+    assert 'href="/calendar"' in campaigns                         # Campaigns → Calendar view toggle
+    cal = client.get("/calendar").text
+    assert 'href="/campaigns"' in cal                              # Calendar → back to the list
+    assert 'href="/episodes"' in client.get("/tasks").text         # render log → up to Episodes
+    assert 'href="/episodes"' in client.get("/assets").text        # Review → up to Episodes
+    eps = client.get("/episodes").text
+    assert 'href="/tasks"' in eps and 'href="/assets"' in eps      # Episodes surfaces both facets
 
 
 def test_api_search_across_types(client):

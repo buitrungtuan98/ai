@@ -882,6 +882,29 @@ successor/tune logic was cruder than it needed to be.
   format/schedule/QC retained), the parent's playbook is fed to the designer, and it is fully
   fail-open: no key / over budget / AI error → today's plain clone. See ADR-048.
 
+## Navigation refactor — one rail, lenses inside their owner `DONE`
+A UX pass on the shell: the nav had 10 flat peers mixing places/states/tools, and mobile ran two
+competing menus (a bottom bar duplicating the drawer, "Home" vs "Dashboard" for one route).
+- **Phase 1 — nav shell** `DONE`: the global rail is now 6 destinations + a Setup cluster (was 10).
+  The render log + Review queue are facets of **Episodes**; the Calendar is a view of **Campaigns** —
+  demoted from the rail but still reached contextually. Two-level active state lights the parent on a
+  child route (`/calendar`→Campaigns, `/assets`→Episodes) via `nav in [...]`. Mobile is now ONE nav
+  source: the bottom bar mirrors the rail's top (Dashboard/Campaigns/Episodes/Auto) + a **More**
+  button opening the same drawer; the duplicated/renamed items are gone. See ADR-049. Browser-verified
+  desktop + 375px; 224 tests (1 updated in lockstep), ruff clean, docs green.
+- **Phase 2 — content unification** `DONE`: Calendar is now a view-toggle of Campaigns (a 📅 Calendar
+  button on the campaigns head ↔ a ▤ List button + "Campaigns › Calendar" breadcrumb on the calendar
+  head, both scope-aware). Episodes is the explicit home for the render log + Review — its head links
+  to both (scope-aware) and its subtitle says so.
+- **Phase 3 — facet traceability** `DONE`: the demoted lenses always show their "up" path — the
+  unscoped render log and Review pages carry an "Episodes › …" breadcrumb, and Calendar a "Campaigns
+  › Calendar" one — so every facet is one click from its owner and the rail lights that owner.
+  Browser-verified; 225 tests (1 new), ruff clean, docs green.
+- Not built (YAGNI for this domain): a per-dashboard **Permissions** tab and a **widget-config
+  drawer** from the generic proposal have no backing here — this is a single-operator tool with no
+  per-object ACL, and episode/aesthetic config already lives in the campaign hub's Settings tab +
+  the episode detail page. Building hollow ACL/drawer UI would violate the repo's KISS/YAGNI contract.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

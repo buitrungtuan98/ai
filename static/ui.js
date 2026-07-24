@@ -225,6 +225,9 @@
       toggle.setAttribute("aria-expanded", open ? "true" : "false");
     }
     toggle.addEventListener("click", function () { setOpen(!document.body.classList.contains("nav-open")); });
+    // The bottom bar's "More" opens the SAME drawer — one nav, reached two ways (no second menu).
+    var more = document.getElementById("tabbar-more");
+    if (more) more.addEventListener("click", function () { setOpen(!document.body.classList.contains("nav-open")); });
     if (backdrop) backdrop.addEventListener("click", function () { setOpen(false); });
     document.addEventListener("keydown", function (e) { if (e.key === "Escape") setOpen(false); });
     sidebar.querySelectorAll(".nav a").forEach(function (a) {

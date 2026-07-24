@@ -26,6 +26,8 @@
 {% elif scope_channel %}
 {{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': scope_channel.channel_name}, {'label': 'Review'}]) }}
 <p class="scope-note">Review queue for channel <b>{{ scope_channel.channel_name }}</b>. <a href="/assets">Show all →</a></p>
+{% else %}
+{{ ui.breadcrumb([{'label': 'Episodes', 'href': '/episodes'}, {'label': 'Review'}]) }}
 {% endif %}
 
 {% if pool_total %}
