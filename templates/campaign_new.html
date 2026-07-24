@@ -353,6 +353,22 @@
   applyFormatConstraints();
   if (fmtSel) fmtSel.addEventListener("change", applyFormatConstraints);
 
+  // Per-channel localization: switching the target channel re-seeds language / voice / timezone
+  // from that channel's profile (only on a new campaign — the map is absent when editing).
+  const channelProfiles = {{ (channel_profiles if channel_profiles is defined else {}) | tojson }};
+  const channelSel = document.querySelector('select[name="channel_id"]');
+  if (channelSel && Object.keys(channelProfiles).length) {
+    channelSel.addEventListener("change", function () {
+      const p = channelProfiles[channelSel.value];
+      if (!p) return;
+      if (p.language && langSel) { langSel.value = p.language; }
+      const tz = document.querySelector('input[name="timezone"]');
+      if (p.timezone && tz) tz.value = p.timezone;
+      fillVoices(p.voice || "");   // rebuild the voice list for the profile language + select its voice
+      updateIdentity();
+    });
+  }
+
   // 🎬 Live campaign "identity card": a plain-language summary of what you're about to create.
   const idText = document.getElementById("identity-text");
   const CAPTIONS = { highlight: "highlight captions", classic: "clean captions", boxed: "boxed captions", neon: "neon captions" };
@@ -437,6 +453,8 @@
           // The chosen format is a constraint the designer must honor (short vs long), not something
           // it may override — send it so a Long campaign is designed long-form.
           body.set("video_format", form.elements["video_format"].value || "short");
+          // The selected channel localizes the design to its audience/country (channel profile).
+          body.set("channel_id", (form.elements["channel_id"] && form.elements["channel_id"].value) || "");
           const r = await fetch("/campaigns/propose", { method: "POST", body });
           const p = await r.json();
           if (!r.ok) throw new Error(p.error || "AI proposal failed");

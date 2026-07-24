@@ -518,6 +518,28 @@ def autopilot_propose_channel(db, channel, now: datetime | None = None) -> int:
                 user_id=channel.user_id, channel_id=channel.id, campaign_id=c.id,
                 kind=p["kind"], summary=p["summary"], evidence=p["evidence"], params=p["params"]))
             filed += 1
+
+    # Channel-level audience-geography check (K3): are we actually reaching the target country?
+    all_tasks = db.scalars(select(Task).join(Campaign, Task.campaign_id == Campaign.id)
+                           .where(Campaign.channel_id == channel.id)).all()
+    aud = autopilot.audience_summary(all_tasks, channel.profile_json)
+    if aud and aud["match"] is False and aud["measured"] >= autopilot.AUDIENCE_MIN_MEASURED:
+        prior = db.scalars(select(AutopilotAction).where(
+            AutopilotAction.channel_id == channel.id, AutopilotAction.kind == "audience_drift")
+            .order_by(AutopilotAction.id.desc())).first()
+        recent_dismissed = (prior is not None and prior.status == "dismissed"
+                            and prior.resolved_at is not None
+                            and (now - prior.resolved_at) < timedelta(days=REPROPOSE_AFTER_DAYS))
+        if not (prior is not None and prior.status in ("proposed", "applied")) and not recent_dismissed:
+            db.add(AutopilotAction(
+                user_id=channel.user_id, channel_id=channel.id, campaign_id=None,
+                kind="audience_drift",
+                summary=(f"Audience mismatch on “{channel.channel_name}”: most views come from "
+                         f"{aud['country']}, off-target for this channel's language. Check the voice, "
+                         "topics and posting time.")[:300],
+                evidence={"top_country": aud["country"], "share_pct": aud["pct"],
+                          "measured": aud["measured"]}, params={}))
+            filed += 1
     if filed:
         db.commit()
     return filed
@@ -654,6 +676,7 @@ def autopilot_strategist_channel(db, user, channel, respect_cadence: bool = True
     cls = autopilot.classify_campaigns(db, campaigns)
     scorecard = {
         "channel": channel.channel_name,
+        "profile": channel.profile_json or {},  # audience/vision/style/language — the channel persona
         "playbook": (target.learning_json or {}).get("playbook"),
         "campaigns": [{"topic": c.topic_name, "verdict": cls[c.id]["label"],
                        "retention": cls[c.id]["retention"]} for c in campaigns],

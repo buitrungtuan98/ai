@@ -41,7 +41,7 @@
         <a href="/campaigns{{ scope_q }}" title="Campaigns" class="{{ 'active' if nav=='campaigns' else '' }}"><span class="ico">▤</span> <span class="nav-text">Campaigns</span></a>
         <a href="/assets{{ scope_q }}" title="Review — rendered videos awaiting approval" class="{{ 'active' if nav=='assets' else '' }}"><span class="ico">▦</span> <span class="nav-text">Review</span> <span class="nav-badge review" data-badge="awaiting_review" hidden></span></a>
         <a href="/channels" title="Channels" class="{{ 'active' if nav=='channels' else '' }}"><span class="ico">◉</span> <span class="nav-text">Channels</span></a>
-        <a href="/autopilot" title="Autopilot — AI channel manager: proposals to approve + decision log" class="{{ 'active' if nav=='autopilot' else '' }}"><span class="ico">🤖</span> <span class="nav-text">Autopilot</span></a>
+        <a href="/autopilot" title="Autopilot — AI channel manager: proposals to approve + decision log" class="{{ 'active' if nav=='autopilot' else '' }}"><span class="ico">🤖</span> <span class="nav-text">Autopilot</span> <span class="nav-badge" data-badge="autopilot_proposed" hidden></span></a>
         <p class="nav-group">Setup</p>
         <a href="/credentials" title="Credentials" class="{{ 'active' if nav=='credentials' else '' }}"><span class="ico">⚿</span> <span class="nav-text">Credentials</span></a>
         <a href="/settings" title="Settings" class="{{ 'active' if nav=='settings' else '' }}"><span class="ico">⚙</span> <span class="nav-text">Settings</span></a>

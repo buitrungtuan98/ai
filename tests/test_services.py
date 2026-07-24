@@ -47,6 +47,45 @@ def test_youtube_refresh_persists(monkeypatch):
     assert stored["access_token"] == "NEW_ACCESS" and "token_expiry" in stored
 
 
+def test_youtube_upload_declares_language(monkeypatch):
+    """The upload declares the spoken + metadata language (BCP-47) so the platform knows the
+    target audience/country (ADR-045). Fakes the Google client to capture the request body."""
+    from database.models import Channel
+    from database.types import Platform
+    from services import youtube_service as ys
+
+    captured = {}
+
+    class FakeReq:
+        def next_chunk(self):
+            return (None, {"id": "vid123"})
+
+    class FakeYouTube:
+        def videos(self):
+            insert = lambda part, body, media_body: (captured.update(body=body), FakeReq())[1]  # noqa: E731
+            return type("V", (), {"insert": staticmethod(insert)})()
+
+    disc = types.ModuleType("googleapiclient.discovery")
+    disc.build = lambda *a, **k: FakeYouTube()
+    http = types.ModuleType("googleapiclient.http")
+    http.MediaFileUpload = lambda *a, **k: object()
+    monkeypatch.setitem(sys.modules, "googleapiclient", types.ModuleType("googleapiclient"))
+    monkeypatch.setitem(sys.modules, "googleapiclient.discovery", disc)
+    monkeypatch.setitem(sys.modules, "googleapiclient.http", http)
+    monkeypatch.setattr(ys, "build_credentials", lambda ch: object())
+
+    ch = Channel(platform=Platform.youtube, channel_name="C", encrypted_credentials="{}")
+    vid = ys.upload_video(ch, "/tmp/x.mp4", {"title": "T", "language": "vi"})
+    assert vid == "vid123"
+    snip = captured["body"]["snippet"]
+    assert snip["defaultAudioLanguage"] == "vi" and snip["defaultLanguage"] == "vi"
+
+    # An unknown language is simply not declared (never sends a bad value).
+    captured.clear()
+    ys.upload_video(ch, "/tmp/x.mp4", {"title": "T", "language": "klingon"})
+    assert "defaultAudioLanguage" not in captured["body"]["snippet"]
+
+
 def test_youtube_missing_refresh_token(monkeypatch):
     _install_fake_google(monkeypatch)
     from database.models import Channel

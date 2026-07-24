@@ -760,6 +760,62 @@ the existing scheduler daemon on a per-channel cadence (default 3h, configurable
   render pipeline's QC verdict (0 AI calls), proposals/apply are deterministic, and the strategist is
   ~1 budget-guarded call/week per channel.
 
+## Channel profile — a per-channel persona that localizes every video to its country `DONE`
+Each channel gets an explicit persona (`Channel.profile_json`: audience/language/timezone/voice/
+style/vision) that flows into every AI touchpoint, so "Channel 1 = Vietnam, Channel 2 = USA" is
+something the whole system acts on. Organic platforms have no country switch — the algorithm infers
+the audience from language + topic + posting time + who watches — so the profile makes every signal
+agree. ADR-045.
+- **K1 — the profile** `DONE`: per-channel profile editor + summary chips on the Channels page;
+  the New Campaign form seeds language/voice/timezone from the selected channel's profile
+  (profile > Settings > default) and re-localizes client-side on channel switch; AI Propose forwards
+  the channel so the design (persona/topic/voice/posting time) is localized to its audience; the
+  autopilot strategist's scorecard carries the profile. All inputs validated (language whitelist,
+  voice vs the TTS catalog, timezone via ZoneInfo). Verified: 193 tests (3 new — profile
+  save/validate/prefill, propose forwards the profile), ruff clean, docs guard green; editor +
+  channel-switch re-localization checked in a browser.
+- **K2 — country signal hardening** `DONE`: YouTube uploads now declare
+  `defaultAudioLanguage`/`defaultLanguage` (BCP-47, from the campaign language) — the strongest
+  classifier signal for which audience a video targets; the render carries the language into the
+  buffer metadata for it. The profile box gained a one-time manual localization checklist (YouTube
+  Studio country, Facebook Page region). Verified: 194 tests (1 new — upload declares the language,
+  drops unknown values), ruff clean, docs guard green; live upload is operator-verified (RUNBOOK).
+- **K3 — audience-geography verification** `DONE`: the daily stats pass fetches views-by-country
+  per video (`fetch_youtube_geography` → top country + share, merged into `stats_json`);
+  `audience_summary` aggregates it into a channel/campaign verdict (dominant country + avg share +
+  whether it matches the profile language's expected countries). The campaign-hub Overview shows an
+  "🎯 Audience" line (matches ✅ / off-target ⚠), and the autopilot files an acknowledge-only
+  "audience_drift" advisory when a channel's real audience is off-target across ≥3 measured episodes.
+  Verified: 196 tests (2 new — audience_summary match/mismatch/none, drift advisory filed +
+  idempotent), ruff clean, docs guard green; hub line + acknowledge-only inbox advisory checked in a
+  browser (VN channel reaching US → off-target). Live geography fetch is operator-verified (RUNBOOK).
+
+## UX/logic sweep — bugs, channels declutter, cleanup `DONE`
+A full-site review (13 pages × desktop/mobile + code checks) turned up a handful of real issues.
+- **Batch L — bugs** `DONE`: (A1) "awaiting review" now has ONE source of truth — the buffer review
+  queue — so the dashboard tile / sidebar badge / `/api/summary` can no longer disagree with the
+  Review page + triage inbox (they were task-status vs buffer-status). (A2) the "🤖 AI recommends"
+  hint on a Review card shows only while that channel's autopilot is on (a stale hint no longer
+  lingers after autopilot is switched off). (A3) an autopilot successor action now links to the
+  campaign it created (Open →) in the decision log. (B3) the hub "Next post" cell reads "after
+  review" for review-first campaigns instead of a bare "—". Verified: 198 tests (3 new — buffer-based
+  count, stale-hint gate; api-summary test updated to the buffer source), ruff clean, docs green.
+- **Batch M — channels declutter** `DONE`: the Channels page was a wall of auto-opened forms (2,512px
+  tall for 3 channels). Profile + Autopilot disclosures are now closed by default with self-sufficient
+  summaries (`🌍 profile: <vision>` / `not set`; `🤖 ✈️ Full auto · every 3h · QC ≥7/≤4`), and saving a
+  profile or autopilot config shows a success banner. Page dropped to ~1,165px (−54%). Verified in a
+  browser; 198 tests, ruff clean, docs green.
+- **Batch N — cleanup** `DONE`: (A4) removed the dead `upcoming_slot_cells` helper (only a test still
+  referenced it after the calendar moved onto `_calendar_row_cells` in batch H); the test now asserts
+  the real row-cell shape (today allowed, other days gated). (C1) `/api/summary` now returns
+  `autopilot_proposed`, feeding a new Autopilot sidebar badge so open AI proposals are visible from
+  any page — the count comes from one shared `_autopilot_proposed_count` helper (DRY with the
+  dashboard route). (C2) the campaign Overview route fetched the parent `Channel` three times
+  (`_hub_context` + twice inline for the audience line) — now one fetch, reused. (C3) the Credentials
+  page links across to Settings (keys ↔ defaults/model are adjacent concerns). Verified in a browser
+  (badge shows on the sidebar, Settings cross-link renders, overview pages HTTP 200); 198 tests, ruff
+  clean, docs green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

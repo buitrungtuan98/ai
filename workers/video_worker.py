@@ -563,6 +563,9 @@ def render_task(task_id: int) -> None:
         # review) has everything it needs.
         result.metadata.setdefault("cta", cfg.get("cta"))
         result.metadata.setdefault("privacy", cfg.get("privacy", "public"))
+        # Carry the language so the upload can declare it (defaultAudioLanguage / defaultLanguage) —
+        # the strongest signal telling the platform which country/audience this video is for (ADR-045).
+        result.metadata.setdefault("language", cfg.get("language", "en"))
         if cfg.get("affiliate_url"):
             # The pinned comment carries the affiliate link too (with disclosure).
             line = f"{(cfg.get('affiliate_label') or '🔗').strip()} {cfg['affiliate_url']} (affiliate)"

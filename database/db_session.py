@@ -81,6 +81,7 @@ _COLUMN_UPGRADES: dict[str, dict[str, str]] = {
     },
     "channels": {
         "autopilot_json": "TEXT",
+        "profile_json": "TEXT",
     },
     "users": {
         "gemini_model": "VARCHAR(200)",

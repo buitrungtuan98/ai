@@ -196,6 +196,44 @@ def propose_actions(campaign, tasks, verdict: dict) -> list[dict]:
     return out
 
 
+# ── Audience-geography verification (K3): are we reaching the target country? ─
+# The primary viewer countries we'd expect for each profile language. Broad for English (it
+# legitimately spans several countries) so a "mismatch" only fires on a clear signal problem.
+LANG_COUNTRIES: dict[str, set[str]] = {
+    "vi": {"VN"},
+    "en": {"US", "GB", "CA", "AU", "IE", "NZ"},
+    "es": {"ES", "MX", "AR", "CO", "CL", "PE", "VE"},
+}
+AUDIENCE_MIN_MEASURED = 3  # need this many geo-measured episodes before judging alignment
+
+
+def audience_summary(tasks, profile: dict | None) -> dict | None:
+    """Aggregate measured episodes' top-viewer country into one audience verdict for a campaign/
+    channel: the dominant country, its average share of views, and whether it matches the profile
+    language's expected countries (None if there's no profile language to judge against). Returns
+    None until at least one episode has geography data."""
+    from collections import Counter
+
+    counts: Counter = Counter()
+    pcts: list[int] = []
+    for t in tasks:
+        s = t.stats_json or {}
+        c = s.get("top_country")
+        if c:
+            counts[c] += 1
+            if s.get("top_country_pct") is not None:
+                pcts.append(s["top_country_pct"])
+    if not counts:
+        return None
+    country, _n = counts.most_common(1)[0]
+    lang = (profile or {}).get("language")
+    expected = LANG_COUNTRIES.get(lang)
+    return {"country": country,
+            "pct": round(sum(pcts) / len(pcts)) if pcts else None,
+            "match": (country in expected) if expected else None,
+            "measured": sum(counts.values())}
+
+
 def channel_baseline(db, channel_id: int) -> float | None:
     """Average retention across ALL measured episodes of one channel — the bar its campaigns are
     judged against. None until there are ≥ MIN_MEASURED measured episodes."""

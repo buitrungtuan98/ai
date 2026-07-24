@@ -373,6 +373,57 @@ def test_api_search_across_types(client):
     assert 'id="cmdk"' in home and 'id="cmdk-open"' in home
 
 
+def test_awaiting_review_count_is_buffer_based(client):
+    """The 'awaiting review' count is the buffer review queue, not task status — one source of truth,
+    so the dashboard tile can't disagree with the Review page / triage inbox."""
+    from database.db_session import SessionLocal
+    from database.models import BufferPoolItem, Task
+    from database.types import BufferStatus, TaskStatus
+
+    cam = _seed_campaign(client)
+    db = SessionLocal()
+    # A task marked AWAITING_REVIEW but with NO buffer item must NOT inflate the count.
+    db.add(Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=1,
+                status=TaskStatus.AWAITING_REVIEW))
+    db.commit()
+    db.close()
+    assert client.get("/api/summary").json()["counts"]["awaiting_review"] == 0
+
+    db = SessionLocal()
+    db.add(BufferPoolItem(campaign_id=cam.id, channel_id=cam.channel_id, episode_number=2,
+                          video_path="/x.mp4", status=BufferStatus.awaiting_review))
+    db.commit()
+    db.close()
+    assert client.get("/api/summary").json()["counts"]["awaiting_review"] == 1
+
+
+def test_stale_ai_hint_hidden_when_autopilot_off(client):
+    """The '🤖 AI recommends' hint on a Review card shows only while the channel's autopilot is on —
+    a hint left in metadata must not linger after autopilot is turned off."""
+    from database.db_session import SessionLocal
+    from database.models import BufferPoolItem, Channel, Task
+    from database.types import BufferStatus, TaskStatus
+
+    cam = _seed_campaign(client)
+    db = SessionLocal()
+    ch = db.get(Channel, cam.channel_id)
+    db.add(Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=1,
+                status=TaskStatus.AWAITING_REVIEW))
+    db.add(BufferPoolItem(campaign_id=cam.id, channel_id=cam.channel_id, episode_number=1,
+                          video_path="/x.mp4", status=BufferStatus.awaiting_review,
+                          metadata_json={"ap_hint": {"action": "approve", "reason": "passed QC (9/10)"}}))
+    ch.autopilot_json = {"mode": "off"}
+    db.commit()
+    db.close()
+    assert "AI recommends approve" not in client.get("/assets").text  # off → no stale hint
+
+    db = SessionLocal()
+    db.get(Channel, cam.channel_id).autopilot_json = {"mode": "copilot"}
+    db.commit()
+    db.close()
+    assert "AI recommends approve" in client.get("/assets").text  # on → hint shown
+
+
 def test_autopilot_inbox_approve_and_dismiss(client):
     """The /autopilot inbox shows proposals; approve applies the change, dismiss resolves it."""
     from database.db_session import SessionLocal
@@ -696,9 +747,9 @@ def test_calendar_page_and_slot_cells(client):
     db.commit()
     db.refresh(cam)
 
-    cells = main.upcoming_slot_cells(cam)
-    assert cells[0] == ["21:00"]                       # today is an allowed day
-    assert [] in cells                                  # other days are gated off
+    rows = main._calendar_row_cells(cam, [])
+    assert rows[0]["gate"] is False and rows[0]["slots"][0]["t"] == "21:00"  # today is allowed
+    assert any(r["gate"] for r in rows)                # other days are gated off
     db.close()
 
     page = client.get("/calendar")
@@ -837,13 +888,77 @@ def test_persona_and_continuity_persist_and_duplicate(client):
     assert cfg["persona"] == "Chú Ba miền Tây kể chuyện"
     assert cfg["continuity"] == "no_repeat" and cfg["timezone"] == "Asia/Ho_Chi_Minh"
     assert cfg["catchphrase_open"] == "Tắt đèn chưa?"
-
     # Duplicate: the new-campaign form comes prefilled with the source persona.
     page = client.get(f"/campaigns/new?from_id={cam.id}")
     assert page.status_code == 200 and "Duplicate Campaign" in page.text
     assert "Chú Ba miền Tây kể chuyện" in page.text and "Tắt đèn chưa?" in page.text
     # Foreign/missing source is ignored gracefully.
     assert "Duplicate Campaign" not in client.get("/campaigns/new?from_id=99999").text
+
+
+def test_channel_profile_save_validate_and_prefill(client):
+    """A channel profile is validated on save and then seeds a new campaign on that channel."""
+    from database.db_session import SessionLocal
+    from database.models import Channel
+
+    client.post("/channels/facebook", data={"channel_name": "VN", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    db = SessionLocal()
+    cid = db.query(Channel).first().id
+    db.close()
+
+    # Save a valid profile + junk that must be dropped (bad language, bad timezone, invented voice).
+    r = client.post(f"/channels/{cid}/profile", data={
+        "audience": "Vietnam", "language": "vi", "timezone": "Asia/Ho_Chi_Minh",
+        "voice": "vi-VN-HoaiMyNeural", "style": "Calm storytelling", "vision": "Sử Việt cho Gen Z",
+    }, follow_redirects=False)
+    assert r.status_code == 303
+    db = SessionLocal()
+    p = db.query(Channel).first().profile_json
+    db.close()
+    assert p["audience"] == "Vietnam" and p["language"] == "vi" and p["voice"] == "vi-VN-HoaiMyNeural"
+
+    client.post(f"/channels/{cid}/profile", data={
+        "language": "klingon", "timezone": "Middle/Earth", "voice": "made-up-voice"},
+        follow_redirects=False)
+    db = SessionLocal()
+    p2 = db.query(Channel).first().profile_json
+    db.close()
+    assert p2 is None  # every field was invalid → nothing stored (profile cleared)
+
+    # Re-save the good profile, then a new campaign on this channel inherits its localization.
+    client.post(f"/channels/{cid}/profile", data={
+        "language": "vi", "timezone": "Asia/Ho_Chi_Minh", "voice": "vi-VN-HoaiMyNeural"},
+        follow_redirects=False)
+    page = client.get(f"/campaigns/new?channel={cid}").text
+    assert 'value="vi" selected' in page                       # language from profile
+    assert 'value="Asia/Ho_Chi_Minh"' in page                  # timezone from profile
+    assert 'data-current="vi-VN-HoaiMyNeural"' in page          # voice from profile
+
+
+def test_propose_forwards_channel_profile(client, monkeypatch):
+    """AI Propose sends the selected channel so the designer localizes to its audience."""
+    from core import ai_engine
+    from core.ai_engine import CampaignProposal
+    from core.config import settings
+    from database.db_session import SessionLocal
+    from database.models import Channel
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "k")
+    client.post("/channels/facebook", data={"channel_name": "US", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    db = SessionLocal()
+    cid = db.query(Channel).first().id
+    db.close()
+    client.post(f"/channels/{cid}/profile", data={"audience": "United States", "language": "en"},
+                follow_redirects=False)
+
+    captured = {}
+    monkeypatch.setattr(ai_engine, "propose_campaign",
+                        lambda **k: (captured.update(k), CampaignProposal(
+                            topic_name="T", language="en", total_episodes=8, persona="P"))[1])
+    client.post("/campaigns/propose", data={"topic": "x", "channel_id": str(cid)})
+    assert captured["profile"] == {"audience": "United States", "language": "en"}
 
 
 def test_edit_campaign(client):
@@ -1221,20 +1336,22 @@ def test_api_summary_snapshot(client):
     """The live snapshot feeding the header attention badge + dashboard auto-refresh reuses the
     dashboard helpers, so its counts match a full reload."""
     from database.db_session import SessionLocal
-    from database.models import Task
-    from database.types import TaskStatus
+    from database.models import BufferPoolItem, Task
+    from database.types import BufferStatus, TaskStatus
 
     cam = _seed_campaign(client)
     db = SessionLocal()
     db.add(Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=1,
                 status=TaskStatus.FAILED, progress_pct=40))
-    db.add(Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=2,
-                status=TaskStatus.AWAITING_REVIEW, progress_pct=100))
+    # "Awaiting review" is the buffer review queue (the single source of truth), not task status.
+    db.add(BufferPoolItem(campaign_id=cam.id, channel_id=cam.channel_id, episode_number=2,
+                          video_path="/x.mp4", status=BufferStatus.awaiting_review))
     db.commit()
     db.close()
 
     d = client.get("/api/summary").json()
-    assert set(d) == {"health", "counts", "channels", "active_campaigns"}
+    assert set(d) == {"health", "counts", "channels", "active_campaigns", "autopilot_proposed"}
+    assert d["autopilot_proposed"] == 0  # no open proposals seeded
     assert d["counts"]["failed"] == 1 and d["counts"]["awaiting_review"] == 1
     assert d["channels"] == 1  # _seed_campaign creates one channel
     assert set(d["health"]) >= {"redis", "worker", "buffer_ready", "ai_budget"}

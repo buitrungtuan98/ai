@@ -290,12 +290,25 @@ def _task_counts(db, user_id: int) -> dict:
         select(Task.status, func.count()).where(Task.user_id == user_id).group_by(Task.status)
     ).all()
     by_status = {status: count for status, count in rows}
+    # "Awaiting review" is the buffer-pool review queue (what the Review page + triage inbox act on),
+    # NOT the task-status count — the two can diverge, so there is ONE source of truth here.
+    awaiting = db.scalar(
+        select(func.count()).select_from(BufferPoolItem)
+        .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
+        .where(Campaign.user_id == user_id, BufferPoolItem.status == BufferStatus.awaiting_review)
+    ) or 0
     return {
         "published": by_status.get(TaskStatus.COMPLETED, 0),
         "working": sum(by_status.get(s, 0) for s in _WORKING_STATUSES),
-        "awaiting_review": by_status.get(TaskStatus.AWAITING_REVIEW, 0),
+        "awaiting_review": awaiting,
         "failed": by_status.get(TaskStatus.FAILED, 0),
     }
+
+
+def _autopilot_proposed_count(db, user_id: int) -> int:
+    """Open autopilot proposals awaiting a decision — feeds the Autopilot nav badge + triage inbox."""
+    return db.scalar(select(func.count()).select_from(AutopilotAction).where(
+        AutopilotAction.user_id == user_id, AutopilotAction.status == "proposed")) or 0
 
 
 def _buffer_counts(db, user_id: int) -> dict:
@@ -467,8 +480,7 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
                 review_ids[(t.campaign_id, t.episode_number)] = t.id
     # "Running now" panel: one row per active campaign (what each is doing + when it posts next).
     active_campaigns = [c for c in campaigns if c.status == CampaignStatus.active]
-    autopilot_proposed = db.scalar(select(func.count()).select_from(AutopilotAction).where(
-        AutopilotAction.user_id == user.id, AutopilotAction.status == "proposed")) or 0
+    autopilot_proposed = _autopilot_proposed_count(db, user.id)
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -494,7 +506,8 @@ _CHANNEL_STATUS_FILTERS = ("active", "expired")
 
 
 @app.get("/channels", response_class=HTMLResponse)
-def channels_page(request: Request, user: CurrentUser, db: DbDep, status: str = "", q: str = ""):
+def channels_page(request: Request, user: CurrentUser, db: DbDep, status: str = "", q: str = "",
+                  flash: str = ""):
     status_counts = {s.value: n for s, n in db.execute(
         select(Channel.status, func.count())
         .where(Channel.user_id == user.id).group_by(Channel.status)).all()}
@@ -524,7 +537,8 @@ def channels_page(request: Request, user: CurrentUser, db: DbDep, status: str = 
         request, "channels.html",
         {"request": request, "user": user, "channels": channels, "nav": "channels",
          "camp_counts": camp_counts, "chips": chips, "status": status, "q": q, "total_all": total_all,
-         "ap": {c.id: (c.autopilot_json or {}) for c in channels}},
+         "ap": {c.id: (c.autopilot_json or {}) for c in channels},
+         "flash": flash if flash in ("profile", "autopilot") else ""},
     )
 
 
@@ -596,6 +610,60 @@ def dismiss_autopilot_action(action_id: int, user: CurrentUser, db: DbDep):
     return RedirectResponse("/autopilot", status_code=303)
 
 
+_PROFILE_LANGS = ("vi", "en", "es")
+
+
+def _valid_timezone(tz: str) -> bool:
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    try:
+        ZoneInfo(tz)
+        return True
+    except (ZoneInfoNotFoundError, ValueError):
+        return False
+
+
+def _channel_profile_cfg(channel) -> dict:
+    """Cfg-shaped localization defaults from a channel's profile (language / voice / timezone) — used
+    to seed a new campaign so it inherits the channel's persona. Empty if the channel has no profile
+    or is None. See ADR-045."""
+    p = (channel.profile_json or {}) if channel else {}
+    cfg: dict = {}
+    if p.get("language") in _PROFILE_LANGS:
+        cfg["language"] = p["language"]
+    if p.get("voice"):
+        cfg["voice"] = p["voice"]
+    if p.get("timezone"):
+        cfg["timezone"] = p["timezone"]
+    return cfg
+
+
+@app.post("/channels/{channel_id}/profile")
+def set_channel_profile(channel=Depends(get_owned_channel), db=Depends(get_db),
+                        audience: str = Form(""), language: str = Form(""),
+                        timezone: str = Form(""), voice: str = Form(""),
+                        style: str = Form(""), vision: str = Form("")):
+    """Set a channel's persona / localization profile (ADR-045). Everything is validated/whitelisted
+    like the campaign form — a bad value is dropped, never stored, so it can't break rendering."""
+    allowed_voices = {v for vs in VOICE_CHOICES.values() for v, _label in vs}
+    p: dict = {}
+    if audience.strip():
+        p["audience"] = audience.strip()[:80]
+    if language in _PROFILE_LANGS:
+        p["language"] = language
+    if timezone.strip() and _valid_timezone(timezone.strip()):
+        p["timezone"] = timezone.strip()
+    if voice.strip() and voice.strip() in allowed_voices:
+        p["voice"] = voice.strip()
+    if style.strip():
+        p["style"] = style.strip()[:200]
+    if vision.strip():
+        p["vision"] = vision.strip()[:200]
+    channel.profile_json = p or None
+    db.commit()
+    return RedirectResponse("/channels?flash=profile", status_code=303)
+
+
 @app.post("/channels/{channel_id}/autopilot")
 def set_channel_autopilot(channel=Depends(get_owned_channel), db=Depends(get_db),
                           mode: str = Form("off"), interval_hours: str = Form(""),
@@ -615,7 +683,7 @@ def set_channel_autopilot(channel=Depends(get_owned_channel), db=Depends(get_db)
         cfg["review"] = review
     channel.autopilot_json = cfg
     db.commit()
-    return RedirectResponse("/channels", status_code=303)
+    return RedirectResponse("/channels?flash=autopilot", status_code=303)
 
 
 # ── Google OAuth2 web flow (connect a YouTube channel) ───────────────────────
@@ -752,7 +820,14 @@ def campaign_new_form(request: Request, user: CurrentUser, db: DbDep,
         ch = db.get(Channel, channel)
         if ch is not None and ch.user_id == user.id:
             sel_channel = channel
+    # Localize from the selected channel's profile (profile > user Settings), and expose every
+    # channel's localization so the client re-localizes when the operator switches the channel.
+    if sel_channel is not None and not ctx.get("source"):
+        sel = next((c for c in channels if c.id == sel_channel), None)
+        if sel is not None:
+            ctx["cfg"] = {**(ctx.get("cfg") or {}), **_channel_profile_cfg(sel)}
     ctx["sel_channel"] = sel_channel
+    ctx["channel_profiles"] = {c.id: _channel_profile_cfg(c) for c in channels}
     return templates.TemplateResponse(request, "campaign_new.html", ctx)
 
 
@@ -811,12 +886,13 @@ def preview_script(
 
 
 @app.post("/campaigns/propose")
-def propose_campaign_route(user: CurrentUser, topic: str = Form(""), language: str = Form(""),
-                           video_format: str = Form("short")):
+def propose_campaign_route(user: CurrentUser, db: DbDep, topic: str = Form(""),
+                           language: str = Form(""), video_format: str = Form("short"),
+                           channel_id: str = Form("")):
     """AI-design a whole campaign config from a title (or from scratch). Returns JSON the New
     Campaign form fills in for review — nothing is saved until the user clicks Create. The form's
-    video_format is an explicit constraint: the designer builds for it (short vs long) and it is
-    forced onto the result, so choosing Long no longer gets silently reset to a short."""
+    video_format is an explicit constraint (short vs long, forced onto the result); the selected
+    channel's profile localizes the whole design to that channel's audience/country (ADR-045)."""
     import random
 
     from core import ai_engine
@@ -827,9 +903,14 @@ def propose_campaign_route(user: CurrentUser, topic: str = Form(""), language: s
                             status_code=400)
     lang = language if language in ("en", "vi", "es") else None
     fmt = "long" if video_format == "long" else "short"
+    profile = None
+    if channel_id.strip().isdigit():
+        ch = db.get(Channel, int(channel_id))
+        if ch is not None and ch.user_id == user.id:
+            profile = ch.profile_json
     try:
         proposal = ai_engine.propose_campaign(
-            topic=topic.strip() or None, language=lang, video_format=fmt, api_key=key,
+            topic=topic.strip() or None, language=lang, video_format=fmt, profile=profile, api_key=key,
             model=user.gemini_model or settings.GEMINI_MODEL,
             nonce=random.randint(1, 1_000_000),
         )
@@ -1644,6 +1725,7 @@ def campaign_overview(request: Request, user: CurrentUser, db: DbDep,
     ).all()
     measured = [t for t in episodes if t.stats_json]
     best = max(measured, key=lambda t: t.stats_json.get("avg_pct_viewed", 0), default=None)
+    hub = _hub_context(db, user, campaign)  # single channel fetch, reused for the audience line
     return templates.TemplateResponse(
         request, "performance.html",
         {"request": request, "user": user, "nav": "campaigns", "campaign": campaign,
@@ -1654,7 +1736,9 @@ def campaign_overview(request: Request, user: CurrentUser, db: DbDep,
          "op": _campaign_ops(db, user.id, [campaign])[campaign.id],  # Now & next strip
          "cls": autopilot.classify_campaigns(db, [campaign]).get(campaign.id),  # performance verdict
          "autopilot_min": autopilot.MIN_MEASURED,
-         "hub_active": "overview", **_hub_context(db, user, campaign)},
+         "audience": autopilot.audience_summary(  # measured viewer country vs the channel target
+             episodes, hub["channel"].profile_json if hub["channel"] else None),
+         "hub_active": "overview", **hub},
     )
 
 
@@ -1686,27 +1770,6 @@ def reset_learning(db: DbDep, campaign=Depends(get_owned_campaign)):
 
 
 # ── Content calendar ─────────────────────────────────────────────────────────
-def upcoming_slot_cells(campaign: Campaign, days: int = 7, week: int = 0) -> list[list[str]] | None:
-    """Per-day slot times for `days` days starting `week` weeks from now, in the campaign's own
-    timezone, honoring its posting_days. None = the campaign doesn't slot-publish (continuous/review)."""
-    from datetime import timedelta
-
-    from workers.scheduler import WEEKDAY_KEYS, local_now
-
-    cfg = campaign.config_json or {}
-    slots = sorted(cfg.get("posting_slots") or [])
-    if not slots or not cfg.get("auto_publish", True):
-        return None
-    allowed = cfg.get("posting_days") or []
-    start = local_now(cfg.get("timezone")) + timedelta(days=week * 7)
-    cells: list[list[str]] = []
-    for d in range(days):
-        day = start + timedelta(days=d)
-        key = WEEKDAY_KEYS[day.weekday()]
-        cells.append(slots if (not allowed or key in allowed) else [])
-    return cells
-
-
 def _calendar_row_cells(campaign: Campaign, ready_eps: list[int], week: int = 0,
                         days: int = 7) -> list[dict] | None:
     """Richer calendar cells for the week planner: per day, per slot, what will HAPPEN — not just
@@ -1885,7 +1948,8 @@ def api_summary(user: CurrentUser, db: DbDep):
         select(func.count()).select_from(Campaign).where(
             Campaign.user_id == user.id, Campaign.status == CampaignStatus.active)) or 0
     return {"health": _system_health(db, user), "counts": _task_counts(db, user.id),
-            "channels": channels, "active_campaigns": active}
+            "channels": channels, "active_campaigns": active,
+            "autopilot_proposed": _autopilot_proposed_count(db, user.id)}
 
 
 @app.get("/api/search")
