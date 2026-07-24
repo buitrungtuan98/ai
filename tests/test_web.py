@@ -359,6 +359,21 @@ def test_scope_switcher_and_scoped_nav(client):
     assert f'value="{cid}" selected' in scoped  # the active channel is marked in the switcher
 
 
+def test_nav_facets_link_to_their_owner(client):
+    """The demoted lenses stay reachable + traceable: Calendar is a view of Campaigns (mutual links),
+    and the render log + Review show an 'up to Episodes' path; Episodes surfaces both facets."""
+    client.post("/channels/facebook", data={"channel_name": "P", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    campaigns = client.get("/campaigns").text
+    assert 'href="/calendar"' in campaigns                         # Campaigns → Calendar view toggle
+    cal = client.get("/calendar").text
+    assert 'href="/campaigns"' in cal                              # Calendar → back to the list
+    assert 'href="/episodes"' in client.get("/tasks").text         # render log → up to Episodes
+    assert 'href="/episodes"' in client.get("/assets").text        # Review → up to Episodes
+    eps = client.get("/episodes").text
+    assert 'href="/tasks"' in eps and 'href="/assets"' in eps      # Episodes surfaces both facets
+
+
 def test_api_search_across_types(client):
     """The ⌘K search endpoint spans channels, campaigns and episodes and is tenant-scoped."""
     tid, _bid = _make_episode(client)  # campaign "Space" + ep1 synopsis "A test episode"

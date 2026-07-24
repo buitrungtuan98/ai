@@ -2,9 +2,10 @@
 {% import "macros.html" as ui %}
 {% block title %}Episodes · AI Video Factory{% endblock %}
 {% block content %}
-{% call ui.page_head('Episodes', 'Every episode in one place — from queued to published. Click one to see its full lifecycle, preview and actions.') %}
-  <a class="btn ghost" href="/tasks">Live render log ↗</a>
-  <a class="btn ghost" href="/assets">Review ↗</a>
+{% call ui.page_head('Episodes', 'Every episode in one place — from queued to published. Click one to see its full lifecycle, preview and actions. The render log and Review queue are views of this list.') %}
+  {% set _ch = scope_hidden.get('channel') if scope_hidden else None %}
+  <a class="btn ghost" href="/tasks{{ '?channel=' ~ _ch if _ch }}" title="Live render pipeline">≣ Render log</a>
+  <a class="btn ghost" href="/assets{{ '?channel=' ~ _ch if _ch }}" title="Videos awaiting your approval">▦ Review queue</a>
 {% endcall %}
 
 {% if scope_campaign %}
