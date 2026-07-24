@@ -760,7 +760,7 @@ the existing scheduler daemon on a per-channel cadence (default 3h, configurable
   render pipeline's QC verdict (0 AI calls), proposals/apply are deterministic, and the strategist is
   ~1 budget-guarded call/week per channel.
 
-## Channel profile — a per-channel persona that localizes every video to its country `WIP`
+## Channel profile — a per-channel persona that localizes every video to its country `DONE`
 Each channel gets an explicit persona (`Channel.profile_json`: audience/language/timezone/voice/
 style/vision) that flows into every AI touchpoint, so "Channel 1 = Vietnam, Channel 2 = USA" is
 something the whole system acts on. Organic platforms have no country switch — the algorithm infers
@@ -780,8 +780,15 @@ agree. ADR-045.
   buffer metadata for it. The profile box gained a one-time manual localization checklist (YouTube
   Studio country, Facebook Page region). Verified: 194 tests (1 new — upload declares the language,
   drops unknown values), ruff clean, docs guard green; live upload is operator-verified (RUNBOOK).
-- K3 — audience-geography verification (views-by-country + "Audience match" + autopilot mismatch
-  proposal) `TODO`
+- **K3 — audience-geography verification** `DONE`: the daily stats pass fetches views-by-country
+  per video (`fetch_youtube_geography` → top country + share, merged into `stats_json`);
+  `audience_summary` aggregates it into a channel/campaign verdict (dominant country + avg share +
+  whether it matches the profile language's expected countries). The campaign-hub Overview shows an
+  "🎯 Audience" line (matches ✅ / off-target ⚠), and the autopilot files an acknowledge-only
+  "audience_drift" advisory when a channel's real audience is off-target across ≥3 measured episodes.
+  Verified: 196 tests (2 new — audience_summary match/mismatch/none, drift advisory filed +
+  idempotent), ruff clean, docs guard green; hub line + acknowledge-only inbox advisory checked in a
+  browser (VN channel reaching US → off-target). Live geography fetch is operator-verified (RUNBOOK).
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation

@@ -1721,6 +1721,9 @@ def campaign_overview(request: Request, user: CurrentUser, db: DbDep,
          "op": _campaign_ops(db, user.id, [campaign])[campaign.id],  # Now & next strip
          "cls": autopilot.classify_campaigns(db, [campaign]).get(campaign.id),  # performance verdict
          "autopilot_min": autopilot.MIN_MEASURED,
+         "audience": autopilot.audience_summary(  # measured viewer country vs the channel target
+             episodes, db.get(Channel, campaign.channel_id).profile_json
+             if db.get(Channel, campaign.channel_id) else None),
          "hub_active": "overview", **_hub_context(db, user, campaign)},
     )
 

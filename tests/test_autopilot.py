@@ -399,3 +399,48 @@ def test_strategist_files_tune_proposal_guarded(monkeypatch):
     assert scheduler.autopilot_strategist_channel(db, user, ch, respect_cadence=False) == 0
     db.close()
 
+
+# ── K3: audience-geography verification ───────────────────────────────────────
+def test_audience_summary_match_vs_target():
+    from types import SimpleNamespace
+
+    from core import autopilot
+
+    def ep(country, pct):
+        return SimpleNamespace(stats_json={"top_country": country, "top_country_pct": pct})
+
+    tasks = [ep("VN", 80), ep("VN", 70), ep("US", 60)]  # dominant = VN
+    # A Vietnamese channel reaching Vietnam → match.
+    m = autopilot.audience_summary(tasks, {"language": "vi"})
+    assert m["country"] == "VN" and m["match"] is True and m["measured"] == 3 and m["pct"] == 70
+    # An English channel whose top country is VN → off-target.
+    assert autopilot.audience_summary(tasks, {"language": "en"})["match"] is False
+    # No profile language → nothing to judge against (match is None, still reports the country).
+    assert autopilot.audience_summary(tasks, {})["match"] is None
+    # No geography data yet → None.
+    assert autopilot.audience_summary([SimpleNamespace(stats_json={"views": 5})], {"language": "vi"}) is None
+
+
+def test_autopilot_files_audience_drift_advisory():
+    from database.models import AutopilotAction, Task
+    from database.types import TaskStatus
+    from workers import scheduler
+
+    db, user, ch, camp = _seed_ch("copilot")
+    ch.profile_json = {"language": "vi"}  # targets Vietnam
+    db.commit()
+    # Three measured episodes whose top audience is the US — off-target for a Vietnamese channel.
+    for i in range(1, 4):
+        db.add(Task(campaign_id=camp.id, user_id=user.id, episode_number=i, status=TaskStatus.COMPLETED,
+                    stats_json={"avg_pct_viewed": 50, "top_country": "US", "top_country_pct": 70}))
+    db.commit()
+
+    assert scheduler.autopilot_propose_channel(db, ch) >= 1
+    drift = db.query(AutopilotAction).filter_by(kind="audience_drift").one()
+    assert drift.status == "proposed" and drift.campaign_id is None
+    assert drift.evidence["top_country"] == "US" and drift.evidence["measured"] == 3
+    # Idempotent — a second pass doesn't stack another drift advisory.
+    scheduler.autopilot_propose_channel(db, ch)
+    assert db.query(AutopilotAction).filter_by(kind="audience_drift").count() == 1
+    db.close()
+

@@ -38,6 +38,11 @@
 {% elif cls and cls.label == 'too_early' %}
 <p class="hint mt-sm">🌱 Too early to judge — needs {{ autopilot_min }} measured episodes (has {{ cls.measured }}).</p>
 {% endif %}
+{% if audience %}
+<p class="verdict {{ 'winner' if audience.match else ('underperforming' if audience.match == false else '') }}">
+  🎯 Audience: <b>{{ audience.country }}</b>{% if audience.pct %} · {{ audience.pct }}% of views{% endif %}
+  {%- if audience.match %} — matches the channel's target ✅{% elif audience.match == false %} — <b>off-target</b> for the channel language ⚠ (check voice, topics &amp; posting time){% endif %}</p>
+{% endif %}
 
 {# ── Learning & results — playbook + A/B variants + retention trend, one card, one empty state ── #}
 {% set ns = namespace(vals=[]) %}

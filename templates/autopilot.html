@@ -6,7 +6,8 @@
   <a class="btn ghost" href="/channels">Channels →</a>
 {% endcall %}
 
-{% set kind_icon = {'extend': '📈', 'successor': '🌱', 'wind_down': '📉', 'tune': '🎛'} %}
+{% set kind_icon = {'extend': '📈', 'successor': '🌱', 'wind_down': '📉', 'tune': '🎛', 'audience_drift': '🎯'} %}
+{% set advisory_kinds = ['audience_drift'] %}
 
 {% if proposed %}
 <div class="card">
@@ -22,8 +23,10 @@
           {% for k, v in (a.evidence or {}).items() %}{{ k.replace('_', ' ') }}: <b>{{ v }}</b>{% if not loop.last %} · {% endif %}{% endfor %}
         </div>
       </div>
+      {% if a.kind not in advisory_kinds %}
       <form method="post" action="/autopilot/{{ a.id }}/approve"><button class="btn sm" type="submit">✓ Approve</button></form>
-      <form method="post" action="/autopilot/{{ a.id }}/dismiss"><button class="btn ghost sm" type="submit">Dismiss</button></form>
+      {% endif %}
+      <form method="post" action="/autopilot/{{ a.id }}/dismiss"><button class="btn ghost sm" type="submit">{{ 'Got it' if a.kind in advisory_kinds else 'Dismiss' }}</button></form>
     </li>
     {% endfor %}
   </ul>

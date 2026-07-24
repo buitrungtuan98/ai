@@ -47,6 +47,34 @@ def fetch_youtube_stats(channel: Channel, video_ids: list[str]) -> dict[str, dic
     return out
 
 
+def fetch_youtube_geography(channel: Channel, video_ids: list[str]) -> dict[str, dict]:
+    """Return {video_id: {top_country, top_country_pct}} — the single biggest viewer country per
+    video and its share of views (YouTube Analytics, dimensions video+country). Powers audience-match
+    verification (ADR-045): are we actually reaching the country the channel targets?"""
+    from googleapiclient.discovery import build
+
+    from services.youtube_service import build_credentials
+
+    creds = build_credentials(channel)
+    analytics = build("youtubeAnalytics", "v2", credentials=creds, cache_discovery=False)
+    resp = analytics.reports().query(
+        ids="channel==MINE", startDate="2020-01-01",
+        endDate=datetime.utcnow().strftime("%Y-%m-%d"),
+        metrics="views", dimensions="video,country",
+        filters="video==" + ",".join(video_ids[:200]), maxResults=1000,
+    ).execute()
+    by_video: dict[str, list[tuple[str, int]]] = {}
+    for row in resp.get("rows", []) or []:
+        vid, country, views = row[0], row[1], int(row[2])
+        by_video.setdefault(vid, []).append((country, views))
+    out: dict[str, dict] = {}
+    for vid, pairs in by_video.items():
+        total = sum(v for _, v in pairs) or 1
+        top_country, top_views = max(pairs, key=lambda x: x[1])
+        out[vid] = {"top_country": top_country, "top_country_pct": round(100 * top_views / total)}
+    return out
+
+
 def fetch_facebook_stats(channel: Channel, video_ids: list[str]) -> dict[str, dict]:
     """Return {video_id: {views}} via the Graph API (FB exposes less than YouTube)."""
     import json as _json
@@ -110,6 +138,13 @@ def collect_stats(db, now: datetime | None = None) -> int:
         try:
             if channel.platform == Platform.youtube:
                 stats = fetch_youtube_stats(channel, ids)
+                try:  # geography is a bonus signal — never let it block the core stats
+                    geo = fetch_youtube_geography(channel, ids)
+                    for vid, g in geo.items():
+                        if vid in stats:
+                            stats[vid].update(g)
+                except Exception:  # noqa: BLE001
+                    logger.warning("Geography fetch failed for channel %s", channel_id)
             else:
                 stats = fetch_facebook_stats(channel, ids)
         except Exception:  # noqa: BLE001 — stats must never break the factory
