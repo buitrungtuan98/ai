@@ -16,7 +16,7 @@
 {% if total_all %}
 {{ ui.filter_bar('/channels', chips, current=status, q=q, placeholder='🔎 Search channels…') }}
 {% if channels %}
-<div class="grid cols-3">
+<div class="grid cols-3 chan-grid">
   {% for c in channels %}
   <div class="card">
     <div class="chan-head">
@@ -39,7 +39,7 @@
     <p class="facts"><span class="fact">🌍 {% if pr.audience %}{{ pr.audience }}{% else %}Localized{% endif %}</span>
       {% if pr.language %}<span class="fact">{{ pr.language|upper }}</span>{% endif %}
       {% if pr.timezone %}<span class="fact">🕑 {{ pr.timezone }}</span>{% endif %}
-      {% if pr.voice %}<span class="fact">🎙 {{ pr.voice }}</span>{% endif %}</p>
+      {% if pr.voice %}<span class="fact">🎙 {{ voice_names.get(pr.voice, pr.voice) }}</span>{% endif %}</p>
     {% endif %}
     <div class="row-actions">
       <a class="btn ghost sm" href="/campaigns?channel={{ c.id }}">Campaigns →</a>
@@ -49,7 +49,7 @@
     <p class="hint mt-sm">Re-authorise this channel to resume publishing — reconnect it via OAuth above.</p>
     {% endif %}
     <details class="disclosure mt-sm">
-      <summary>🌍 Channel profile{% if pr.vision %}: <b>{{ pr.vision }}</b>{% elif not pr %} — <span class="meta">not set</span>{% endif %}</summary>
+      <summary><span class="sum"><span class="sum-l">🌍 Channel profile</span><span class="sum-v">{% if pr %}{{ pr.vision or pr.audience or (pr.language|upper if pr.language) or 'Localized' }}{% else %}not set{% endif %}</span></span></summary>
       <div class="disclosure-body">
         <p class="hint">Who this channel is for. Seeds every new campaign (language, voice, timezone) and tells AI Propose &amp; the autopilot strategist the channel's audience &amp; vision — so each video is localized to its country. Uploads declare the spoken language automatically.</p>
         <details class="disclosure"><summary>One-time localization checklist (do this in the platform)</summary>
@@ -69,9 +69,9 @@
               <option value="{{ code }}" {{ 'selected' if pr.language == code }}>{{ nm }}</option>{% endfor %}
             </select>
             {% endcall %}
-            {% call ui.field('Timezone', hint='IANA, e.g. Asia/Ho_Chi_Minh') %}<input name="timezone" value="{{ pr.timezone or '' }}" placeholder="Asia/Ho_Chi_Minh">{% endcall %}
-            {% call ui.field('Default voice') %}
-            <select name="voice">
+            {% call ui.field('Timezone', hint='Local time for this audience — schedules posts') %}{{ ui.tz_select('timezone', pr.timezone) }}{% endcall %}
+            {% call ui.field('Default voice', hint='Follows the language above') %}
+            <select name="voice" class="chan-voice" data-current="{{ pr.voice or '' }}">
               <option value="">— none —</option>
               {% for lang, voices in voice_choices.items() %}
               <optgroup label="{{ lang|upper }}">
@@ -92,7 +92,7 @@
     {% set alabels = {'off': 'Off', 'copilot': '🧭 Copilot', 'autopilot': '✈️ Full auto'} %}
     {% set rv = a.get('review') or {} %}
     <details class="disclosure mt-sm ap-box">
-      <summary>🤖 Autopilot: <b>{{ alabels[amode] }}</b>{% if amode != 'off' %} <span class="meta">· every {{ a.get('interval_hours', 3) }}h · QC ≥{{ rv.get('approve_min', 7) }}/≤{{ rv.get('reject_max', 4) }}</span>{% endif %}</summary>
+      <summary><span class="sum"><span class="sum-l">🤖 Autopilot</span><span class="sum-v">{{ alabels[amode] }}{% if amode != 'off' %} · {{ a.get('interval_hours', 3) }}h · QC ≥{{ rv.get('approve_min', 7) }}/≤{{ rv.get('reject_max', 4) }}{% endif %}</span></span></summary>
       <div class="disclosure-body">
         <p class="hint">Let the AI run this channel from its data — review &amp; publish videos, auto-reject weak renders (with a reason that teaches the scriptwriter), retry failures, and recover missed slots. Reversible anytime.</p>
         <form method="post" action="/channels/{{ c.id }}/autopilot">
@@ -140,4 +140,37 @@
     </form>
   </div>
 </details>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // Each channel profile's voice picker follows its Language select — a voice from another language
+  // would be a broken/mismatched narration. Rebuilt with textContent only (no innerHTML). A saved
+  // voice from a different language stays selectable so an existing choice is never silently dropped.
+  var voiceData = {{ voice_choices | tojson }};
+  var LANG_NAMES = { vi: "Vietnamese", en: "English", es: "Spanish" };
+  document.querySelectorAll('form[action$="/profile"]').forEach(function (form) {
+    var langSel = form.querySelector('select[name="language"]');
+    var voiceSel = form.querySelector('select.chan-voice');
+    if (!langSel || !voiceSel) return;
+    var saved = voiceSel.getAttribute("data-current") || "";
+    function fill(keep) {
+      var lang = langSel.value;
+      var cur = keep !== undefined ? keep : (voiceSel.value || saved);
+      voiceSel.textContent = "";
+      var mk = function (v, label) {
+        var o = document.createElement("option");
+        o.value = v; o.textContent = label; voiceSel.appendChild(o);
+      };
+      mk("", "— none (language default) —");
+      (voiceData[lang] || []).forEach(function (pair) { mk(pair[0], pair[1]); });
+      if (cur && !Array.from(voiceSel.options).some(function (o) { return o.value === cur; })) {
+        mk(cur, cur + " (other language)");
+      }
+      voiceSel.value = cur || "";
+    }
+    fill();
+    langSel.addEventListener("change", function () { fill(""); });
+  });
+</script>
 {% endblock %}

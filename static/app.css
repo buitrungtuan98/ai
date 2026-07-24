@@ -229,12 +229,18 @@ textarea { min-height: 88px; resize: vertical; }
 details.disclosure { border: 1px solid var(--border); border-radius: var(--radius-sm);
   margin-bottom: var(--sp-4); background: var(--surface-2); }
 details.disclosure > summary { cursor: pointer; padding: var(--sp-3) var(--sp-4); font-weight: var(--fw-semibold);
-  color: var(--text); list-style: none; display: flex; align-items: center; justify-content: space-between; }
+  color: var(--text); list-style: none; display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
 details.disclosure > summary::-webkit-details-marker { display: none; }
 details.disclosure > summary::after { content: "▾"; color: var(--muted); transition: transform .15s ease; }
 details.disclosure[open] > summary::after { transform: rotate(180deg); }
 details.disclosure > summary:hover { color: var(--primary-hover); }
 details.disclosure .disclosure-body { padding: 0 var(--sp-4) var(--sp-2); }
+/* Label ↔ value summary (channel profile / autopilot): one flex child holds both, so the chevron
+   stays pinned right and the label/value pair wraps as whole units on mobile (never interleaves). */
+details.disclosure > summary > .sum { flex: 1; min-width: 0; display: flex; flex-wrap: wrap;
+  align-items: baseline; justify-content: space-between; gap: var(--sp-1) var(--sp-3); }
+.sum-l { font-weight: var(--fw-semibold); color: var(--text); }
+.sum-v { color: var(--muted); font-weight: var(--fw-normal); text-align: right; }
 .savebar { position: sticky; bottom: var(--sp-4); margin-top: var(--sp-6);
   background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius);
   padding: var(--sp-3) var(--sp-4); display: flex; align-items: center; gap: var(--sp-3);
@@ -358,6 +364,8 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
   object-fit: cover; display: inline-flex; align-items: center; justify-content: center;
   font-weight: var(--fw-bold); flex-shrink: 0; }
 .chan-head { display: flex; align-items: center; gap: var(--sp-3); margin-bottom: var(--sp-3); }
+/* Don't stretch a channel card to match a taller row-mate whose disclosure is open (dead empty box). */
+.chan-grid { align-items: start; }
 .platform { font-size: var(--fs-xs); padding: 2px 8px; border-radius: var(--radius-pill);
   border: 1px solid var(--border); color: var(--muted); }
 .platform.youtube { color: var(--st-failed); border-color: var(--st-failed-bd); }

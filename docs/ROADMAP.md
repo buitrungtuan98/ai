@@ -816,6 +816,28 @@ A full-site review (13 pages × desktop/mobile + code checks) turned up a handfu
   (badge shows on the sidebar, Settings cross-link renders, overview pages HTTP 200); 198 tests, ruff
   clean, docs green.
 
+## Timezone picker + channel-page fixes + quality lift `WIP`
+Follow-up round: a real timezone dropdown, channel-page bugs, and automatic quality improvements
+across footage/encode/learning.
+- **Batch O — timezone dropdown + channel-page bugs** `DONE`: free-text IANA entry was error-prone
+  (a typo was silently dropped on the profile, or silently misread as UTC by the scheduler on a
+  campaign). New `core/timezones.py` is the single source of a friendly, region-grouped `<select>`
+  (Việt Nam + SEA first) with **live DST-correct UTC offsets**, used by both the channel profile and
+  the campaign Distribution tab; a stored legacy zone stays selectable; campaign save now validates
+  the zone like the profile already did. Channel-page fixes: (B1) disclosure summaries no longer
+  scatter/interleave — label + value are one flex unit that wraps cleanly; (B2) the profile voice
+  picker filters to the selected language (no more en voice on a vi channel); (B3) the voice chip
+  shows the friendly name ("Hoài My") not the raw id; (B4) autopilot review thresholds are made
+  consistent at save (approve strictly above reject) so stored = shown = used; (B6) the profile
+  summary falls back to audience/language when there's no vision line; (B7) opening one card's
+  disclosure no longer stretches its row-mate into an empty box. Verified in a browser at 1280/375px,
+  dark + light; 205 tests (7 new), ruff clean, docs green.
+- Batch P — footage & vision quality (orientation/resolution-correct Pexels selection, resolution
+  floor, in-episode dedupe, smart thumbnail frame) `TODO`
+- Batch Q — encode & finish polish (lanczos + CRF, faststart, long-form fade-out) `TODO`
+- Batch R — retention-curve learning (per-scene durations, retention curve fetch, drop-point
+  analysis fed to the playbook distiller) `TODO`
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

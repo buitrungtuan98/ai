@@ -250,8 +250,8 @@
               quality check is re-rendered once, and if it fails again it waits in the Asset Pool for you instead of publishing.
               Uses your Gemini key; if the vision API is unavailable the pipeline continues as if QC were off.</p>
           </div>
-          <div class="form-row"><label>Campaign timezone (IANA name; blank = server default {{ settings.TIMEZONE }})</label>
-            <input name="timezone" placeholder="Asia/Ho_Chi_Minh" value="{{ cfg.get('timezone') or '' }}"></div>
+          <div class="form-row"><label>Campaign timezone — posting slots fire in this zone</label>
+            {{ ui.tz_select('timezone', cfg.get('timezone'), settings.TIMEZONE) }}</div>
           <div class="form-row"><label>Pre-rendered buffer size (blank = global default {{ settings.DEFAULT_BUFFER_SIZE }})</label>
             <input name="buffer_size" type="number" min="1" max="10" value="{{ cfg.get('buffer_size') or '' }}"></div>
           <div class="form-row"><label>Max new renders per day (blank = unlimited)</label>
@@ -362,8 +362,15 @@
       const p = channelProfiles[channelSel.value];
       if (!p) return;
       if (p.language && langSel) { langSel.value = p.language; }
-      const tz = document.querySelector('input[name="timezone"]');
-      if (p.timezone && tz) tz.value = p.timezone;
+      const tz = document.querySelector('[name="timezone"]');
+      if (p.timezone && tz) {
+        // the picker is a <select>; add the profile zone if the curated list doesn't already have it
+        if (!Array.from(tz.options).some(o => o.value === p.timezone)) {
+          const o = document.createElement("option");
+          o.value = p.timezone; o.textContent = p.timezone; tz.appendChild(o);
+        }
+        tz.value = p.timezone;
+      }
       fillVoices(p.voice || "");   // rebuild the voice list for the profile language + select its voice
       updateIdentity();
     });
