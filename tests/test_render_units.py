@@ -71,6 +71,25 @@ def test_prefer_unused_reorders_footage():
     assert [c.id for c in prefer_unused(pool, set())] == [1, 2, 3]
 
 
+def test_in_episode_dedupe_gives_scenes_distinct_leads():
+    """produce()'s in-episode accumulation (grow the seen-set by each scene's consumed clips) makes
+    consecutive scenes lead with different clips even when the footage pool is shared."""
+    from math import ceil
+    from types import SimpleNamespace
+
+    from core.video_factory import SHOT_TARGET_S, prefer_unused
+
+    pool = [SimpleNamespace(id=i, duration=5.0) for i in range(6)]  # same pool every scene
+    episode_seen: set[int] = set()
+    leads = []
+    for _si in range(3):
+        found = prefer_unused(list(pool), episode_seen)
+        leads.append(found[0].id)
+        d_i = 6.0  # ceil(6/3) = 2 clips reserved per scene
+        episode_seen.update(c.id for c in found[:max(1, ceil(d_i / SHOT_TARGET_S))])
+    assert len(set(leads)) == 3  # each scene leads with a distinct clip
+
+
 def test_render_profiles_and_long_geometry():
     from core.video_factory import (LONG_PROFILE, SHORT_PROFILE, build_scene_args, resolve_profile)
 
@@ -322,6 +341,87 @@ def test_pexels_skips_zero_duration(monkeypatch):
     monkeypatch.setitem(sys.modules, "requests", fake_requests)  # search_videos does `import requests`
     clips = pexels.search_videos("q", "key")
     assert [c.id for c in clips] == [2]  # only the positive-duration clip survives
+
+
+def test_best_file_orientation_and_resolution():
+    """The chosen rendition matches the requested orientation and is the SMALLEST that clears the
+    resolution floor (sharp, not a wasteful 4K download); largest is the fallback when none clear it."""
+    from core.pexels import _best_file
+
+    files = [
+        {"link": "sd", "width": 540, "height": 960},      # portrait, below floor
+        {"link": "hd", "width": 1080, "height": 1920},    # portrait, exactly the floor
+        {"link": "4k", "width": 2160, "height": 3840},    # portrait, wastefully large
+        {"link": "land", "width": 1920, "height": 1080},  # landscape
+    ]
+    # Portrait target: smallest portrait rendition ≥1080 short side → the 1080×1920 "hd".
+    assert _best_file(files, "portrait", 1080)["link"] == "hd"
+    # Landscape target: the landscape rendition (its short side 1080 clears the floor).
+    assert _best_file(files, "landscape", 1080)["link"] == "land"
+    # Floor no rendition can meet → largest portrait as best effort.
+    assert _best_file(files, "portrait", 4000)["link"] == "4k"
+
+
+def test_search_videos_resolution_floor_sorts_last(monkeypatch):
+    """A clip whose best rendition is below the output resolution drops behind full-res ones."""
+    import sys
+
+    from core import pexels
+
+    payload = {"videos": [
+        {"id": 1, "duration": 8, "video_files": [{"link": "lo", "width": 540, "height": 960}]},
+        {"id": 2, "duration": 8, "video_files": [{"link": "hi", "width": 1080, "height": 1920}]},
+    ]}
+
+    class R:
+        def raise_for_status(self): pass
+        def json(self): return payload
+
+    fake_requests = type("m", (), {"get": staticmethod(lambda *a, **k: R())})
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+    clips = pexels.search_videos("q", "key")
+    assert [c.id for c in clips] == [2, 1]  # full-res first, sub-1080 last
+
+
+def test_thumbnail_frame_score_prefers_detail_and_colour():
+    """The frame scorer ranks a detailed, colourful frame above a flat near-black one."""
+    from PIL import Image
+
+    from core.thumbnail import _frame_score
+
+    black = Image.new("RGB", (64, 64), (2, 2, 2))
+    # A noisy, colourful frame: high edge detail + channel spread.
+    rich = Image.new("RGB", (64, 64))
+    rich.putdata([((x * 37) % 256, (y * 53) % 256, (x * y) % 256)
+                  for y in range(64) for x in range(64)])
+    assert _frame_score(rich) > _frame_score(black)
+
+
+def test_thumbnail_selects_best_of_sampled_frames(monkeypatch, tmp_path):
+    """With a known duration, _select_frame samples several offsets and keeps the highest-scoring
+    frame; the losing candidates are cleaned up."""
+    from PIL import Image
+
+    from core import thumbnail
+
+    # Fake extract_frame: write a black frame everywhere except at the 0.5 sample (the "good" one).
+    def fake_extract(video, out, at_seconds):
+        color = (200, 120, 40) if abs(at_seconds - 0.5 * 10.0) < 0.01 else (0, 0, 0)
+        img = Image.new("RGB", (32, 32))
+        if color[0]:  # give the good frame real detail so it scores highest
+            img.putdata([((x * 41) % 256, (y * 29) % 256, (x + y) % 256)
+                         for y in range(32) for x in range(32)])
+        else:
+            img.paste(color, (0, 0, 32, 32))
+        img.save(out)
+
+    monkeypatch.setattr(thumbnail, "extract_frame", fake_extract)
+    frame = str(tmp_path / "f.png")
+    thumbnail._select_frame("v.mp4", frame, 0.15, 10.0)
+    import os
+    assert os.path.exists(frame)
+    # candidate temp files are cleaned up (only the chosen frame remains)
+    assert not [p for p in os.listdir(tmp_path) if ".cand" in p]
 
 
 def test_color_grade_in_scene_graph():

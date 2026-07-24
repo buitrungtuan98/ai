@@ -832,8 +832,15 @@ across footage/encode/learning.
   summary falls back to audience/language when there's no vision line; (B7) opening one card's
   disclosure no longer stretches its row-mate into an empty box. Verified in a browser at 1280/375px,
   dark + light; 205 tests (7 new), ruff clean, docs green.
-- Batch P — footage & vision quality (orientation/resolution-correct Pexels selection, resolution
-  floor, in-episode dedupe, smart thumbnail frame) `TODO`
+- **Batch P — footage & vision quality** `DONE`: (P1) `_best_file` was a real bug — it always chose
+  a portrait rendition (long-form 16:9 got a cropped strip) and always the largest file (4K downloads
+  wasting bandwidth + ARM decode). Now it matches the requested orientation and picks the SMALLEST
+  rendition clearing the 1080 short-side floor. (P2) clips whose best rendition is below that floor
+  sort last (they'd upscale to soft footage). (P3) in-episode dedupe — a growing seen-set steers
+  later scenes off the clips earlier scenes consumed, so overlapping-keyword scenes no longer share a
+  lead clip. (P4) smart thumbnail — with the duration known, the cover is the sharpest/most-colourful
+  of 5 sampled frames (edge + colour score) instead of one blind mid-video grab. All zero-cost,
+  CPU-safe, fail-open. 210 tests (5 new), ruff clean, docs green.
 - Batch Q — encode & finish polish (lanczos + CRF, faststart, long-form fade-out) `TODO`
 - Batch R — retention-curve learning (per-scene durations, retention curve fetch, drop-point
   analysis fed to the playbook distiller) `TODO`

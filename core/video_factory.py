@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from math import ceil
 
 from core import media, pexels, safety_filter, tts
 from core.ai_engine import VideoScript
@@ -474,6 +475,10 @@ def produce(
         # download). Collecting all scenes before rendering is what lets Auto-QC vet the WHOLE
         # episode's footage in one batched vision call instead of one call per scene.
         plans: list[dict] = []
+        # In-episode footage dedupe: `recent_clip_ids` avoids clips this CHANNEL used in prior
+        # episodes; `episode_seen` grows as we go so two scenes in THIS episode don't lead with the
+        # same clip (scenes with overlapping keywords otherwise would). Reordering only — fail-open.
+        episode_seen: set[int] = set(recent_clip_ids or ())
         for si, scene in enumerate(script.scenes):
             # Safety filter narration before TTS (policy lives in safety_filter). If the filter
             # emptied a non-empty narration (whole scene was blacklisted), do NOT fall back to the
@@ -508,10 +513,13 @@ def produce(
             safety_filter.assert_licensed_footage("pexels")
             orientation = "landscape" if profile.width > profile.height else "portrait"
             found = prefer_unused(
-                search_footage(scene.pexels_keywords, pexels_api_key, orientation), recent_clip_ids)
+                search_footage(scene.pexels_keywords, pexels_api_key, orientation), episode_seen)
             if not found:
                 raise RuntimeError(
                     f"No Pexels footage for scene {si} (keywords={scene.pexels_keywords!r})")
+            # Reserve the clips this scene will consume (≈ its duration / the shot target) so later
+            # scenes are steered off them. Over-reserving is harmless — prefer_unused only reorders.
+            episode_seen.update(c.id for c in found[:max(1, ceil(d_i / SHOT_TARGET_S))])
             pre: dict[int, str] = {}
             if vet_batch is not None and len(found) > 1:
                 p = ws.path(f"scene_{si}_vet_0.mp4")
@@ -592,6 +600,7 @@ def produce(
                 metadata["description"] = "\n".join(chapters) + "\n\n" + metadata.get("description", "")
         thumb = os.path.join(output_dir, f"episode_{episode_number}.jpg")
         generate_thumbnail(master, thumb, metadata["title"],
+                           duration=sum(durations),  # sample across the video for the best frame
                            logo_path=branding.watermark_path,
                            width=profile.width, height=profile.height)
         report("thumb", 100)

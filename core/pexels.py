@@ -28,8 +28,12 @@ def search_videos(
     *,
     per_page: int = 10,
     orientation: str = "portrait",
+    min_short_side: int = 1080,
 ) -> list[PexelsClip]:
-    """Search Pexels videos, preferring vertical renditions closest to 1080x1920."""
+    """Search Pexels videos, choosing the rendition that matches the output orientation at (but not
+    wastefully above) the target resolution. `min_short_side` is the output's shorter edge (1080 for
+    both 1080×1920 shorts and 1920×1080 long-form). Clips whose best rendition can't reach that floor
+    sort last — they'd upscale to visibly soft footage."""
     import requests
 
     resp = requests.get(
@@ -49,8 +53,7 @@ def search_videos(
         duration = float(video.get("duration", 0) or 0)
         if duration <= 0:
             continue
-        # Prefer a portrait rendition >= 1080 wide; else the largest available.
-        best = _best_file(files)
+        best = _best_file(files, orientation, min_short_side)
         clips.append(
             PexelsClip(
                 id=video["id"],
@@ -60,13 +63,28 @@ def search_videos(
                 download_url=best["link"],
             )
         )
+    # Resolution floor: below-target clips drop to the back (stable, so keyword relevance is kept).
+    clips.sort(key=lambda c: min(c.width, c.height) < min_short_side)
     return clips
 
 
-def _best_file(files: list[dict]) -> dict:
-    portrait = [f for f in files if (f.get("height") or 0) >= (f.get("width") or 0)]
-    pool = portrait or files
-    return max(pool, key=lambda f: (f.get("width") or 0) * (f.get("height") or 0))
+def _best_file(files: list[dict], orientation: str = "portrait", min_short_side: int = 1080) -> dict:
+    """Pick the rendition to download: matching the requested orientation, and the SMALLEST one that
+    still clears the resolution floor (sharp without a wasteful 4K download that burns ARM decode
+    CPU). If none clears the floor, fall back to the largest available."""
+    def short_side(f: dict) -> int:
+        return min(f.get("width") or 0, f.get("height") or 0)
+
+    def area(f: dict) -> int:
+        return (f.get("width") or 0) * (f.get("height") or 0)
+
+    def matches(f: dict) -> bool:
+        w, h = f.get("width") or 0, f.get("height") or 0
+        return h >= w if orientation == "portrait" else w >= h
+
+    pool = [f for f in files if matches(f)] or files
+    meeting = [f for f in pool if short_side(f) >= min_short_side]
+    return min(meeting, key=area) if meeting else max(pool, key=area)
 
 
 def download(url: str, out_path: str) -> str:
