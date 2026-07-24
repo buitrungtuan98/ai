@@ -85,6 +85,29 @@ templates.env.globals["voice_names"] = {  # id → short friendly name for compa
 templates.env.globals["tz_choices"] = timezones.tz_choices  # grouped timezone picker (offsets live)
 
 
+def _ago(value) -> str:
+    """Compact server-rendered relative time ('just now' / '5m ago' / '3h ago' / '2d ago') from an
+    ISO string or datetime. 'never' when empty — used for the autopilot 'last ran' heartbeat."""
+    from datetime import datetime as _dt
+    if not value:
+        return "never"
+    try:
+        dt = _dt.fromisoformat(value) if isinstance(value, str) else value
+    except (TypeError, ValueError):
+        return ""
+    secs = max(0.0, (_dt.utcnow() - dt).total_seconds())
+    if secs < 90:
+        return "just now"
+    if secs < 5400:
+        return f"{int(round(secs / 60))}m ago"
+    if secs < 129600:
+        return f"{int(round(secs / 3600))}h ago"
+    return f"{int(round(secs / 86400))}d ago"
+
+
+templates.env.globals["ago"] = _ago  # relative "last ran" time for the autopilot heartbeat
+
+
 def _query_string(**params: object) -> str:
     """Build a URL query string from kwargs, dropping empty/None values and URL-encoding — so the
     shared filter-bar macro can compose chip/search links (status + search + scope) safely."""
@@ -571,19 +594,36 @@ def delete_channel(channel=Depends(get_owned_channel), db=Depends(get_db)):
     return RedirectResponse("/channels", status_code=303)
 
 
+_AUTOPILOT_FEED_PAGE = 25
+
+
 @app.get("/autopilot", response_class=HTMLResponse)
-def autopilot_page(request: Request, user: CurrentUser, db: DbDep):
-    """The autopilot decisions inbox + audit log: strategy proposals to approve/dismiss, and the
-    history of what autopilot has done (each with the data evidence that triggered it). ADR-044."""
-    actions = db.scalars(select(AutopilotAction).where(AutopilotAction.user_id == user.id)
-                         .order_by(AutopilotAction.id.desc()).limit(120)).all()
-    proposed = [a for a in actions if a.status == "proposed"]
-    history = [a for a in actions if a.status != "proposed"][:40]
+def autopilot_page(request: Request, user: CurrentUser, db: DbDep, page: int = 1):
+    """The autopilot mission control: a per-channel run status strip (mode + 'last ran'), strategy
+    proposals to approve/dismiss, and the full activity log of every autonomous decision with the
+    data evidence + reasoning that drove it. ADR-044. The feed is paginated so it never bloats."""
+    channels = db.scalars(select(Channel).where(Channel.user_id == user.id)).all()
+    chan_by_id = {c.id: c for c in channels}
+    # Status strip: one row per channel that has autopilot on (mode + heartbeat).
+    ap_channels = [c for c in channels if (c.autopilot_json or {}).get("mode", "off") != "off"]
+
+    proposed = db.scalars(select(AutopilotAction).where(
+        AutopilotAction.user_id == user.id, AutopilotAction.status == "proposed")
+        .order_by(AutopilotAction.id.desc())).all()
+
+    # Activity feed = everything already resolved (done/applied/dismissed/failed), newest first.
+    page = max(1, page)
+    feed_where = (AutopilotAction.user_id == user.id, AutopilotAction.status != "proposed")
+    total = db.scalar(select(func.count()).select_from(AutopilotAction).where(*feed_where)) or 0
+    feed = db.scalars(select(AutopilotAction).where(*feed_where)
+                      .order_by(AutopilotAction.id.desc())
+                      .limit(_AUTOPILOT_FEED_PAGE).offset((page - 1) * _AUTOPILOT_FEED_PAGE)).all()
     return templates.TemplateResponse(
         request, "autopilot.html",
         {"request": request, "user": user, "nav": "autopilot", "proposed": proposed,
-         "history": history,
-         "chan_by_id": {c.id: c for c in db.scalars(select(Channel).where(Channel.user_id == user.id))}},
+         "history": feed, "ap_channels": ap_channels, "chan_by_id": chan_by_id,
+         "page": page, "has_prev": page > 1,
+         "has_next": page * _AUTOPILOT_FEED_PAGE < total, "feed_total": total},
     )
 
 

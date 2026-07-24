@@ -467,6 +467,30 @@ def test_autopilot_inbox_approve_and_dismiss(client):
     db.close()
 
 
+def test_autopilot_page_status_strip_and_activity_feed(client):
+    """The /autopilot page shows a per-channel run status (with a 'never ran' warning) and logs
+    every autonomous decision in a paginated activity feed."""
+    from database.db_session import SessionLocal
+    from database.models import AutopilotAction, Channel
+
+    client.post("/channels/facebook", data={"channel_name": "P", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    db = SessionLocal()
+    ch = db.query(Channel).first()
+    ch.autopilot_json = {"mode": "autopilot", "interval_hours": 3}  # on, but never ran
+    db.add(AutopilotAction(user_id=ch.user_id, channel_id=ch.id, kind="approved",
+                           summary="Approved & published Ep 4: passed auto-QC (9/10).",
+                           evidence={"episode": 4, "qc_score": 9}, params={}, status="done"))
+    db.commit()
+    db.close()
+
+    page = client.get("/autopilot").text
+    assert "Channel status" in page and "never run" in page          # heartbeat + worker-down hint
+    assert "Approved &amp; published Ep 4" in page and "auto" in page  # decision logged in the feed
+    # Feed paginates without error on a high page number.
+    assert client.get("/autopilot?page=5").status_code == 200
+
+
 def test_campaign_actions_preserve_channel_scope(client):
     """Start/Delete taken while scoped to a channel land back in that channel's list, not 'all'."""
     from database.db_session import SessionLocal

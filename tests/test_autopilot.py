@@ -444,3 +444,75 @@ def test_autopilot_files_audience_drift_advisory():
     assert db.query(AutopilotAction).filter_by(kind="audience_drift").count() == 1
     db.close()
 
+
+
+# ── Glass box: the audit log + heartbeat (S1/S2) ─────────────────────────────
+def test_autopilot_logs_every_decision_with_reasons():
+    from sqlalchemy import select
+
+    from database.models import AutopilotAction
+    from workers import scheduler
+
+    db, user, ch, camp = _seed_ch("autopilot")
+    _review_item(db, ch, camp, 1, 9)   # approve → published
+    _review_item(db, ch, camp, 2, 2)   # reject → re-render
+    _review_item(db, ch, camp, 3, 5)   # borderline → escalate
+    scheduler.autopilot_review_channel(db, ch, "autopilot", 7, 4)
+
+    rows = db.scalars(select(AutopilotAction).where(AutopilotAction.status == "done")).all()
+    by_kind = {r.kind: r for r in rows}
+    assert {"approved", "rejected", "escalated"} <= set(by_kind)
+    assert by_kind["approved"].evidence == {"episode": 1, "qc_score": 9}   # thinking is recorded
+    assert "8" not in by_kind["rejected"].summary  # reason text, not just a number
+    assert by_kind["escalated"].campaign_id == camp.id
+    db.close()
+
+
+def test_escalation_logged_once_not_every_pass():
+    from sqlalchemy import select
+
+    from database.models import AutopilotAction
+    from workers import scheduler
+
+    db, user, ch, camp = _seed_ch("copilot")
+    _review_item(db, ch, camp, 3, 5)   # borderline → escalate + hint
+    scheduler.autopilot_review_channel(db, ch, "copilot", 7, 4)
+    scheduler.autopilot_review_channel(db, ch, "copilot", 7, 4)  # same item, next cadence tick
+    esc = db.scalars(select(AutopilotAction).where(AutopilotAction.kind == "escalated")).all()
+    assert len(esc) == 1  # the transition is logged once, not repeated every pass
+    db.close()
+
+
+def test_autopilot_heartbeat_recorded_even_when_idle():
+    from workers import scheduler
+
+    db, user, ch, camp = _seed_ch("copilot")  # nothing to review → an idle pass
+    scheduler.autopilot_pass(db, respect_cadence=False)
+    db.refresh(ch)
+    lr = ch.autopilot_json.get("last_run")
+    assert lr and lr["at"] and lr["summary"] == "no action needed"  # "ran, nothing to do" ≠ never ran
+    db.close()
+
+
+def test_prune_autopilot_log_drops_old_done_only():
+    from datetime import datetime, timedelta
+
+    from sqlalchemy import select
+
+    from database.models import AutopilotAction
+    from workers import scheduler
+
+    db, user, ch, camp = _seed_ch("copilot")
+    db.add_all([
+        AutopilotAction(user_id=user.id, channel_id=ch.id, kind="approved", summary="old",
+                        status="done", created_at=datetime.utcnow() - timedelta(days=120)),
+        AutopilotAction(user_id=user.id, channel_id=ch.id, kind="approved", summary="new",
+                        status="done", created_at=datetime.utcnow()),
+        AutopilotAction(user_id=user.id, channel_id=ch.id, kind="extend", summary="kept",
+                        status="applied", created_at=datetime.utcnow() - timedelta(days=120)),
+    ])
+    db.commit()
+    assert scheduler.prune_autopilot_log(db) == 1  # only the stale DONE row
+    left = {r.summary for r in db.scalars(select(AutopilotAction)).all()}
+    assert left == {"new", "kept"}  # recent done + applied history both survive
+    db.close()

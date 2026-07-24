@@ -859,6 +859,24 @@ across footage/encode/learning.
   Browser-verified (curve renders, drops attributed to scenes); 217 tests (6 new), ruff clean, docs
   green.
 
+## Autopilot glass box + smarter decisions `WIP`
+The operator couldn't see what autopilot did (only strategy proposals were recorded; approve/reject/
+retry/catch-up left no trace), couldn't tell "ran, nothing to do" from "never ran", and the
+successor/tune logic was cruder than it needed to be.
+- **Batch S (S1–S3) — glass box** `DONE`: (S1) every autonomous decision — approve, reject, escalate,
+  retry, catch-up — is now logged as a done `AutopilotAction` with its **reason + evidence**
+  (`_log_action`); escalations are logged once (on the ap_hint transition), not every cadence tick;
+  the operational log auto-prunes after 90 days (`prune_autopilot_log`). (S2) each pass stamps a
+  per-channel **heartbeat** (`last_run` time + one-line summary) into the channel config, so the UI
+  shows "🕒 last ran 2h ago" and — crucially — a red "⚠ never ran — check the worker container" when
+  a channel is on but has never ticked. (S3) `/autopilot` is now mission control: a per-channel run
+  status strip, the proposals inbox, and a **paginated activity feed** of every decision with
+  reasoning + evidence chips. Browser-verified; 222 tests (5 new), ruff clean, docs green.
+- Batch S (S4, S6) — smarter strategist: feed retention drop-offs into the weekly tune scorecard;
+  target the weakest campaign, not `campaigns[0]` `TODO`
+- Batch S (S5) — AI-designed successor: a fresh angle carrying the proven formula instead of a blind
+  "II" clone, budget-guarded, fail-open to the clone `TODO`
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

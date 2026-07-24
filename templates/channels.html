@@ -92,9 +92,17 @@
     {% set alabels = {'off': 'Off', 'copilot': '🧭 Copilot', 'autopilot': '✈️ Full auto'} %}
     {% set rv = a.get('review') or {} %}
     <details class="disclosure mt-sm ap-box">
-      <summary><span class="sum"><span class="sum-l">🤖 Autopilot</span><span class="sum-v">{{ alabels[amode] }}{% if amode != 'off' %} · {{ a.get('interval_hours', 3) }}h · QC ≥{{ rv.get('approve_min', 7) }}/≤{{ rv.get('reject_max', 4) }}{% endif %}</span></span></summary>
+      {% set lr = a.get('last_run') %}
+      <summary><span class="sum"><span class="sum-l">🤖 Autopilot</span><span class="sum-v">{{ alabels[amode] }}{% if amode != 'off' %} · {{ a.get('interval_hours', 3) }}h · QC ≥{{ rv.get('approve_min', 7) }}/≤{{ rv.get('reject_max', 4) }}{% if lr %} · ran {{ ago(lr.at) }}{% else %} · ⚠ never ran{% endif %}{% endif %}</span></span></summary>
       <div class="disclosure-body">
         <p class="hint">Let the AI run this channel from its data — review &amp; publish videos, auto-reject weak renders (with a reason that teaches the scriptwriter), retry failures, and recover missed slots. Reversible anytime.</p>
+        {% if amode != 'off' %}
+          {% if lr %}
+          <p class="hint">🕒 Last ran <b>{{ ago(lr.at) }}</b>{% if lr.summary %} — {{ lr.summary }}{% endif %}. <a href="/autopilot">See its decisions →</a></p>
+          {% else %}
+          <p class="hint" style="color:var(--st-failed)">⚠ Autopilot is on but hasn’t run yet — it runs inside the worker; check the worker container is up.</p>
+          {% endif %}
+        {% endif %}
         <form method="post" action="/channels/{{ c.id }}/autopilot">
           {% call ui.field('Mode') %}
           <select name="mode">

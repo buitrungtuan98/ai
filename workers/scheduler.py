@@ -365,6 +365,40 @@ def daily_learning_pass(db, now: datetime | None = None) -> dict:
 AUTOPILOT_MAX_RETRIES = 2  # auto-retry a genuine render failure at most this many times
 
 
+AUTOPILOT_LOG_KINDS = ("approved", "rejected", "escalated", "recommended", "retried", "caught_up")
+AUTOPILOT_LOG_RETENTION_DAYS = 90  # prune the operational decision log beyond this so it never bloats
+
+
+def _log_action(db, channel, kind: str, summary: str, *,
+                campaign_id: int | None = None, evidence: dict | None = None) -> None:
+    """Record ONE autonomous operational decision (approve/reject/escalate/retry/catch-up) as a
+    done AutopilotAction so the operator can see what autopilot did and WHY. Status 'done' keeps
+    these out of the proposal-idempotency logic. Fail-open: a logging error never breaks the pass."""
+    try:
+        db.add(AutopilotAction(
+            user_id=channel.user_id, channel_id=channel.id, campaign_id=campaign_id,
+            kind=kind, summary=summary[:300], evidence=evidence or {}, params={},
+            status="done", resolved_at=datetime.utcnow()))
+        db.commit()
+    except Exception:  # noqa: BLE001 — the audit log is a nicety, never a gate
+        db.rollback()
+        logger.debug("autopilot action log failed", exc_info=True)
+
+
+def prune_autopilot_log(db, now: datetime | None = None) -> int:
+    """Delete operational log rows (status 'done') older than the retention window. Proposals and
+    applied structural changes are kept (they're the audit of real config edits). Returns deleted."""
+    now = now or datetime.utcnow()
+    cutoff = now - timedelta(days=AUTOPILOT_LOG_RETENTION_DAYS)
+    stale = db.scalars(select(AutopilotAction).where(
+        AutopilotAction.status == "done", AutopilotAction.created_at < cutoff)).all()
+    for row in stale:
+        db.delete(row)
+    if stale:
+        db.commit()
+    return len(stale)
+
+
 def autopilot_review_channel(db, channel, mode: str, approve_min: int, reject_max: int) -> dict:
     """Review every awaiting-review render for a channel's campaigns from its STORED QC verdict
     (0 AI calls). Reject fires in copilot AND autopilot (a rejection never publishes and teaches the
@@ -380,19 +414,31 @@ def autopilot_review_channel(db, channel, mode: str, approve_min: int, reject_ma
         .order_by(BufferPoolItem.id)).all()
     for item in items:
         qc = (item.metadata_json or {}).get("qc")
+        score = (qc or {}).get("score")
+        ep = item.episode_number
         action, reason = autopilot.review_decision(qc, approve_min, reject_max)
         if action == "reject":
             video_worker.apply_reject(db, item, "auto-review: " + reason, rerender=True)
             counts["rejected"] += 1
+            _log_action(db, channel, "rejected", f"Rejected Ep {ep}: {reason}; re-rendering.",
+                        campaign_id=item.campaign_id, evidence={"episode": ep, "qc_score": score})
         elif action == "approve" and mode == "autopilot":
             video_worker.apply_approve(db, item)
             counts["approved"] += 1
+            _log_action(db, channel, "approved", f"Approved & published Ep {ep}: {reason}.",
+                        campaign_id=item.campaign_id, evidence={"episode": ep, "qc_score": score})
         else:  # copilot approve-eligible, or a borderline/verdict-less item → leave + hint
+            had_hint = bool((item.metadata_json or {}).get("ap_hint"))
             md = dict(item.metadata_json or {})
             md["ap_hint"] = {"action": action, "reason": reason}
             item.metadata_json = md
             db.commit()
             counts["recommended" if action == "approve" else "escalated"] += 1
+            if not had_hint:  # log the transition ONCE, not every cadence tick
+                kind = "recommended" if action == "approve" else "escalated"
+                verb = "Recommended for your ✓" if action == "approve" else "Escalated"
+                _log_action(db, channel, kind, f"{verb} Ep {ep}: {reason}.",
+                            campaign_id=item.campaign_id, evidence={"episode": ep, "qc_score": score})
     return counts
 
 
@@ -419,6 +465,11 @@ def autopilot_retry_channel(db, channel) -> int:
         t.rq_job_id = task_queue.enqueue_render(t.id)
         db.commit()
         retried += 1
+        _log_action(db, channel, "retried",
+                    f"Retried failed render Ep {t.episode_number} (attempt "
+                    f"{t.retry_count}/{AUTOPILOT_MAX_RETRIES}).",
+                    campaign_id=t.campaign_id,
+                    evidence={"episode": t.episode_number, "attempt": t.retry_count})
     return retried
 
 
@@ -487,6 +538,9 @@ def autopilot_catchup_channel(db, channel, now: datetime | None = None) -> int:
             task_queue.enqueue_publish(buf.id)
             logger.info("Autopilot catch-up: campaign %s episode %s queued", c.id, buf.episode_number)
             published += 1
+            _log_action(db, channel, "caught_up",
+                        f"Published Ep {buf.episode_number} of “{c.topic_name}” to catch up a "
+                        "missed slot.", campaign_id=c.id, evidence={"episode": buf.episode_number})
     return published
 
 
@@ -759,10 +813,40 @@ def autopilot_pass(db=None, now: datetime | None = None, respect_cadence: bool =
             acted = r["approved"] + r["rejected"] + retried + caught + n_applied
             if acted or proposed:
                 _autopilot_notify(db, ch, r, retried, caught, proposed, n_applied)
+            _record_heartbeat(db, ch, r, retried, caught, proposed, n_applied)
         return summary
     finally:
         if own:
             db.close()
+
+
+def _record_heartbeat(db, channel, review: dict, retried: int, caught: int,
+                      proposed: int, auto_applied: int) -> None:
+    """Stamp this channel's autopilot run (time + one-line summary) into its config JSON, so the UI
+    can show 'last ran Xh ago' and — crucially — distinguish 'ran, nothing to do' from 'never ran'
+    (the tell that the worker container is down). Preserves the operator's config keys."""
+    bits = []
+    if review["approved"]:
+        bits.append(f"approved {review['approved']}")
+    if review["rejected"]:
+        bits.append(f"rejected {review['rejected']}")
+    if review["recommended"]:
+        bits.append(f"{review['recommended']} to confirm")
+    if review["escalated"]:
+        bits.append(f"{review['escalated']} need review")
+    if retried:
+        bits.append(f"retried {retried}")
+    if caught:
+        bits.append(f"caught up {caught}")
+    if proposed:
+        bits.append(f"filed {proposed} proposal(s)")
+    if auto_applied:
+        bits.append(f"applied {auto_applied} change(s)")
+    cfg = dict(channel.autopilot_json or {})
+    cfg["last_run"] = {"at": datetime.utcnow().isoformat(),
+                       "summary": ", ".join(bits) if bits else "no action needed"}
+    channel.autopilot_json = cfg
+    db.commit()
 
 
 def _autopilot_notify(db, channel, review: dict, retried: int, caught: int, proposed: int = 0,
@@ -833,6 +917,7 @@ def periodic_tick(db=None, now: datetime | None = None) -> dict:
         try:
             if task_queue.conn.set("learning:daily-pass", "1", nx=True, ex=86400):
                 summary["learning"] = daily_learning_pass(db)
+                summary["pruned_log"] = prune_autopilot_log(db, now=now)
         except Exception:  # noqa: BLE001
             logger.warning("Daily learning pass failed", exc_info=True)
         return summary
