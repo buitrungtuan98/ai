@@ -6,8 +6,29 @@
   <a class="btn ghost" href="/channels">Channels →</a>
 {% endcall %}
 
-{% set kind_icon = {'extend': '📈', 'successor': '🌱', 'wind_down': '📉', 'tune': '🎛', 'audience_drift': '🎯'} %}
+{% set kind_icon = {'extend': '📈', 'successor': '🌱', 'wind_down': '📉', 'tune': '🎛', 'audience_drift': '🎯',
+  'approved': '✅', 'rejected': '❌', 'escalated': '🧭', 'recommended': '👍', 'retried': '↺', 'caught_up': '⏰'} %}
 {% set advisory_kinds = ['audience_drift'] %}
+{% set mode_labels = {'copilot': '🧭 Copilot', 'autopilot': '✈️ Full auto'} %}
+
+{# Per-channel run status — answers "is autopilot actually running?" at a glance. #}
+{% if ap_channels %}
+<div class="card">
+  <div class="card-head"><h3>Channel status</h3><span class="meta">when each channel's autopilot last ran</span></div>
+  <ul class="run-list">
+    {% for c in ap_channels %}
+    {% set ap = c.autopilot_json or {} %}{% set lr = ap.get('last_run') %}
+    <li class="run-row">
+      <div class="grow">
+        <b>{{ c.channel_name }}</b> <span class="meta">· {{ mode_labels.get(ap.get('mode'), ap.get('mode')) }} · every {{ ap.get('interval_hours', 3) }}h</span>
+        <div class="meta">{% if lr %}🕒 Last ran <b>{{ ago(lr.at) }}</b>{% if lr.summary %} — {{ lr.summary }}{% endif %}{% else %}<span style="color:var(--st-failed)">⚠ Has never run — check the worker container is up.</span>{% endif %}</div>
+      </div>
+      <a class="btn ghost sm" href="/channels">Configure →</a>
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
 
 {% if proposed %}
 <div class="card">
@@ -35,17 +56,19 @@
 {% call ui.empty('🤖', 'No proposals right now', 'When a channel is on autopilot, the AI watches its data and files suggestions here — extend a winner, plan a successor for a healthy campaign near its cap, or wind down a laggard. Each is reversible and shows the numbers behind it.', '/channels', 'Set up autopilot') %}{% endcall %}
 {% endif %}
 
-{% if history %}
 <div class="card mt">
-  <div class="card-head"><h3>Decision log</h3><span class="meta">what autopilot has done</span></div>
+  <div class="card-head"><h3>Activity</h3><span class="meta">every decision autopilot has made — newest first</span></div>
+  {% if history %}
   <ul class="ap-list">
     {% for a in history %}
     {% set ch = chan_by_id.get(a.channel_id) %}
-    {% set st = {'applied': ('completed', 'Applied'), 'dismissed': ('', 'Dismissed'), 'failed': ('failed', 'Failed')} %}
+    {% set st = {'applied': ('completed', 'Applied'), 'dismissed': ('', 'Dismissed'), 'failed': ('failed', 'Failed'), 'done': ('', 'auto')} %}
     <li class="ap-row">
       <div class="grow">
         <span>{{ kind_icon.get(a.kind, '•') }} {{ a.summary }}</span>
-        <div class="meta">{% if ch %}{{ ch.channel_name }}{% endif %}{% if a.resolved_at %}{% if ch %} · {% endif %}<span data-reltime="{{ a.resolved_at.isoformat() }}Z">{{ a.resolved_at.strftime('%Y-%m-%d %H:%M') }}</span>{% endif %}</div>
+        <div class="meta">{% if ch %}{{ ch.channel_name }} · {% endif %}
+          {% for k, v in (a.evidence or {}).items() %}{{ k.replace('_', ' ') }}: <b>{{ v }}</b> · {% endfor %}
+          {% if a.resolved_at %}<span data-reltime="{{ a.resolved_at.isoformat() }}Z">{{ a.resolved_at.strftime('%Y-%m-%d %H:%M') }}</span>{% endif %}</div>
       </div>
       {% set new_id = (a.params or {}).get('created_campaign_id') %}
       {% if new_id %}<a class="btn ghost sm" href="/campaigns/{{ new_id }}">Open →</a>{% endif %}
@@ -53,6 +76,15 @@
     </li>
     {% endfor %}
   </ul>
+  {% if has_prev or has_next %}
+  <div class="flex between mt">
+    {% if has_prev %}<a class="btn ghost sm" href="/autopilot?page={{ page - 1 }}">← Newer</a>{% else %}<span></span>{% endif %}
+    <span class="meta">Page {{ page }}</span>
+    {% if has_next %}<a class="btn ghost sm" href="/autopilot?page={{ page + 1 }}">Older →</a>{% else %}<span></span>{% endif %}
+  </div>
+  {% endif %}
+  {% else %}
+  <p class="hint">Nothing yet. Once a channel's autopilot runs, every review, publish, rejection, retry and catch-up it makes is logged here with the reason behind it.{% if not ap_channels %} No channel has autopilot on — turn it on from the <a href="/channels">Channels</a> page.{% endif %}</p>
+  {% endif %}
 </div>
-{% endif %}
 {% endblock %}

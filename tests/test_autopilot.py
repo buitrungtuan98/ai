@@ -400,6 +400,105 @@ def test_strategist_files_tune_proposal_guarded(monkeypatch):
     db.close()
 
 
+def test_ai_designed_successor_carries_formula(monkeypatch):
+    """S5: an approved successor gets a fresh AI-designed creative layer (topic/persona/caption) while
+    keeping the parent's proven formula (voice/format/schedule); the parent's playbook is fed in."""
+    from core import ai_engine
+    from core.ai_engine import CampaignProposal
+    from core.config import settings
+    from database.models import AutopilotAction, Campaign
+    from workers import scheduler
+
+    db, user, ch, camp = _seed_ch("copilot")
+    camp.config_json = {"language": "vi", "voice": "vi-VN-HoaiMyNeural", "video_format": "short",
+                        "posting_slots": "20:00", "caption_theme": "classic"}
+    camp.learning_json = {"playbook": ["Open with a question"]}
+    camp.current_episode = 18
+    db.commit()
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "k")
+    monkeypatch.setattr(settings, "GEMINI_DAILY_BUDGET", None)
+    captured = {}
+
+    def fake_propose(**k):
+        captured.update(k)
+        return CampaignProposal(topic_name="Sử Việt: Triều Nguyễn", language="vi",
+                                video_format="short", total_episodes=20,
+                                persona="Cụ đồ kể chuyện", caption_theme="neon")
+
+    monkeypatch.setattr(ai_engine, "propose_campaign", fake_propose)
+    succ = AutopilotAction(user_id=user.id, channel_id=ch.id, campaign_id=camp.id, kind="successor",
+                           summary="successor", evidence={}, params={})
+    db.add(succ)
+    db.commit()
+
+    assert scheduler.apply_autopilot_action(db, succ) is True
+    new = db.get(Campaign, succ.params["created_campaign_id"])
+    assert new.topic_name == "Sử Việt: Triều Nguyễn"                  # fresh AI title, not "T II"
+    assert new.config_json["persona"] == "Cụ đồ kể chuyện"
+    assert new.config_json["caption_theme"] == "neon"                # AI overrode parent's 'classic'
+    assert new.config_json["voice"] == "vi-VN-HoaiMyNeural"          # proven formula retained
+    assert new.config_json["posting_slots"] == "20:00"
+    assert "Open with a question" in captured["extra_context"]       # playbook fed to the designer
+    db.close()
+
+
+def test_strategist_targets_weakest_campaign_with_dropoffs(monkeypatch):
+    """S6: the weekly tune targets the weakest measured campaign (not campaigns[0]); S4: its
+    retention drop-off notes ride along in the scorecard the AI reasons from."""
+    from core import ai_engine
+    from core.ai_engine import ChannelTune
+    from core.config import settings
+    from database.db_session import SessionLocal
+    from database.models import Campaign, Channel, Task, User
+    from database.types import CampaignStatus, Platform, TaskStatus
+    from workers import scheduler
+
+    db = SessionLocal()
+    user = User()
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    ch = Channel(user_id=user.id, platform=Platform.youtube, channel_name="C",
+                 autopilot_json={"mode": "autopilot"})
+    db.add(ch)
+    db.commit()
+    db.refresh(ch)
+    strong = Campaign(user_id=user.id, channel_id=ch.id, topic_name="Strong", total_episodes=20,
+                      status=CampaignStatus.active)
+    weak = Campaign(user_id=user.id, channel_id=ch.id, topic_name="Weak", total_episodes=20,
+                    status=CampaignStatus.active)
+    db.add_all([strong, weak])
+    db.commit()
+    db.refresh(strong)
+    db.refresh(weak)
+    for i, r in enumerate([80, 82, 78], 1):
+        db.add(Task(campaign_id=strong.id, user_id=user.id, episode_number=i,
+                    status=TaskStatus.COMPLETED, stats_json={"avg_pct_viewed": r}))
+    for i, r in enumerate([30, 28, 32], 1):
+        s = {"avg_pct_viewed": r}
+        if i == 2:
+            s["drop_summary"] = "Biggest drop-off at 0:05 (scene 2 — “the setup”)"
+        db.add(Task(campaign_id=weak.id, user_id=user.id, episode_number=i,
+                    status=TaskStatus.COMPLETED, stats_json=s))
+    db.commit()
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "k")
+    monkeypatch.setattr(settings, "GEMINI_DAILY_BUDGET", None)
+    captured = {}
+
+    def fake_tune(**k):
+        captured.update(k)
+        return ChannelTune(caption_theme="neon", rationale="fix the setup scene")
+
+    monkeypatch.setattr(ai_engine, "suggest_channel_tune", fake_tune)
+    assert scheduler.autopilot_strategist_channel(db, user, ch, respect_cadence=False) == 1
+    sc = captured["scorecard"]
+    assert sc["tuning"] == "Weak"                                      # S6: weakest campaign targeted
+    assert any("the setup" in d for d in sc["retention_drop_offs"])    # S4: drop-offs fed to the AI
+    db.close()
+
+
 # ── K3: audience-geography verification ───────────────────────────────────────
 def test_audience_summary_match_vs_target():
     from types import SimpleNamespace
@@ -444,3 +543,75 @@ def test_autopilot_files_audience_drift_advisory():
     assert db.query(AutopilotAction).filter_by(kind="audience_drift").count() == 1
     db.close()
 
+
+
+# ── Glass box: the audit log + heartbeat (S1/S2) ─────────────────────────────
+def test_autopilot_logs_every_decision_with_reasons():
+    from sqlalchemy import select
+
+    from database.models import AutopilotAction
+    from workers import scheduler
+
+    db, user, ch, camp = _seed_ch("autopilot")
+    _review_item(db, ch, camp, 1, 9)   # approve → published
+    _review_item(db, ch, camp, 2, 2)   # reject → re-render
+    _review_item(db, ch, camp, 3, 5)   # borderline → escalate
+    scheduler.autopilot_review_channel(db, ch, "autopilot", 7, 4)
+
+    rows = db.scalars(select(AutopilotAction).where(AutopilotAction.status == "done")).all()
+    by_kind = {r.kind: r for r in rows}
+    assert {"approved", "rejected", "escalated"} <= set(by_kind)
+    assert by_kind["approved"].evidence == {"episode": 1, "qc_score": 9}   # thinking is recorded
+    assert "8" not in by_kind["rejected"].summary  # reason text, not just a number
+    assert by_kind["escalated"].campaign_id == camp.id
+    db.close()
+
+
+def test_escalation_logged_once_not_every_pass():
+    from sqlalchemy import select
+
+    from database.models import AutopilotAction
+    from workers import scheduler
+
+    db, user, ch, camp = _seed_ch("copilot")
+    _review_item(db, ch, camp, 3, 5)   # borderline → escalate + hint
+    scheduler.autopilot_review_channel(db, ch, "copilot", 7, 4)
+    scheduler.autopilot_review_channel(db, ch, "copilot", 7, 4)  # same item, next cadence tick
+    esc = db.scalars(select(AutopilotAction).where(AutopilotAction.kind == "escalated")).all()
+    assert len(esc) == 1  # the transition is logged once, not repeated every pass
+    db.close()
+
+
+def test_autopilot_heartbeat_recorded_even_when_idle():
+    from workers import scheduler
+
+    db, user, ch, camp = _seed_ch("copilot")  # nothing to review → an idle pass
+    scheduler.autopilot_pass(db, respect_cadence=False)
+    db.refresh(ch)
+    lr = ch.autopilot_json.get("last_run")
+    assert lr and lr["at"] and lr["summary"] == "no action needed"  # "ran, nothing to do" ≠ never ran
+    db.close()
+
+
+def test_prune_autopilot_log_drops_old_done_only():
+    from datetime import datetime, timedelta
+
+    from sqlalchemy import select
+
+    from database.models import AutopilotAction
+    from workers import scheduler
+
+    db, user, ch, camp = _seed_ch("copilot")
+    db.add_all([
+        AutopilotAction(user_id=user.id, channel_id=ch.id, kind="approved", summary="old",
+                        status="done", created_at=datetime.utcnow() - timedelta(days=120)),
+        AutopilotAction(user_id=user.id, channel_id=ch.id, kind="approved", summary="new",
+                        status="done", created_at=datetime.utcnow()),
+        AutopilotAction(user_id=user.id, channel_id=ch.id, kind="extend", summary="kept",
+                        status="applied", created_at=datetime.utcnow() - timedelta(days=120)),
+    ])
+    db.commit()
+    assert scheduler.prune_autopilot_log(db) == 1  # only the stale DONE row
+    left = {r.summary for r in db.scalars(select(AutopilotAction)).all()}
+    assert left == {"new", "kept"}  # recent done + applied history both survive
+    db.close()

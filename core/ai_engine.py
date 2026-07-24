@@ -448,6 +448,7 @@ def propose_campaign(
     api_key: str,
     model: str = DEFAULT_MODEL,
     nonce: int = 0,
+    extra_context: str = "",
 ) -> CampaignProposal:
     """Design one complete, standout campaign config. With no topic, it invents a concept; high
     temperature + a variation `nonce` make each call distinct. The chosen voice is validated
@@ -480,7 +481,7 @@ def propose_campaign(
     prompt = (
         "You are a senior short-form AND long-form video channel strategist. Propose ONE complete, "
         "standout campaign configuration for an automated video factory. "
-        f"{topic_line} {lang_line} {fmt_line} {profile_line} "
+        f"{topic_line} {lang_line} {fmt_line} {profile_line} {extra_context} "
         "Make it distinctive and genuinely good — a real creator's channel, never a bland template. "
         "Choose: a vivid, specific persona (region/age/speech habits, written in the target "
         "language); 2-3 short style-example lines in that voice; signature opening and closing "
