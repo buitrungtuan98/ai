@@ -341,7 +341,7 @@ def test_retry_publish_vs_render_flash(client, tmp_path):
 
 def test_scope_switcher_and_scoped_nav(client):
     """The topbar scope switcher appears once channels exist, and an active channel scope is carried
-    onto the scope-aware nav links (Campaigns / Asset Pool / Task Logs)."""
+    onto the scope-aware primary nav links (Campaigns / Episodes)."""
     assert 'id="scope-switcher"' not in client.get("/").text  # no channels → no switcher
     client.post("/channels/facebook", data={"channel_name": "Chan A", "page_id": "1", "page_access_token": "t"},
                 follow_redirects=False)
@@ -355,7 +355,7 @@ def test_scope_switcher_and_scoped_nav(client):
     home = client.get("/").text
     assert 'id="scope-switcher"' in home and "Chan A" in home
     scoped = client.get(f"/campaigns?channel={cid}").text
-    assert f'href="/assets?channel={cid}"' in scoped and f'href="/tasks?channel={cid}"' in scoped
+    assert f'href="/campaigns?channel={cid}"' in scoped and f'href="/episodes?channel={cid}"' in scoped
     assert f'value="{cid}" selected' in scoped  # the active channel is marked in the switcher
 
 

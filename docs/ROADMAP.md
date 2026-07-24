@@ -882,6 +882,20 @@ successor/tune logic was cruder than it needed to be.
   format/schedule/QC retained), the parent's playbook is fed to the designer, and it is fully
   fail-open: no key / over budget / AI error → today's plain clone. See ADR-048.
 
+## Navigation refactor — one rail, lenses inside their owner `WIP`
+A UX pass on the shell: the nav had 10 flat peers mixing places/states/tools, and mobile ran two
+competing menus (a bottom bar duplicating the drawer, "Home" vs "Dashboard" for one route).
+- **Phase 1 — nav shell** `DONE`: the global rail is now 6 destinations + a Setup cluster (was 10).
+  The render log + Review queue are facets of **Episodes**; the Calendar is a view of **Campaigns** —
+  demoted from the rail but still reached contextually. Two-level active state lights the parent on a
+  child route (`/calendar`→Campaigns, `/assets`→Episodes) via `nav in [...]`. Mobile is now ONE nav
+  source: the bottom bar mirrors the rail's top (Dashboard/Campaigns/Episodes/Auto) + a **More**
+  button opening the same drawer; the duplicated/renamed items are gone. See ADR-049. Browser-verified
+  desktop + 375px; 224 tests (1 updated in lockstep), ruff clean, docs green.
+- Phase 2 — content unification: Calendar↔Campaigns view toggle; Episodes as the clear home for the
+  render log + Review (scope-aware); facet breadcrumbs `TODO`
+- Phase 3 — traceability: breadcrumbs + "up" path on every facet/child page, scope chip `TODO`
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

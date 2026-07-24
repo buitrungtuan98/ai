@@ -929,3 +929,22 @@ sharp edges found while auditing (an arbitrary tune target; a dumb clone) using 
 already computes (classification, retention drop-offs, the playbook) — no new quota, no new tables,
 every addition fail-open so the operations loop is never put at risk by a learning/observability
 feature.
+
+### ADR-049 — Navigation: one rail of destinations, lenses live inside their owner
+**Decision:** separate navigation by job. The global rail carries only top-level DESTINATIONS you go
+*to* — Dashboard, Autopilot, Campaigns, Episodes, Channels, and a Setup cluster (Credentials,
+Settings) — down from 10 flat items. Anything that is a *lens/state of an object* is demoted inside
+its owner: the render log (`/tasks`) and the Review queue (`/assets`) are facets of **Episodes**; the
+week planner (`/calendar`) is a view of **Campaigns**. Those routes are unchanged and still reachable
+contextually (links from Episodes/Campaigns + the dashboard triage); they simply leave the rail. The
+rail uses **two-level active state** — a child route lights its parent (on `/calendar` the rail shows
+Campaigns active; on `/assets` it shows Episodes) — via `nav in [...]` membership. Mobile collapses
+to ONE nav source: the bottom bar is a strict subset of the rail's top (identical labels + active
+logic) plus a **More** button that opens the *same* drawer; the old dual system (a bottom bar that
+duplicated drawer items, "Home" vs "Dashboard" for one route) is gone. One attention-badge story
+(`attn`) is shown identically on the hamburger and the Dashboard rail item.
+**Why:** the rail mixed places, object-states and tools into one flat list and then duplicated a
+slice of it on mobile — the exact "navigation overlap / bloat / lost context" the operator reported.
+Collapsing to destinations-only, demoting lenses into their parent, and lighting the parent on child
+routes makes "where am I / how do I get back" answerable at a glance, and gives mobile a single,
+predictable menu instead of two competing ones.

@@ -31,17 +31,17 @@
         {% for c in _channels %}<option value="{{ c.id }}" {{ 'selected' if scope_cid == c.id|string }}>{{ c.name }}</option>{% endfor %}
       </select>
       {% endif %}
+      {# Six primary destinations. Lenses on the same objects live INSIDE their owner: the render
+         log + Review queue are facets of Episodes; the Calendar is a view of Campaigns — so the
+         rail highlights the parent even on those child routes (two-level active state). #}
       <nav class="nav" aria-label="Primary">
         <p class="nav-group">Monitor</p>
-        <a href="/" title="Dashboard" class="{{ 'active' if nav=='dashboard' else '' }}"><span class="ico">▚</span> <span class="nav-text">Dashboard</span></a>
-        <a href="/tasks{{ scope_q }}" title="Task Logs" class="{{ 'active' if nav=='tasks' else '' }}"><span class="ico">≣</span> <span class="nav-text">Task Logs</span> <span class="nav-badge" data-badge="failed" hidden></span></a>
-        <a href="/calendar{{ scope_q }}" title="Calendar" class="{{ 'active' if nav=='calendar' else '' }}"><span class="ico">▧</span> <span class="nav-text">Calendar</span></a>
-        <p class="nav-group">Content</p>
-        <a href="/episodes{{ scope_q }}" title="Episodes" class="{{ 'active' if nav=='episodes' else '' }}"><span class="ico">🎬</span> <span class="nav-text">Episodes</span></a>
-        <a href="/campaigns{{ scope_q }}" title="Campaigns" class="{{ 'active' if nav=='campaigns' else '' }}"><span class="ico">▤</span> <span class="nav-text">Campaigns</span></a>
-        <a href="/assets{{ scope_q }}" title="Review — rendered videos awaiting approval" class="{{ 'active' if nav=='assets' else '' }}"><span class="ico">▦</span> <span class="nav-text">Review</span> <span class="nav-badge review" data-badge="awaiting_review" hidden></span></a>
-        <a href="/channels" title="Channels" class="{{ 'active' if nav=='channels' else '' }}"><span class="ico">◉</span> <span class="nav-text">Channels</span></a>
-        <a href="/autopilot" title="Autopilot — AI channel manager: proposals to approve + decision log" class="{{ 'active' if nav=='autopilot' else '' }}"><span class="ico">🤖</span> <span class="nav-text">Autopilot</span> <span class="nav-badge" data-badge="autopilot_proposed" hidden></span></a>
+        <a href="/" title="Dashboard — daily overview &amp; triage" class="{{ 'active' if nav=='dashboard' else '' }}"><span class="ico">▚</span> <span class="nav-text">Dashboard</span> <span class="nav-badge" data-badge="attn" hidden></span></a>
+        <a href="/autopilot" title="Autopilot — AI channel manager: proposals + decision log" class="{{ 'active' if nav=='autopilot' else '' }}"><span class="ico">🤖</span> <span class="nav-text">Autopilot</span> <span class="nav-badge" data-badge="autopilot_proposed" hidden></span></a>
+        <p class="nav-group">Build</p>
+        <a href="/campaigns{{ scope_q }}" title="Campaigns — build, schedule &amp; the Calendar view" class="{{ 'active' if nav in ['campaigns', 'calendar'] else '' }}"><span class="ico">▤</span> <span class="nav-text">Campaigns</span></a>
+        <a href="/episodes{{ scope_q }}" title="Episodes — every video, with Review &amp; the render log" class="{{ 'active' if nav in ['episodes', 'assets', 'tasks'] else '' }}"><span class="ico">🎬</span> <span class="nav-text">Episodes</span> <span class="nav-badge review" data-badge="awaiting_review" hidden></span></a>
+        <a href="/channels" title="Channels — connected YouTube / Facebook accounts" class="{{ 'active' if nav=='channels' else '' }}"><span class="ico">◉</span> <span class="nav-text">Channels</span></a>
         <p class="nav-group">Setup</p>
         <a href="/credentials" title="Credentials" class="{{ 'active' if nav=='credentials' else '' }}"><span class="ico">⚿</span> <span class="nav-text">Credentials</span></a>
         <a href="/settings" title="Settings" class="{{ 'active' if nav=='settings' else '' }}"><span class="ico">⚙</span> <span class="nav-text">Settings</span></a>
@@ -62,12 +62,14 @@
     </main>
   </div>
 
-  {# Mobile bottom tab bar — one-thumb access to the Operator's most-used destinations. #}
+  {# Mobile bottom tab bar — a STRICT SUBSET of the rail's primary items (same labels, same active
+     logic) + a "More" button that opens the same drawer. One nav source of truth, no duplication. #}
   <nav class="tabbar" aria-label="Primary (mobile)">
-    <a href="/" class="{{ 'active' if nav=='dashboard' else '' }}"><span class="ico">▚</span><span>Home</span></a>
-    <a href="/episodes{{ scope_q }}" class="{{ 'active' if nav=='episodes' else '' }}"><span class="ico">🎬</span><span>Episodes</span></a>
-    <a href="/assets{{ scope_q }}" class="{{ 'active' if nav=='assets' else '' }}"><span class="ico">▦</span><span>Review</span><span class="nav-badge review" data-badge="awaiting_review" hidden></span></a>
-    <a href="/campaigns{{ scope_q }}" class="{{ 'active' if nav=='campaigns' else '' }}"><span class="ico">▤</span><span>Campaigns</span></a>
+    <a href="/" class="{{ 'active' if nav=='dashboard' else '' }}"><span class="ico">▚</span><span>Dashboard</span></a>
+    <a href="/campaigns{{ scope_q }}" class="{{ 'active' if nav in ['campaigns', 'calendar'] else '' }}"><span class="ico">▤</span><span>Campaigns</span></a>
+    <a href="/episodes{{ scope_q }}" class="{{ 'active' if nav in ['episodes', 'assets', 'tasks'] else '' }}"><span class="ico">🎬</span><span>Episodes</span><span class="nav-badge review" data-badge="awaiting_review" hidden></span></a>
+    <a href="/autopilot" class="{{ 'active' if nav=='autopilot' else '' }}"><span class="ico">🤖</span><span>Auto</span><span class="nav-badge" data-badge="autopilot_proposed" hidden></span></a>
+    <button type="button" class="tab-more" id="tabbar-more" aria-label="More navigation" aria-controls="sidebar"><span class="ico">☰</span><span>More</span></button>
   </nav>
 
   {# Accessible confirm dialog (replaces native confirm()) + transient toast region #}
