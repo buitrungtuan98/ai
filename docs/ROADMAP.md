@@ -800,7 +800,11 @@ A full-site review (13 pages × desktop/mobile + code checks) turned up a handfu
   campaign it created (Open →) in the decision log. (B3) the hub "Next post" cell reads "after
   review" for review-first campaigns instead of a bare "—". Verified: 198 tests (3 new — buffer-based
   count, stale-hint gate; api-summary test updated to the buffer source), ruff clean, docs green.
-- Batch M — channels declutter (disclosures closed by default + informative summaries + save flash) `TODO`
+- **Batch M — channels declutter** `DONE`: the Channels page was a wall of auto-opened forms (2,512px
+  tall for 3 channels). Profile + Autopilot disclosures are now closed by default with self-sufficient
+  summaries (`🌍 profile: <vision>` / `not set`; `🤖 ✈️ Full auto · every 3h · QC ≥7/≤4`), and saving a
+  profile or autopilot config shows a success banner. Page dropped to ~1,165px (−54%). Verified in a
+  browser; 198 tests, ruff clean, docs green.
 - Batch N — cleanup (dead code, autopilot badge, single fetch, cross-link) `TODO`
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)

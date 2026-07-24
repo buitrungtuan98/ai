@@ -7,6 +7,12 @@
   <button class="btn ghost" onclick="var d=document.getElementById('fb-form'); d.open=true; d.scrollIntoView({behavior:'smooth'})">+ Facebook Page</button>
 {% endcall %}
 
+{% if flash == 'profile' %}
+{% call ui.banner('success') %}✓ <b>Channel profile saved.</b> New campaigns on this channel now inherit its language, voice &amp; timezone, and AI Propose localizes to its audience.{% endcall %}
+{% elif flash == 'autopilot' %}
+{% call ui.banner('success') %}✓ <b>Autopilot settings saved.</b>{% endcall %}
+{% endif %}
+
 {% if total_all %}
 {{ ui.filter_bar('/channels', chips, current=status, q=q, placeholder='🔎 Search channels…') }}
 {% if channels %}
@@ -42,8 +48,8 @@
     {% if c.status.value != 'active' %}
     <p class="hint mt-sm">Re-authorise this channel to resume publishing — reconnect it via OAuth above.</p>
     {% endif %}
-    <details class="disclosure mt-sm" {% if pr %}open{% endif %}>
-      <summary>🌍 Channel profile{% if pr.vision %}: <b>{{ pr.vision }}</b>{% endif %}</summary>
+    <details class="disclosure mt-sm">
+      <summary>🌍 Channel profile{% if pr.vision %}: <b>{{ pr.vision }}</b>{% elif not pr %} — <span class="meta">not set</span>{% endif %}</summary>
       <div class="disclosure-body">
         <p class="hint">Who this channel is for. Seeds every new campaign (language, voice, timezone) and tells AI Propose &amp; the autopilot strategist the channel's audience &amp; vision — so each video is localized to its country. Uploads declare the spoken language automatically.</p>
         <details class="disclosure"><summary>One-time localization checklist (do this in the platform)</summary>
@@ -84,11 +90,11 @@
     {% set a = ap.get(c.id, {}) %}
     {% set amode = a.get('mode', 'off') if a.get('mode', 'off') in ['off','copilot','autopilot'] else 'off' %}
     {% set alabels = {'off': 'Off', 'copilot': '🧭 Copilot', 'autopilot': '✈️ Full auto'} %}
-    <details class="disclosure mt-sm ap-box" {% if amode != 'off' %}open{% endif %}>
-      <summary>🤖 Autopilot: <b>{{ alabels[amode] }}</b></summary>
+    {% set rv = a.get('review') or {} %}
+    <details class="disclosure mt-sm ap-box">
+      <summary>🤖 Autopilot: <b>{{ alabels[amode] }}</b>{% if amode != 'off' %} <span class="meta">· every {{ a.get('interval_hours', 3) }}h · QC ≥{{ rv.get('approve_min', 7) }}/≤{{ rv.get('reject_max', 4) }}</span>{% endif %}</summary>
       <div class="disclosure-body">
         <p class="hint">Let the AI run this channel from its data — review &amp; publish videos, auto-reject weak renders (with a reason that teaches the scriptwriter), retry failures, and recover missed slots. Reversible anytime.</p>
-        {% set rv = a.get('review') or {} %}
         <form method="post" action="/channels/{{ c.id }}/autopilot">
           {% call ui.field('Mode') %}
           <select name="mode">

@@ -501,7 +501,8 @@ _CHANNEL_STATUS_FILTERS = ("active", "expired")
 
 
 @app.get("/channels", response_class=HTMLResponse)
-def channels_page(request: Request, user: CurrentUser, db: DbDep, status: str = "", q: str = ""):
+def channels_page(request: Request, user: CurrentUser, db: DbDep, status: str = "", q: str = "",
+                  flash: str = ""):
     status_counts = {s.value: n for s, n in db.execute(
         select(Channel.status, func.count())
         .where(Channel.user_id == user.id).group_by(Channel.status)).all()}
@@ -531,7 +532,8 @@ def channels_page(request: Request, user: CurrentUser, db: DbDep, status: str = 
         request, "channels.html",
         {"request": request, "user": user, "channels": channels, "nav": "channels",
          "camp_counts": camp_counts, "chips": chips, "status": status, "q": q, "total_all": total_all,
-         "ap": {c.id: (c.autopilot_json or {}) for c in channels}},
+         "ap": {c.id: (c.autopilot_json or {}) for c in channels},
+         "flash": flash if flash in ("profile", "autopilot") else ""},
     )
 
 
@@ -654,7 +656,7 @@ def set_channel_profile(channel=Depends(get_owned_channel), db=Depends(get_db),
         p["vision"] = vision.strip()[:200]
     channel.profile_json = p or None
     db.commit()
-    return RedirectResponse("/channels", status_code=303)
+    return RedirectResponse("/channels?flash=profile", status_code=303)
 
 
 @app.post("/channels/{channel_id}/autopilot")
@@ -676,7 +678,7 @@ def set_channel_autopilot(channel=Depends(get_owned_channel), db=Depends(get_db)
         cfg["review"] = review
     channel.autopilot_json = cfg
     db.commit()
-    return RedirectResponse("/channels", status_code=303)
+    return RedirectResponse("/channels?flash=autopilot", status_code=303)
 
 
 # ── Google OAuth2 web flow (connect a YouTube channel) ───────────────────────
