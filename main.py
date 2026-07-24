@@ -305,6 +305,12 @@ def _task_counts(db, user_id: int) -> dict:
     }
 
 
+def _autopilot_proposed_count(db, user_id: int) -> int:
+    """Open autopilot proposals awaiting a decision — feeds the Autopilot nav badge + triage inbox."""
+    return db.scalar(select(func.count()).select_from(AutopilotAction).where(
+        AutopilotAction.user_id == user_id, AutopilotAction.status == "proposed")) or 0
+
+
 def _buffer_counts(db, user_id: int) -> dict:
     """Per-campaign buffer tallies for the rollup links: {campaign_id: {ready, awaiting_review}}."""
     rows = db.execute(
@@ -474,8 +480,7 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
                 review_ids[(t.campaign_id, t.episode_number)] = t.id
     # "Running now" panel: one row per active campaign (what each is doing + when it posts next).
     active_campaigns = [c for c in campaigns if c.status == CampaignStatus.active]
-    autopilot_proposed = db.scalar(select(func.count()).select_from(AutopilotAction).where(
-        AutopilotAction.user_id == user.id, AutopilotAction.status == "proposed")) or 0
+    autopilot_proposed = _autopilot_proposed_count(db, user.id)
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -1720,6 +1725,7 @@ def campaign_overview(request: Request, user: CurrentUser, db: DbDep,
     ).all()
     measured = [t for t in episodes if t.stats_json]
     best = max(measured, key=lambda t: t.stats_json.get("avg_pct_viewed", 0), default=None)
+    hub = _hub_context(db, user, campaign)  # single channel fetch, reused for the audience line
     return templates.TemplateResponse(
         request, "performance.html",
         {"request": request, "user": user, "nav": "campaigns", "campaign": campaign,
@@ -1731,9 +1737,8 @@ def campaign_overview(request: Request, user: CurrentUser, db: DbDep,
          "cls": autopilot.classify_campaigns(db, [campaign]).get(campaign.id),  # performance verdict
          "autopilot_min": autopilot.MIN_MEASURED,
          "audience": autopilot.audience_summary(  # measured viewer country vs the channel target
-             episodes, db.get(Channel, campaign.channel_id).profile_json
-             if db.get(Channel, campaign.channel_id) else None),
-         "hub_active": "overview", **_hub_context(db, user, campaign)},
+             episodes, hub["channel"].profile_json if hub["channel"] else None),
+         "hub_active": "overview", **hub},
     )
 
 
@@ -1765,27 +1770,6 @@ def reset_learning(db: DbDep, campaign=Depends(get_owned_campaign)):
 
 
 # ── Content calendar ─────────────────────────────────────────────────────────
-def upcoming_slot_cells(campaign: Campaign, days: int = 7, week: int = 0) -> list[list[str]] | None:
-    """Per-day slot times for `days` days starting `week` weeks from now, in the campaign's own
-    timezone, honoring its posting_days. None = the campaign doesn't slot-publish (continuous/review)."""
-    from datetime import timedelta
-
-    from workers.scheduler import WEEKDAY_KEYS, local_now
-
-    cfg = campaign.config_json or {}
-    slots = sorted(cfg.get("posting_slots") or [])
-    if not slots or not cfg.get("auto_publish", True):
-        return None
-    allowed = cfg.get("posting_days") or []
-    start = local_now(cfg.get("timezone")) + timedelta(days=week * 7)
-    cells: list[list[str]] = []
-    for d in range(days):
-        day = start + timedelta(days=d)
-        key = WEEKDAY_KEYS[day.weekday()]
-        cells.append(slots if (not allowed or key in allowed) else [])
-    return cells
-
-
 def _calendar_row_cells(campaign: Campaign, ready_eps: list[int], week: int = 0,
                         days: int = 7) -> list[dict] | None:
     """Richer calendar cells for the week planner: per day, per slot, what will HAPPEN — not just
@@ -1964,7 +1948,8 @@ def api_summary(user: CurrentUser, db: DbDep):
         select(func.count()).select_from(Campaign).where(
             Campaign.user_id == user.id, Campaign.status == CampaignStatus.active)) or 0
     return {"health": _system_health(db, user), "counts": _task_counts(db, user.id),
-            "channels": channels, "active_campaigns": active}
+            "channels": channels, "active_campaigns": active,
+            "autopilot_proposed": _autopilot_proposed_count(db, user.id)}
 
 
 @app.get("/api/search")

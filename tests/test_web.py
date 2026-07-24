@@ -747,9 +747,9 @@ def test_calendar_page_and_slot_cells(client):
     db.commit()
     db.refresh(cam)
 
-    cells = main.upcoming_slot_cells(cam)
-    assert cells[0] == ["21:00"]                       # today is an allowed day
-    assert [] in cells                                  # other days are gated off
+    rows = main._calendar_row_cells(cam, [])
+    assert rows[0]["gate"] is False and rows[0]["slots"][0]["t"] == "21:00"  # today is allowed
+    assert any(r["gate"] for r in rows)                # other days are gated off
     db.close()
 
     page = client.get("/calendar")
@@ -1350,7 +1350,8 @@ def test_api_summary_snapshot(client):
     db.close()
 
     d = client.get("/api/summary").json()
-    assert set(d) == {"health", "counts", "channels", "active_campaigns"}
+    assert set(d) == {"health", "counts", "channels", "active_campaigns", "autopilot_proposed"}
+    assert d["autopilot_proposed"] == 0  # no open proposals seeded
     assert d["counts"]["failed"] == 1 and d["counts"]["awaiting_review"] == 1
     assert d["channels"] == 1  # _seed_campaign creates one channel
     assert set(d["health"]) >= {"redis", "worker", "buffer_ready", "ai_budget"}

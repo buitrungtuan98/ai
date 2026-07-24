@@ -183,6 +183,7 @@
     var c = d.counts || {};
     setBadge("failed", c.failed || 0);
     setBadge("awaiting_review", c.awaiting_review || 0);
+    setBadge("autopilot_proposed", d.autopilot_proposed || 0);
     setBadge("attn", (c.failed || 0) + (c.awaiting_review || 0));
     setLive("channels", d.channels);
     setLive("active_campaigns", d.active_campaigns);

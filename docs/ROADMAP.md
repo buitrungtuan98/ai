@@ -790,7 +790,7 @@ agree. ADR-045.
   idempotent), ruff clean, docs guard green; hub line + acknowledge-only inbox advisory checked in a
   browser (VN channel reaching US → off-target). Live geography fetch is operator-verified (RUNBOOK).
 
-## UX/logic sweep — bugs, channels declutter, cleanup `WIP`
+## UX/logic sweep — bugs, channels declutter, cleanup `DONE`
 A full-site review (13 pages × desktop/mobile + code checks) turned up a handful of real issues.
 - **Batch L — bugs** `DONE`: (A1) "awaiting review" now has ONE source of truth — the buffer review
   queue — so the dashboard tile / sidebar badge / `/api/summary` can no longer disagree with the
@@ -805,7 +805,16 @@ A full-site review (13 pages × desktop/mobile + code checks) turned up a handfu
   summaries (`🌍 profile: <vision>` / `not set`; `🤖 ✈️ Full auto · every 3h · QC ≥7/≤4`), and saving a
   profile or autopilot config shows a success banner. Page dropped to ~1,165px (−54%). Verified in a
   browser; 198 tests, ruff clean, docs green.
-- Batch N — cleanup (dead code, autopilot badge, single fetch, cross-link) `TODO`
+- **Batch N — cleanup** `DONE`: (A4) removed the dead `upcoming_slot_cells` helper (only a test still
+  referenced it after the calendar moved onto `_calendar_row_cells` in batch H); the test now asserts
+  the real row-cell shape (today allowed, other days gated). (C1) `/api/summary` now returns
+  `autopilot_proposed`, feeding a new Autopilot sidebar badge so open AI proposals are visible from
+  any page — the count comes from one shared `_autopilot_proposed_count` helper (DRY with the
+  dashboard route). (C2) the campaign Overview route fetched the parent `Channel` three times
+  (`_hub_context` + twice inline for the audience line) — now one fetch, reused. (C3) the Credentials
+  page links across to Settings (keys ↔ defaults/model are adjacent concerns). Verified in a browser
+  (badge shows on the sidebar, Settings cross-link renders, overview pages HTTP 200); 198 tests, ruff
+  clean, docs green.
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
