@@ -790,6 +790,19 @@ agree. ADR-045.
   idempotent), ruff clean, docs guard green; hub line + acknowledge-only inbox advisory checked in a
   browser (VN channel reaching US → off-target). Live geography fetch is operator-verified (RUNBOOK).
 
+## UX/logic sweep — bugs, channels declutter, cleanup `WIP`
+A full-site review (13 pages × desktop/mobile + code checks) turned up a handful of real issues.
+- **Batch L — bugs** `DONE`: (A1) "awaiting review" now has ONE source of truth — the buffer review
+  queue — so the dashboard tile / sidebar badge / `/api/summary` can no longer disagree with the
+  Review page + triage inbox (they were task-status vs buffer-status). (A2) the "🤖 AI recommends"
+  hint on a Review card shows only while that channel's autopilot is on (a stale hint no longer
+  lingers after autopilot is switched off). (A3) an autopilot successor action now links to the
+  campaign it created (Open →) in the decision log. (B3) the hub "Next post" cell reads "after
+  review" for review-first campaigns instead of a bare "—". Verified: 198 tests (3 new — buffer-based
+  count, stale-hint gate; api-summary test updated to the buffer source), ruff clean, docs green.
+- Batch M — channels declutter (disclosures closed by default + informative summaries + save flash) `TODO`
+- Batch N — cleanup (dead code, autopilot badge, single fetch, cross-link) `TODO`
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

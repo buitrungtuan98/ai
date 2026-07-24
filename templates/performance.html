@@ -15,7 +15,7 @@
     <div class="stat"><div class="n {{ 'work' if op and op.rendering }}">{% if op and op.rendering %}Ep {{ op.rendering.episode_number }}{% if op.rendering.progress_pct %} · {{ op.rendering.progress_pct }}%{% endif %}{% else %}—{% endif %}</div><div class="l">Rendering now</div></div>
     <div class="stat"><div class="n">{{ op.queued if op else 0 }}</div><div class="l">Queued</div></div>
     <div class="stat"><div class="n {{ 'bad' if op and op.next_slot and op.ready == 0 }}">{{ op.ready if op else 0 }}</div><div class="l">Ready buffer</div></div>
-    <div class="stat"><div class="n">{% if op and op.next_slot %}{{ op.next_slot.when }}{% else %}—{% endif %}</div><div class="l">Next post</div></div>
+    <div class="stat"><div class="n">{% if op and op.next_slot %}{{ op.next_slot.when }}{% elif not campaign.config_json.get('auto_publish', true) %}after review{% else %}—{% endif %}</div><div class="l">Next post</div></div>
   </div>
   {% if campaign.status.value == 'pending' %}
   <p class="hint mt-sm">Not started yet. <b>▶ Start</b> (top-right) begins pre-rendering episodes into the buffer; they then run on the schedule above.</p>

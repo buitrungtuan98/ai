@@ -373,6 +373,57 @@ def test_api_search_across_types(client):
     assert 'id="cmdk"' in home and 'id="cmdk-open"' in home
 
 
+def test_awaiting_review_count_is_buffer_based(client):
+    """The 'awaiting review' count is the buffer review queue, not task status — one source of truth,
+    so the dashboard tile can't disagree with the Review page / triage inbox."""
+    from database.db_session import SessionLocal
+    from database.models import BufferPoolItem, Task
+    from database.types import BufferStatus, TaskStatus
+
+    cam = _seed_campaign(client)
+    db = SessionLocal()
+    # A task marked AWAITING_REVIEW but with NO buffer item must NOT inflate the count.
+    db.add(Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=1,
+                status=TaskStatus.AWAITING_REVIEW))
+    db.commit()
+    db.close()
+    assert client.get("/api/summary").json()["counts"]["awaiting_review"] == 0
+
+    db = SessionLocal()
+    db.add(BufferPoolItem(campaign_id=cam.id, channel_id=cam.channel_id, episode_number=2,
+                          video_path="/x.mp4", status=BufferStatus.awaiting_review))
+    db.commit()
+    db.close()
+    assert client.get("/api/summary").json()["counts"]["awaiting_review"] == 1
+
+
+def test_stale_ai_hint_hidden_when_autopilot_off(client):
+    """The '🤖 AI recommends' hint on a Review card shows only while the channel's autopilot is on —
+    a hint left in metadata must not linger after autopilot is turned off."""
+    from database.db_session import SessionLocal
+    from database.models import BufferPoolItem, Channel, Task
+    from database.types import BufferStatus, TaskStatus
+
+    cam = _seed_campaign(client)
+    db = SessionLocal()
+    ch = db.get(Channel, cam.channel_id)
+    db.add(Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=1,
+                status=TaskStatus.AWAITING_REVIEW))
+    db.add(BufferPoolItem(campaign_id=cam.id, channel_id=cam.channel_id, episode_number=1,
+                          video_path="/x.mp4", status=BufferStatus.awaiting_review,
+                          metadata_json={"ap_hint": {"action": "approve", "reason": "passed QC (9/10)"}}))
+    ch.autopilot_json = {"mode": "off"}
+    db.commit()
+    db.close()
+    assert "AI recommends approve" not in client.get("/assets").text  # off → no stale hint
+
+    db = SessionLocal()
+    db.get(Channel, cam.channel_id).autopilot_json = {"mode": "copilot"}
+    db.commit()
+    db.close()
+    assert "AI recommends approve" in client.get("/assets").text  # on → hint shown
+
+
 def test_autopilot_inbox_approve_and_dismiss(client):
     """The /autopilot inbox shows proposals; approve applies the change, dismiss resolves it."""
     from database.db_session import SessionLocal
@@ -1285,15 +1336,16 @@ def test_api_summary_snapshot(client):
     """The live snapshot feeding the header attention badge + dashboard auto-refresh reuses the
     dashboard helpers, so its counts match a full reload."""
     from database.db_session import SessionLocal
-    from database.models import Task
-    from database.types import TaskStatus
+    from database.models import BufferPoolItem, Task
+    from database.types import BufferStatus, TaskStatus
 
     cam = _seed_campaign(client)
     db = SessionLocal()
     db.add(Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=1,
                 status=TaskStatus.FAILED, progress_pct=40))
-    db.add(Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=2,
-                status=TaskStatus.AWAITING_REVIEW, progress_pct=100))
+    # "Awaiting review" is the buffer review queue (the single source of truth), not task status.
+    db.add(BufferPoolItem(campaign_id=cam.id, channel_id=cam.channel_id, episode_number=2,
+                          video_path="/x.mp4", status=BufferStatus.awaiting_review))
     db.commit()
     db.close()
 

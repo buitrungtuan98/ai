@@ -290,10 +290,17 @@ def _task_counts(db, user_id: int) -> dict:
         select(Task.status, func.count()).where(Task.user_id == user_id).group_by(Task.status)
     ).all()
     by_status = {status: count for status, count in rows}
+    # "Awaiting review" is the buffer-pool review queue (what the Review page + triage inbox act on),
+    # NOT the task-status count — the two can diverge, so there is ONE source of truth here.
+    awaiting = db.scalar(
+        select(func.count()).select_from(BufferPoolItem)
+        .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
+        .where(Campaign.user_id == user_id, BufferPoolItem.status == BufferStatus.awaiting_review)
+    ) or 0
     return {
         "published": by_status.get(TaskStatus.COMPLETED, 0),
         "working": sum(by_status.get(s, 0) for s in _WORKING_STATUSES),
-        "awaiting_review": by_status.get(TaskStatus.AWAITING_REVIEW, 0),
+        "awaiting_review": awaiting,
         "failed": by_status.get(TaskStatus.FAILED, 0),
     }
 
