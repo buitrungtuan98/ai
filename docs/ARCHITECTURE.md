@@ -907,3 +907,25 @@ quota we spend on the average), the scene map is already computed during render 
 and the analysis is deterministic — so a genuinely useful learning signal is added for free, inside
 the existing loop, with no new quota, no new AI call, and full fail-open behaviour (a missing curve or
 scene map simply omits the insight).
+
+### ADR-048 — Autopilot glass box + smarter decisions
+**Decision:** make the autopilot observable and sharpen two of its choices, without changing its
+safety envelope (ADR-044). (Glass box) Every autonomous operational decision — approve, reject,
+escalate, retry, catch-up — is now recorded as a `done` `AutopilotAction` carrying its reason +
+evidence (`_log_action`); escalations are logged once on the hint transition, not every cadence tick;
+the operational log auto-prunes after 90 days. Each pass writes a per-channel heartbeat (`last_run`
+time + one-line summary) into `Channel.autopilot_json`, so the UI distinguishes "ran, nothing to do"
+from "never ran" (worker down) — the `/autopilot` page is now a status strip + proposals + a
+paginated activity feed, and the Channels page shows the same heartbeat. (Smarter) The weekly
+strategist targets the WEAKEST measured campaign, not `campaigns[0]`, and its scorecard carries that
+campaign's retention drop-off notes so the tweak addresses where viewers actually leave. A successor
+is now an AI-designed fresh angle that carries the proven formula (base = parent config; the AI
+freshens only the creative layer; the parent playbook is fed in as context), budget-guarded and
+fail-open to the previous plain-clone behaviour.
+**Why:** the operator's #1 complaint was that autopilot's work was invisible ("I don't see the
+Autopilot work") and its reasoning unrecorded — trust in an autonomous system requires seeing what it
+did and why, and a way to tell it apart from not running at all. The two decision improvements remove
+sharp edges found while auditing (an arbitrary tune target; a dumb clone) using signals the system
+already computes (classification, retention drop-offs, the playbook) — no new quota, no new tables,
+every addition fail-open so the operations loop is never put at risk by a learning/observability
+feature.

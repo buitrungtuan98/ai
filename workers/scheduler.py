@@ -604,17 +604,66 @@ def autopilot_propose_channel(db, channel, now: datetime | None = None) -> int:
     return filed
 
 
+_SUCCESSOR_CREATIVE_KEYS = ("persona", "style_examples", "catchphrase_open", "catchphrase_close",
+                            "continuity", "script_depth", "caption_theme", "color_grade",
+                            "music_mood", "cta")
+
+
+def _design_successor(db, parent):
+    """S5: one budget-guarded AI call designing a FRESH successor angle that carries the parent's
+    proven formula (its playbook + the channel profile). Returns a CampaignProposal or None (no
+    key / over the daily budget / AI error) — the caller then falls back to a plain clone."""
+    from core import ai_engine
+    from core.usage import ai_calls_today
+
+    user = db.get(User, parent.user_id)
+    key = (user.gemini_api_key if user else None) or settings.GEMINI_API_KEY
+    if not key:
+        return None
+    budget = ((user.settings_json or {}).get("ai_daily_budget") if user else None) \
+        or settings.GEMINI_DAILY_BUDGET
+    if budget and ai_calls_today() >= budget * 0.8:
+        return None  # budget reserve — a successor design never eats the quota rendering needs
+    channel = db.get(Channel, parent.channel_id)
+    pcfg = parent.config_json or {}
+    playbook = (parent.learning_json or {}).get("playbook") or []
+    context = (f'This is a successor to the proven series "{parent.topic_name}" — keep what works but '
+               "give it a genuinely fresh angle, not a rerun.")
+    if playbook:
+        context += " Proven lessons to carry forward: " + "; ".join(playbook[:5]) + "."
+    try:
+        return ai_engine.propose_campaign(
+            topic=parent.topic_name, language=pcfg.get("language"),
+            video_format=pcfg.get("video_format", "short"),
+            profile=(channel.profile_json if channel else None),
+            api_key=key, model=(user.gemini_model if user else None) or settings.GEMINI_MODEL,
+            nonce=parent.id, extra_context=context)
+    except Exception:  # noqa: BLE001 — design is an enhancement; a successor is always created
+        logger.warning("Successor design failed for campaign %s — cloning instead", parent.id,
+                       exc_info=True)
+        return None
+
+
 def _create_successor(db, parent, *, auto_start: bool = False, review_first: bool = False) -> int:
-    """A successor = a clone of a proven campaign's config (same persona/voice/format/schedule),
-    titled "<parent> II". Copilot-approved → PENDING for the operator to start. Full-auto →
-    auto_start + review_first: it begins rendering but its first videos wait for review ("training
-    wheels", ADR-044) even in full-auto, so the operator sees the new campaign's quality before it
-    ever self-publishes. Deterministic, 0-AI, reversible. Returns the new campaign id."""
+    """A successor carries a proven campaign's FORMULA into a fresh campaign. The base is the parent's
+    config (voice/format/schedule/QC/branding — what works); an optional AI design pass (S5) freshens
+    the creative layer (topic, persona, catchphrases, caption/grade) while keeping that formula, and
+    falls back to a plain "<parent> II" clone when AI is unavailable. Copilot-approved → PENDING for
+    the operator to start. Full-auto → auto_start + review_first: it renders but its first videos wait
+    for review ("training wheels", ADR-044). Reversible. Returns the new campaign id."""
     config = dict(parent.config_json or {})
+    topic = (parent.topic_name + " II")[:255]
+    proposal = _design_successor(db, parent)
+    if proposal is not None:
+        topic = (proposal.topic_name or topic)[:255]
+        for k in _SUCCESSOR_CREATIVE_KEYS:  # overlay only the creative layer; keep the proven formula
+            v = getattr(proposal, k, None)
+            if v:
+                config[k] = v
     if review_first:
         config["auto_publish"] = False  # training wheels: gate the new campaign's output on review
     new = Campaign(user_id=parent.user_id, channel_id=parent.channel_id,
-                   topic_name=(parent.topic_name + " II")[:255],
+                   topic_name=topic,
                    total_episodes=parent.total_episodes,
                    status=CampaignStatus.active if auto_start else CampaignStatus.pending,
                    config_json=config)
@@ -727,18 +776,28 @@ def autopilot_strategist_channel(db, user, channel, respect_cadence: bool = True
         Campaign.channel_id == channel.id, Campaign.status == CampaignStatus.active)).all()
     if not campaigns:
         return 0
-    target = campaigns[0]
+    cls = autopilot.classify_campaigns(db, campaigns)
+    # S6: tune the WEAKEST measured campaign — the one that actually needs help — not an arbitrary
+    # campaigns[0]. Fall back to the first campaign when nothing has measured retention yet.
+    measured = [c for c in campaigns if cls[c.id].get("retention") is not None]
+    target = min(measured, key=lambda c: cls[c.id]["retention"]) if measured else campaigns[0]
     if db.scalar(select(AutopilotAction).where(
             AutopilotAction.campaign_id == target.id, AutopilotAction.kind == "tune",
             AutopilotAction.status == "proposed").limit(1)):
         return 0  # don't stack tune proposals
-    cls = autopilot.classify_campaigns(db, campaigns)
+    # S4: the target's retention drop-off findings (where viewers leave) — so the strategist reasons
+    # about WHICH scene types to fix, not just averages. Zero extra API calls (reuses stored data).
+    drop_offs = [t.stats_json["drop_summary"]
+                 for t in db.scalars(select(Task).where(Task.campaign_id == target.id)).all()
+                 if (t.stats_json or {}).get("drop_summary")]
     scorecard = {
         "channel": channel.channel_name,
         "profile": channel.profile_json or {},  # audience/vision/style/language — the channel persona
         "playbook": (target.learning_json or {}).get("playbook"),
+        "tuning": target.topic_name,  # the weakest campaign, the one this tune targets
         "campaigns": [{"topic": c.topic_name, "verdict": cls[c.id]["label"],
                        "retention": cls[c.id]["retention"]} for c in campaigns],
+        "retention_drop_offs": drop_offs[:8],
         "current": {k: (target.config_json or {}).get(k)
                     for k in ("caption_theme", "music_mood", "rate_pct")},
     }
