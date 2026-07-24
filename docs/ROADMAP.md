@@ -841,7 +841,13 @@ across footage/encode/learning.
   lead clip. (P4) smart thumbnail — with the duration known, the cover is the sharpest/most-colourful
   of 5 sampled frames (edge + colour score) instead of one blind mid-video grab. All zero-cost,
   CPU-safe, fail-open. 210 tests (5 new), ruff clean, docs green.
-- Batch Q — encode & finish polish (lanczos + CRF, faststart, long-form fade-out) `TODO`
+- **Batch Q — encode & finish polish** `DONE`: (Q1) scene scaling uses `lanczos` and CRF drops 23→21
+  — a sharper source survives the platforms' re-encode better (~+20% file, same speed class). (Q2)
+  the final master gets `+faststart` (moov atom up front) so the Review player + platforms start
+  streaming instantly. (Q3) long-form fades video+audio over the last scene's final 1.5s for a real
+  ending, riding the existing encode (no new pass); shorts stay abrupt so the last-frame→first-frame
+  loop drives rewatches. See ADR-046. 211 tests (1 new), ruff clean, docs green; the real ffmpeg path
+  is exercised by the Docker/CI integration test (skipped in this sandbox — no ffmpeg).
 - Batch R — retention-curve learning (per-scene durations, retention curve fetch, drop-point
   analysis fed to the playbook distiller) `TODO`
 

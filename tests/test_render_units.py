@@ -174,15 +174,35 @@ def test_voice_check_flags_broken_tts(monkeypatch):
 def test_build_concat_args_copy_and_loudnorm():
     from core.video_factory import LOUDNORM_FILTER, build_concat_args
 
-    # loudnorm off → pure stream copy, nothing re-encoded.
+    # loudnorm off → pure stream copy, nothing re-encoded; +faststart for instant preview.
     assert build_concat_args("l.txt", "m.mp4", loudnorm=False) == [
-        "-f", "concat", "-safe", "0", "-i", "l.txt", "-c", "copy", "m.mp4"]
+        "-f", "concat", "-safe", "0", "-i", "l.txt", "-c", "copy",
+        "-movflags", "+faststart", "m.mp4"]
 
     # Default: -14 LUFS normalization — audio-only re-encode, video still copied.
     args = build_concat_args("l.txt", "m.mp4")
     assert args[args.index("-af") + 1] == LOUDNORM_FILTER
     assert args[args.index("-c:v") + 1] == "copy"
+    assert args[args.index("-movflags") + 1] == "+faststart"  # moov atom up front
     assert "loudnorm=I=-14" in LOUDNORM_FILTER
+
+
+def test_scene_encode_quality_and_fade():
+    from core.video_factory import LONG_PROFILE, build_scene_args
+
+    a = build_scene_args(["c.mp4"], "a.mp3", "s.ass", "o.mp4", 5.0, None)
+    fc = a[a.index("-filter_complex") + 1]
+    assert "flags=lanczos" in fc                    # sharper upscaling than default bilinear
+    assert a[a.index("-crf") + 1] == "21"           # higher quality than the old 23
+    assert "1:a" in a and "afade" not in fc         # no fade by default: audio mapped straight
+
+    # fade_out_s > 0 fades video + audio over the tail (used on the last long-form scene).
+    b = build_scene_args(["c.mp4"], "a.mp3", "s.ass", "o.mp4", 10.0, None,
+                         profile=LONG_PROFILE, fade_out_s=1.5)
+    fcb = b[b.index("-filter_complex") + 1]
+    assert "fade=t=out:st=8.500:d=1.500" in fcb     # video fades over the last 1.5s
+    assert "afade=t=out:st=8.500:d=1.500" in fcb    # audio fades in lockstep
+    assert "[aout]" in b and "1:a" not in b         # audio now comes from the faded chain
 
 
 def test_build_concat_args_with_music_keeps_video_copy():

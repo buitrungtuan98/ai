@@ -870,3 +870,22 @@ operator's head into something the whole system acts on — for free (the profil
 calls we already make; verification reuses the Analytics quota we already spend on retention). All
 inputs are validated/whitelisted (language, voice against the TTS catalog, timezone via ZoneInfo) so
 a bad value is dropped, never stored, and can never break rendering or the scheduler.
+
+### ADR-046 — Output-quality tuning: sharper footage, instant preview, format-aware endings
+**Decision:** a round of zero-cost, CPU-only render-quality improvements that change no architecture,
+only how the existing single-pass encode is parameterised. (Footage) `pexels._best_file` now picks
+the rendition matching the OUTPUT orientation and the smallest one clearing the 1080 short-side floor
+— fixing a real bug where long-form 16:9 could get a portrait rendition (cropped to a strip) and every
+clip pulled the largest (4K) file, wasting bandwidth and ARM decode; sub-floor clips sort last so we
+never upscale to soft footage. Footage dedupe now also spans scenes WITHIN an episode (a growing
+seen-set), not just across episodes. (Encode) scene scaling uses `lanczos` and CRF drops 23→21 — a
+sharper source survives the platforms' own re-encode better, at ~+20% file size and the same speed
+class. (Finish) the final master gets `+faststart` (moov atom up front) so the Review player and the
+platforms start streaming immediately. (Ending) long-form fades video+audio over the final 1.5s of
+the last scene — but SHORTS deliberately stay abrupt, because a Short's last frame cutting back to its
+first is a seamless loop, and loop rewatches are exactly the retention signal the algorithm rewards.
+**Why:** these are the highest-leverage quality wins that don't spend a cent or a second of extra CPU
+and don't touch the render-concurrency-1 / CPU-only constraints — the fade rides the last scene's
+existing encode (no new pass), faststart is a cheap atom move on a stream copy, and the footage/scale
+changes are pure parameter choices. Everything fails open: a bad candidate frame, a missing rendition,
+or a short final scene each degrade to the prior behaviour rather than failing the render.

@@ -199,12 +199,16 @@ def build_scene_args(
     color_grade: str | None = None,
     shot_durations: list[float] | None = None,
     profile: RenderProfile = SHORT_PROFILE,
+    fade_out_s: float = 0.0,
 ) -> list[str]:
     """Build the ffmpeg args (after the `ffmpeg` binary) for one re-encoded scene.
 
     When `shot_durations` is given, each clip is trimmed to its shot length before scaling — this is
     what turns a pile of clips into an edited cut rhythm. Omit it (the default) for the legacy
-    play-each-clip-in-full behavior. `profile` sets the output geometry (default vertical 1080×1920)."""
+    play-each-clip-in-full behavior. `profile` sets the output geometry (default vertical 1080×1920).
+    `fade_out_s` > 0 fades video + audio out over the final seconds (used on the last long-form scene
+    for a real ending; shorts stay abrupt to drive loop rewatches). No extra pass — it rides this
+    scene's existing single encode."""
     branding = branding or Branding()
     w, h, fps = profile.width, profile.height, profile.fps
     args: list[str] = []
@@ -222,7 +226,7 @@ def build_scene_args(
     for i in range(len(clip_paths)):
         trim = f"trim=0:{shot_durations[i]:.3f}," if shot_durations else ""
         filters.append(
-            f"[{i}:v]{trim}scale={w}:{h}:force_original_aspect_ratio=increase,"
+            f"[{i}:v]{trim}scale={w}:{h}:force_original_aspect_ratio=increase:flags=lanczos,"
             f"crop={w}:{h},setsar=1,fps={fps},setpts=PTS-STARTPTS[v{i}]"
         )
     if len(clip_paths) == 1:
@@ -252,12 +256,22 @@ def build_scene_args(
     if wm_idx is not None:
         filters.append(f"{cur}[{wm_idx}:v]overlay=W-w-40:40[vo]")
         cur = "[vo]"
-    filters.append(f"{cur}ass={ass_path}[vout]")
+    # Captions burn in last so text is never faded/graded/mirrored. When a tail fade is requested,
+    # it rides after the captions (whole composited frame fades) and the audio fades in lockstep.
+    if fade_out_s and fade_out_s > 0 and duration > 0:
+        st = max(0.0, duration - fade_out_s)
+        filters.append(f"{cur}ass={ass_path}[vcap]")
+        filters.append(f"[vcap]fade=t=out:st={st:.3f}:d={fade_out_s:.3f}[vout]")
+        filters.append(f"[{audio_idx}:a]afade=t=out:st={st:.3f}:d={fade_out_s:.3f}[aout]")
+        audio_map = "[aout]"
+    else:
+        filters.append(f"{cur}ass={ass_path}[vout]")
+        audio_map = f"{audio_idx}:a"
 
     args += [
         "-filter_complex", ";".join(filters),
-        "-map", "[vout]", "-map", f"{audio_idx}:a",
-        "-c:v", "libx264", "-preset", settings.FFMPEG_PRESET, "-crf", "23",
+        "-map", "[vout]", "-map", audio_map,
+        "-c:v", "libx264", "-preset", settings.FFMPEG_PRESET, "-crf", "21",
         "-pix_fmt", "yuv420p", "-r", str(fps), "-vsync", "cfr",
         "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "128k",
         "-t", f"{duration:.3f}", "-video_track_timescale", "30000",
@@ -280,14 +294,18 @@ def build_concat_args(
     re-encoded once when needed: to mix looped, ducked background music under the narration and/or
     to normalize the final mix to -14 LUFS (`loudnorm`), so every episode publishes at the same
     perceived volume."""
+    # +faststart moves the moov atom to the front so the Review-page player (and platforms) can
+    # start streaming immediately instead of waiting for the whole file. Cheap: no video re-encode.
     if not music_path and not loudnorm:
-        return ["-f", "concat", "-safe", "0", "-i", list_file, "-c", "copy", out_path]
+        return ["-f", "concat", "-safe", "0", "-i", list_file, "-c", "copy",
+                "-movflags", "+faststart", out_path]
     if not music_path:
         return [
             "-f", "concat", "-safe", "0", "-i", list_file,
             "-af", LOUDNORM_FILTER,
             "-map", "0:v", "-map", "0:a",
             "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-b:a", "128k",
+            "-movflags", "+faststart",
             out_path,
         ]
     out_label = "[mix]" if loudnorm else "[aout]"
@@ -310,6 +328,7 @@ def build_concat_args(
         "-filter_complex", mix,
         "-map", "0:v", "-map", "[aout]",
         "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-b:a", "128k", "-shortest",
+        "-movflags", "+faststart",
         out_path,
     ]
 
@@ -568,9 +587,12 @@ def produce(
             scene_out = ws.path(f"scene_{si}.mp4")
             # Motion effect seeded by episode so different episodes don't share an identical rhythm.
             effect = MOTION_EFFECTS[(motion_seed + si) % len(MOTION_EFFECTS)] if motion else None
+            # Long-form gets a real ending: fade the final scene's tail. Shorts stay abrupt so the
+            # last frame cuts back to the first — the seamless loop is what drives Shorts rewatches.
+            fade = min(1.5, d_i) if profile.name == "long" and si == len(plans) - 1 else 0.0
             args = build_scene_args(clip_paths, plan["audio"], ass_path, scene_out, d_i, branding,
                                     motion_effect=effect, color_grade=color_grade,
-                                    shot_durations=shot_durations, profile=profile)
+                                    shot_durations=shot_durations, profile=profile, fade_out_s=fade)
             run_ffmpeg(
                 args, total_duration=d_i,
                 on_progress=lambda p, s=si: report("scenes", 30 + (s + p / 100) / n_scenes * 70),
