@@ -421,11 +421,30 @@ def _proposable_voices() -> dict[str, list[str]]:
 PROPOSABLE_VOICES: dict[str, list[str]] = _proposable_voices()
 
 
+def _profile_line(profile: dict | None) -> str:
+    """A localization block from the channel profile (audience/vision/style) for the designer prompt —
+    so a proposal is written for THIS channel's country and audience, posting in their local evening."""
+    if not profile:
+        return ""
+    bits = []
+    if profile.get("vision"):
+        bits.append(f'This channel\'s vision: "{profile["vision"]}".')
+    if profile.get("audience"):
+        bits.append(
+            f"Audience/market: {profile['audience']} — write for THIS audience's language nuance, "
+            "cultural references and interests, and set the daily posting slot in that audience's "
+            "local prime-time evening (roughly 19:00–21:30 their time).")
+    if profile.get("style"):
+        bits.append(f"House style: {profile['style']}.")
+    return " ".join(bits)
+
+
 def propose_campaign(
     *,
     topic: str | None = None,
     language: str | None = None,
     video_format: str = "short",
+    profile: dict | None = None,
     api_key: str,
     model: str = DEFAULT_MODEL,
     nonce: int = 0,
@@ -435,12 +454,14 @@ def propose_campaign(
     against PROPOSABLE_VOICES (an invented voice is dropped to the language default). `video_format`
     ('short'|'long') is the operator's explicit choice — the prompt designs FOR it and it is forced
     onto the result, and durations are clamped to the format's real range so a long-video proposal
-    is genuinely long-form (16:9, minutes) rather than silently downgraded to a short."""
+    is genuinely long-form (16:9, minutes) rather than silently downgraded to a short. `profile`
+    (the channel persona) localizes the whole design to the channel's audience/country (ADR-045)."""
     is_long = video_format == "long"
     topic_line = (f'Design the campaign around this title/topic: "{topic}".' if topic
                   else "Invent a fresh, specific, non-generic channel concept and topic yourself.")
     lang_line = (f"The target language MUST be '{language}'." if language in ("vi", "en", "es")
                  else "Choose the most fitting target language (vi, en or es).")
+    profile_line = _profile_line(profile)
     if is_long:
         fmt_line = (
             "The video_format MUST be 'long' — horizontal 16:9, multi-minute videos (3-15 min). "
@@ -459,7 +480,7 @@ def propose_campaign(
     prompt = (
         "You are a senior short-form AND long-form video channel strategist. Propose ONE complete, "
         "standout campaign configuration for an automated video factory. "
-        f"{topic_line} {lang_line} {fmt_line} "
+        f"{topic_line} {lang_line} {fmt_line} {profile_line} "
         "Make it distinctive and genuinely good — a real creator's channel, never a bland template. "
         "Choose: a vivid, specific persona (region/age/speech habits, written in the target "
         "language); 2-3 short style-example lines in that voice; signature opening and closing "

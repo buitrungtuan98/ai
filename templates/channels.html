@@ -28,6 +28,13 @@
     </div>
     {% set cc = camp_counts.get(c.id, {'total': 0, 'active': 0}) %}
     <p class="meta mt-sm">{{ cc.total }} campaign{{ 's' if cc.total != 1 }}{% if cc.active %} · {{ cc.active }} active{% endif %}</p>
+    {% set pr = c.profile_json or {} %}
+    {% if pr %}
+    <p class="facts"><span class="fact">🌍 {% if pr.audience %}{{ pr.audience }}{% else %}Localized{% endif %}</span>
+      {% if pr.language %}<span class="fact">{{ pr.language|upper }}</span>{% endif %}
+      {% if pr.timezone %}<span class="fact">🕑 {{ pr.timezone }}</span>{% endif %}
+      {% if pr.voice %}<span class="fact">🎙 {{ pr.voice }}</span>{% endif %}</p>
+    {% endif %}
     <div class="row-actions">
       <a class="btn ghost sm" href="/campaigns?channel={{ c.id }}">Campaigns →</a>
       <a class="btn ghost sm" href="/assets?channel={{ c.id }}">Review →</a>
@@ -35,6 +42,38 @@
     {% if c.status.value != 'active' %}
     <p class="hint mt-sm">Re-authorise this channel to resume publishing — reconnect it via OAuth above.</p>
     {% endif %}
+    <details class="disclosure mt-sm" {% if pr %}open{% endif %}>
+      <summary>🌍 Channel profile{% if pr.vision %}: <b>{{ pr.vision }}</b>{% endif %}</summary>
+      <div class="disclosure-body">
+        <p class="hint">Who this channel is for. Seeds every new campaign (language, voice, timezone) and tells AI Propose &amp; the autopilot strategist the channel's audience &amp; vision — so each video is localized to its country.</p>
+        <form method="post" action="/channels/{{ c.id }}/profile">
+          <div class="grid cols-2">
+            {% call ui.field('Audience / market', hint='e.g. Vietnam, United States') %}<input name="audience" value="{{ pr.audience or '' }}" placeholder="Vietnam">{% endcall %}
+            {% call ui.field('Language') %}
+            <select name="language">
+              <option value="" {{ 'selected' if pr.language not in ['vi','en','es'] }}>— none —</option>
+              {% for code, nm in [('vi','Vietnamese'), ('en','English'), ('es','Spanish')] %}
+              <option value="{{ code }}" {{ 'selected' if pr.language == code }}>{{ nm }}</option>{% endfor %}
+            </select>
+            {% endcall %}
+            {% call ui.field('Timezone', hint='IANA, e.g. Asia/Ho_Chi_Minh') %}<input name="timezone" value="{{ pr.timezone or '' }}" placeholder="Asia/Ho_Chi_Minh">{% endcall %}
+            {% call ui.field('Default voice') %}
+            <select name="voice">
+              <option value="">— none —</option>
+              {% for lang, voices in voice_choices.items() %}
+              <optgroup label="{{ lang|upper }}">
+                {% for vid, label in voices %}<option value="{{ vid }}" {{ 'selected' if pr.voice == vid }}>{{ label }}</option>{% endfor %}
+              </optgroup>
+              {% endfor %}
+            </select>
+            {% endcall %}
+          </div>
+          {% call ui.field('Style', hint='Tone & pacing for this audience') %}<input name="style" value="{{ pr.style or '' }}" placeholder="Calm, warm storytelling">{% endcall %}
+          {% call ui.field('Purpose & vision', hint='One line — what this channel is about') %}<input name="vision" value="{{ pr.vision or '' }}" placeholder="Vietnamese history for Gen Z">{% endcall %}
+          <button class="btn sm" type="submit">Save profile</button>
+        </form>
+      </div>
+    </details>
     {% set a = ap.get(c.id, {}) %}
     {% set amode = a.get('mode', 'off') if a.get('mode', 'off') in ['off','copilot','autopilot'] else 'off' %}
     {% set alabels = {'off': 'Off', 'copilot': '🧭 Copilot', 'autopilot': '✈️ Full auto'} %}

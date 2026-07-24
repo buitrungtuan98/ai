@@ -837,13 +837,77 @@ def test_persona_and_continuity_persist_and_duplicate(client):
     assert cfg["persona"] == "Chú Ba miền Tây kể chuyện"
     assert cfg["continuity"] == "no_repeat" and cfg["timezone"] == "Asia/Ho_Chi_Minh"
     assert cfg["catchphrase_open"] == "Tắt đèn chưa?"
-
     # Duplicate: the new-campaign form comes prefilled with the source persona.
     page = client.get(f"/campaigns/new?from_id={cam.id}")
     assert page.status_code == 200 and "Duplicate Campaign" in page.text
     assert "Chú Ba miền Tây kể chuyện" in page.text and "Tắt đèn chưa?" in page.text
     # Foreign/missing source is ignored gracefully.
     assert "Duplicate Campaign" not in client.get("/campaigns/new?from_id=99999").text
+
+
+def test_channel_profile_save_validate_and_prefill(client):
+    """A channel profile is validated on save and then seeds a new campaign on that channel."""
+    from database.db_session import SessionLocal
+    from database.models import Channel
+
+    client.post("/channels/facebook", data={"channel_name": "VN", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    db = SessionLocal()
+    cid = db.query(Channel).first().id
+    db.close()
+
+    # Save a valid profile + junk that must be dropped (bad language, bad timezone, invented voice).
+    r = client.post(f"/channels/{cid}/profile", data={
+        "audience": "Vietnam", "language": "vi", "timezone": "Asia/Ho_Chi_Minh",
+        "voice": "vi-VN-HoaiMyNeural", "style": "Calm storytelling", "vision": "Sử Việt cho Gen Z",
+    }, follow_redirects=False)
+    assert r.status_code == 303
+    db = SessionLocal()
+    p = db.query(Channel).first().profile_json
+    db.close()
+    assert p["audience"] == "Vietnam" and p["language"] == "vi" and p["voice"] == "vi-VN-HoaiMyNeural"
+
+    client.post(f"/channels/{cid}/profile", data={
+        "language": "klingon", "timezone": "Middle/Earth", "voice": "made-up-voice"},
+        follow_redirects=False)
+    db = SessionLocal()
+    p2 = db.query(Channel).first().profile_json
+    db.close()
+    assert p2 is None  # every field was invalid → nothing stored (profile cleared)
+
+    # Re-save the good profile, then a new campaign on this channel inherits its localization.
+    client.post(f"/channels/{cid}/profile", data={
+        "language": "vi", "timezone": "Asia/Ho_Chi_Minh", "voice": "vi-VN-HoaiMyNeural"},
+        follow_redirects=False)
+    page = client.get(f"/campaigns/new?channel={cid}").text
+    assert 'value="vi" selected' in page                       # language from profile
+    assert 'value="Asia/Ho_Chi_Minh"' in page                  # timezone from profile
+    assert 'data-current="vi-VN-HoaiMyNeural"' in page          # voice from profile
+
+
+def test_propose_forwards_channel_profile(client, monkeypatch):
+    """AI Propose sends the selected channel so the designer localizes to its audience."""
+    from core import ai_engine
+    from core.ai_engine import CampaignProposal
+    from core.config import settings
+    from database.db_session import SessionLocal
+    from database.models import Channel
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "k")
+    client.post("/channels/facebook", data={"channel_name": "US", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    db = SessionLocal()
+    cid = db.query(Channel).first().id
+    db.close()
+    client.post(f"/channels/{cid}/profile", data={"audience": "United States", "language": "en"},
+                follow_redirects=False)
+
+    captured = {}
+    monkeypatch.setattr(ai_engine, "propose_campaign",
+                        lambda **k: (captured.update(k), CampaignProposal(
+                            topic_name="T", language="en", total_episodes=8, persona="P"))[1])
+    client.post("/campaigns/propose", data={"topic": "x", "channel_id": str(cid)})
+    assert captured["profile"] == {"audience": "United States", "language": "en"}
 
 
 def test_edit_campaign(client):

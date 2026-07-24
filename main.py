@@ -596,6 +596,60 @@ def dismiss_autopilot_action(action_id: int, user: CurrentUser, db: DbDep):
     return RedirectResponse("/autopilot", status_code=303)
 
 
+_PROFILE_LANGS = ("vi", "en", "es")
+
+
+def _valid_timezone(tz: str) -> bool:
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    try:
+        ZoneInfo(tz)
+        return True
+    except (ZoneInfoNotFoundError, ValueError):
+        return False
+
+
+def _channel_profile_cfg(channel) -> dict:
+    """Cfg-shaped localization defaults from a channel's profile (language / voice / timezone) — used
+    to seed a new campaign so it inherits the channel's persona. Empty if the channel has no profile
+    or is None. See ADR-045."""
+    p = (channel.profile_json or {}) if channel else {}
+    cfg: dict = {}
+    if p.get("language") in _PROFILE_LANGS:
+        cfg["language"] = p["language"]
+    if p.get("voice"):
+        cfg["voice"] = p["voice"]
+    if p.get("timezone"):
+        cfg["timezone"] = p["timezone"]
+    return cfg
+
+
+@app.post("/channels/{channel_id}/profile")
+def set_channel_profile(channel=Depends(get_owned_channel), db=Depends(get_db),
+                        audience: str = Form(""), language: str = Form(""),
+                        timezone: str = Form(""), voice: str = Form(""),
+                        style: str = Form(""), vision: str = Form("")):
+    """Set a channel's persona / localization profile (ADR-045). Everything is validated/whitelisted
+    like the campaign form — a bad value is dropped, never stored, so it can't break rendering."""
+    allowed_voices = {v for vs in VOICE_CHOICES.values() for v, _label in vs}
+    p: dict = {}
+    if audience.strip():
+        p["audience"] = audience.strip()[:80]
+    if language in _PROFILE_LANGS:
+        p["language"] = language
+    if timezone.strip() and _valid_timezone(timezone.strip()):
+        p["timezone"] = timezone.strip()
+    if voice.strip() and voice.strip() in allowed_voices:
+        p["voice"] = voice.strip()
+    if style.strip():
+        p["style"] = style.strip()[:200]
+    if vision.strip():
+        p["vision"] = vision.strip()[:200]
+    channel.profile_json = p or None
+    db.commit()
+    return RedirectResponse("/channels", status_code=303)
+
+
 @app.post("/channels/{channel_id}/autopilot")
 def set_channel_autopilot(channel=Depends(get_owned_channel), db=Depends(get_db),
                           mode: str = Form("off"), interval_hours: str = Form(""),
@@ -752,7 +806,14 @@ def campaign_new_form(request: Request, user: CurrentUser, db: DbDep,
         ch = db.get(Channel, channel)
         if ch is not None and ch.user_id == user.id:
             sel_channel = channel
+    # Localize from the selected channel's profile (profile > user Settings), and expose every
+    # channel's localization so the client re-localizes when the operator switches the channel.
+    if sel_channel is not None and not ctx.get("source"):
+        sel = next((c for c in channels if c.id == sel_channel), None)
+        if sel is not None:
+            ctx["cfg"] = {**(ctx.get("cfg") or {}), **_channel_profile_cfg(sel)}
     ctx["sel_channel"] = sel_channel
+    ctx["channel_profiles"] = {c.id: _channel_profile_cfg(c) for c in channels}
     return templates.TemplateResponse(request, "campaign_new.html", ctx)
 
 
@@ -811,12 +872,13 @@ def preview_script(
 
 
 @app.post("/campaigns/propose")
-def propose_campaign_route(user: CurrentUser, topic: str = Form(""), language: str = Form(""),
-                           video_format: str = Form("short")):
+def propose_campaign_route(user: CurrentUser, db: DbDep, topic: str = Form(""),
+                           language: str = Form(""), video_format: str = Form("short"),
+                           channel_id: str = Form("")):
     """AI-design a whole campaign config from a title (or from scratch). Returns JSON the New
     Campaign form fills in for review — nothing is saved until the user clicks Create. The form's
-    video_format is an explicit constraint: the designer builds for it (short vs long) and it is
-    forced onto the result, so choosing Long no longer gets silently reset to a short."""
+    video_format is an explicit constraint (short vs long, forced onto the result); the selected
+    channel's profile localizes the whole design to that channel's audience/country (ADR-045)."""
     import random
 
     from core import ai_engine
@@ -827,9 +889,14 @@ def propose_campaign_route(user: CurrentUser, topic: str = Form(""), language: s
                             status_code=400)
     lang = language if language in ("en", "vi", "es") else None
     fmt = "long" if video_format == "long" else "short"
+    profile = None
+    if channel_id.strip().isdigit():
+        ch = db.get(Channel, int(channel_id))
+        if ch is not None and ch.user_id == user.id:
+            profile = ch.profile_json
     try:
         proposal = ai_engine.propose_campaign(
-            topic=topic.strip() or None, language=lang, video_format=fmt, api_key=key,
+            topic=topic.strip() or None, language=lang, video_format=fmt, profile=profile, api_key=key,
             model=user.gemini_model or settings.GEMINI_MODEL,
             nonce=random.randint(1, 1_000_000),
         )

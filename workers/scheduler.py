@@ -654,6 +654,7 @@ def autopilot_strategist_channel(db, user, channel, respect_cadence: bool = True
     cls = autopilot.classify_campaigns(db, campaigns)
     scorecard = {
         "channel": channel.channel_name,
+        "profile": channel.profile_json or {},  # audience/vision/style/language — the channel persona
         "playbook": (target.learning_json or {}).get("playbook"),
         "campaigns": [{"topic": c.topic_name, "verdict": cls[c.id]["label"],
                        "retention": cls[c.id]["retention"]} for c in campaigns],

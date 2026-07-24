@@ -848,3 +848,25 @@ scheduler tick, the campaign designer — so autopilot is chiefly a decision lay
 sense→classify→decide→act→learn loop. Making the triggers deterministic (free, from DB stats) and
 confining the AI to bounded creative choices keeps it cheap, auditable, and reversible, while the
 autonomy ladder lets trust be earned rather than demanded on day one.
+
+### ADR-045 — Channel profile: a per-channel persona that localizes every video to its country
+**Decision:** give each channel an explicit persona/localization profile (`Channel.profile_json`,
+additive column: audience/market, language, timezone, default voice, style, one-line vision) so the
+channel — not just the campaign — carries identity, and that identity flows into every AI touchpoint.
+(K1) The New Campaign form seeds language/voice/timezone from the selected channel's profile
+(inheritance order: explicit campaign field > channel profile > user Settings > app default), and
+re-localizes client-side when the operator switches channels; AI Propose sends the channel so the
+designer writes persona/examples/topic FOR that audience and sets the posting slot in the audience's
+local prime-time evening; the autopilot weekly strategist gets the profile in its scorecard so tunes
+respect the channel's vision. (K2) YouTube uploads set `defaultAudioLanguage`/`defaultLanguage` from
+the campaign language, and the profile box carries a short manual localization checklist. (K3) the
+daily stats pass fetches views-by-country per video; the channel/hub shows an "Audience match" line
+and the autopilot files a mismatch proposal when a channel's real audience drifts from its target.
+**Why:** organic YouTube/Facebook have no "target this country" switch — the algorithm INFERS the
+audience from the spoken language, the metadata language, the topic, and who watches in the first
+hours (posting time). So the way to localize is to make every signal agree; the profile is the single
+source those signals read from, turning "Channel 1 = Vietnam, Channel 2 = USA" from a fact in the
+operator's head into something the whole system acts on — for free (the profile just adds context to
+calls we already make; verification reuses the Analytics quota we already spend on retention). All
+inputs are validated/whitelisted (language, voice against the TTS catalog, timezone via ZoneInfo) so
+a bad value is dropped, never stored, and can never break rendering or the scheduler.

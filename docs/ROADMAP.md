@@ -760,6 +760,25 @@ the existing scheduler daemon on a per-channel cadence (default 3h, configurable
   render pipeline's QC verdict (0 AI calls), proposals/apply are deterministic, and the strategist is
   ~1 budget-guarded call/week per channel.
 
+## Channel profile — a per-channel persona that localizes every video to its country `WIP`
+Each channel gets an explicit persona (`Channel.profile_json`: audience/language/timezone/voice/
+style/vision) that flows into every AI touchpoint, so "Channel 1 = Vietnam, Channel 2 = USA" is
+something the whole system acts on. Organic platforms have no country switch — the algorithm infers
+the audience from language + topic + posting time + who watches — so the profile makes every signal
+agree. ADR-045.
+- **K1 — the profile** `DONE`: per-channel profile editor + summary chips on the Channels page;
+  the New Campaign form seeds language/voice/timezone from the selected channel's profile
+  (profile > Settings > default) and re-localizes client-side on channel switch; AI Propose forwards
+  the channel so the design (persona/topic/voice/posting time) is localized to its audience; the
+  autopilot strategist's scorecard carries the profile. All inputs validated (language whitelist,
+  voice vs the TTS catalog, timezone via ZoneInfo). Verified: 193 tests (3 new — profile
+  save/validate/prefill, propose forwards the profile), ruff clean, docs guard green; editor +
+  channel-switch re-localization checked in a browser.
+- K2 — country signal hardening (YouTube `defaultAudioLanguage`/`defaultLanguage` + a manual
+  localization checklist) `TODO`
+- K3 — audience-geography verification (views-by-country + "Audience match" + autopilot mismatch
+  proposal) `TODO`
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download
