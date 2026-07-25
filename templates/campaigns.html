@@ -9,7 +9,7 @@
 
 {% if scope_channel %}
 {{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': scope_channel.channel_name}]) }}
-<p class="scope-note">Campaigns for <b>{{ scope_channel.channel_name }}</b>. <a href="/campaigns">Show all campaigns →</a></p>
+{{ ui.scope_note('Campaigns for', scope_channel.channel_name, '/campaigns') }}
 {% endif %}
 
 {% if total_all %}

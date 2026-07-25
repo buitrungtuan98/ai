@@ -76,13 +76,7 @@
     </li>
     {% endfor %}
   </ul>
-  {% if has_prev or has_next %}
-  <div class="flex between mt">
-    {% if has_prev %}<a class="btn ghost sm" href="/autopilot?page={{ page - 1 }}">← Newer</a>{% else %}<span></span>{% endif %}
-    <span class="meta">Page {{ page }}</span>
-    {% if has_next %}<a class="btn ghost sm" href="/autopilot?page={{ page + 1 }}">Older →</a>{% else %}<span></span>{% endif %}
-  </div>
-  {% endif %}
+  {{ ui.pager('/autopilot', page, feed_pages, feed_total) }}
   {% else %}
   <p class="hint">Nothing yet. Once a channel's autopilot runs, every review, publish, rejection, retry and catch-up it makes is logged here with the reason behind it.{% if not ap_channels %} No channel has autopilot on — turn it on from the <a href="/channels">Channels</a> page.{% endif %}</p>
   {% endif %}

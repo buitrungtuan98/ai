@@ -3,13 +3,13 @@
 {% block title %}Task Logs · AI Video Factory{% endblock %}
 {% block content %}
 {% call ui.page_head('Render log', 'Live render pipeline · refreshes every few seconds. Pending → AI Generation → Audio Synced → Rendering → Publishing → Completed. Retry a failed episode in one tap.') %}{% endcall %}
-{{ ui.episode_views('render', scope_channel.id if scope_channel else None) }}
+{{ ui.stage_tabs(stage_counts, 'rendering', scope_channel.id if scope_channel else None) }}
 
 {% if scope_campaign %}
-{{ ui.breadcrumb([{'label': 'Campaigns', 'href': '/campaigns'}, {'label': scope_campaign.topic_name, 'href': '/campaigns/' ~ scope_campaign.id}, {'label': 'Tasks'}]) }}
-<p class="scope-note">Render jobs for <b>{{ scope_campaign.topic_name }}</b>. <a href="/tasks">Show all →</a></p>
+{{ ui.breadcrumb([{'label': 'Campaigns', 'href': '/campaigns'}, {'label': scope_campaign.topic_name, 'href': '/campaigns/' ~ scope_campaign.id}, {'label': 'Render log'}]) }}
+{{ ui.scope_note('Render jobs for', scope_campaign.topic_name, '/tasks') }}
 {% elif scope_channel %}
-<p class="scope-note">Render jobs for channel <b>{{ scope_channel.channel_name }}</b>. <a href="/tasks">Show all →</a></p>
+{{ ui.scope_note('Render jobs for channel', scope_channel.channel_name, '/tasks') }}
 {% endif %}
 
 <input class="search" id="task-filter" placeholder="🔎 Filter by topic, channel, status or #id…" aria-label="Filter tasks">

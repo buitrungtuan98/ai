@@ -8,15 +8,14 @@
 {{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': sc.channel_name if sc else 'Channel', 'href': '/campaigns?channel=' ~ scope_campaign.channel_id}, {'label': scope_campaign.topic_name, 'href': '/campaigns/' ~ scope_campaign.id}, {'label': 'Episodes'}]) }}
 {% endif %}
 {% call ui.page_head('Episodes', 'Every episode from queued to published — click one for its full lifecycle, preview and actions.') %}{% endcall %}
-{{ ui.episode_views('list', _ch) }}
+{{ ui.stage_tabs(stage_counts, status, _ch, search=true, q=q, scope_hidden=scope_hidden) }}
 {% if scope_campaign %}
-<p class="scope-note">Episodes for <b>{{ scope_campaign.topic_name }}</b>. <a href="/episodes">Show all →</a></p>
+{{ ui.scope_note('Episodes for', scope_campaign.topic_name, '/episodes') }}
 {% elif scope_channel %}
-<p class="scope-note">Episodes for channel <b>{{ scope_channel.channel_name }}</b>. <a href="/episodes">Show all →</a></p>
+{{ ui.scope_note('Episodes for channel', scope_channel.channel_name, '/episodes') }}
 {% endif %}
 
 {% if total_all %}
-{{ ui.filter_bar('/episodes', chips, current=status, q=q, placeholder='🔎 Search episodes…', hidden=scope_hidden) }}
 {% if episodes %}
 {% set table_action = '/episodes' %}
 {% set show_campaign = true %}

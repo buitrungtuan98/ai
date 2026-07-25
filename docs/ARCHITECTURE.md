@@ -948,6 +948,14 @@ with mass 301s — was deliberately deferred: it would reconcile two different c
 churn ~11 test call-sites for a purity gain the switcher already delivers to the user. A regression
 test (`test_episode_surface_unified_no_lateral_loop`) locks the switcher's presence, the
 detail-links-up rule, and the 301s so the loop cannot silently return.
+*Amendment (component-dedup pass):* the segmented switcher + the separate stage chip-bar on
+`/episodes` were **two overlapping controls** (both carried Rendering/Review). They are now a single
+`ui.stage_tabs` bar (All · Queued · Rendering→log · Review→workbench · Scheduled · Published ·
+Failed) with per-stage counts, rendered identically on all three pages (counts via one
+`_episode_stage_counts` helper) — one control, not two. The regression test now asserts exactly one
+stage-tab bar per page. Same pass: extracted shared `pager` + `scope_note` macros (were hand-copied
+across 4 / 5 templates), deleted the unused `card` macro, and removed dead CSS (`.seg*`,
+`.col-4/8/12`, `.section-title`, `.minibar`, `.win-row`).
 
 ### ADR-049 — Navigation: one rail of destinations, lenses live inside their owner
 **Decision:** separate navigation by job. The global rail carries only top-level DESTINATIONS you go

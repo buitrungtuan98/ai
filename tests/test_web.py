@@ -377,9 +377,12 @@ def test_episode_surface_unified_no_lateral_loop(client):
     tid = t.id
     db.close()
 
-    # The three lens pages all render the shared view-switcher — one coherent surface.
+    # The three lens pages all render the ONE shared stage-tab bar (not a switcher + a duplicate
+    # chip bar) — one coherent surface, one control.
     for path in ("/episodes", "/assets", "/tasks"):
-        assert 'class="seg"' in client.get(path).text, f"{path} missing the view switcher"
+        page = client.get(path).text
+        assert 'aria-label="Episode stages"' in page, f"{path} missing the shared stage-tab bar"
+        assert page.count('aria-label="Episode stages"') == 1, f"{path} has a duplicate tab bar"
     # The episode detail no longer links sideways to the render log / review list (the old loop).
     detail = client.get(f"/episodes/{tid}").text
     assert 'href="/tasks"' not in detail and 'href="/assets"' not in detail
