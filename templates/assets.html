@@ -2,7 +2,8 @@
 {% import "macros.html" as ui %}
 {% block title %}Asset Pool · AI Video Factory{% endblock %}
 {% block content %}
-{% call ui.page_head('Review', 'Pre-rendered episodes waiting for approval — watch each one before it publishes. (This is the video-review workbench; browse all episodes by stage under Episodes.)') %}{% endcall %}
+{% call ui.page_head('Review', 'Pre-rendered episodes waiting for approval — watch each one before it publishes.') %}{% endcall %}
+{{ ui.episode_views('review', scope_channel.id if scope_channel else None) }}
 
 {% if flash == 'publish' %}
 {% call ui.banner('success') %}⏳ <b>Publish queued.</b> The episode uploads as soon as the worker is free (one job at a
@@ -26,8 +27,6 @@
 {% elif scope_channel %}
 {{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': scope_channel.channel_name}, {'label': 'Review'}]) }}
 <p class="scope-note">Review queue for channel <b>{{ scope_channel.channel_name }}</b>. <a href="/assets">Show all →</a></p>
-{% else %}
-{{ ui.breadcrumb([{'label': 'Episodes', 'href': '/episodes'}, {'label': 'Review'}]) }}
 {% endif %}
 
 {% if pool_total %}

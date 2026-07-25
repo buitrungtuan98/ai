@@ -2,16 +2,14 @@
 {% import "macros.html" as ui %}
 {% block title %}Task Logs · AI Video Factory{% endblock %}
 {% block content %}
-{% call ui.page_head('Task Logs', 'Live render pipeline · refreshes every few seconds. Pending → AI Generation → Audio Synced → Rendering → Publishing → Completed. Retry a failed episode in one tap.') %}{% endcall %}
+{% call ui.page_head('Render log', 'Live render pipeline · refreshes every few seconds. Pending → AI Generation → Audio Synced → Rendering → Publishing → Completed. Retry a failed episode in one tap.') %}{% endcall %}
+{{ ui.episode_views('render', scope_channel.id if scope_channel else None) }}
 
 {% if scope_campaign %}
 {{ ui.breadcrumb([{'label': 'Campaigns', 'href': '/campaigns'}, {'label': scope_campaign.topic_name, 'href': '/campaigns/' ~ scope_campaign.id}, {'label': 'Tasks'}]) }}
 <p class="scope-note">Render jobs for <b>{{ scope_campaign.topic_name }}</b>. <a href="/tasks">Show all →</a></p>
 {% elif scope_channel %}
-{{ ui.breadcrumb([{'label': 'Episodes', 'href': '/episodes'}, {'label': 'Render log'}]) }}
 <p class="scope-note">Render jobs for channel <b>{{ scope_channel.channel_name }}</b>. <a href="/tasks">Show all →</a></p>
-{% else %}
-{{ ui.breadcrumb([{'label': 'Episodes', 'href': '/episodes'}, {'label': 'Render log'}]) }}
 {% endif %}
 
 <input class="search" id="task-filter" placeholder="🔎 Filter by topic, channel, status or #id…" aria-label="Filter tasks">

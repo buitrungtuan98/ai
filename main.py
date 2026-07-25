@@ -1174,8 +1174,9 @@ def campaign_settings(request: Request, user: CurrentUser, db: DbDep,
 
 @app.get("/campaigns/{campaign_id}/edit")
 def campaign_edit_form(campaign=Depends(get_owned_campaign)):
-    """Legacy edit URL → the hub's Settings tab (kept so old links/bookmarks still land right)."""
-    return RedirectResponse(f"/campaigns/{campaign.id}/settings", status_code=307)
+    """Legacy edit URL → the hub's Settings tab (301 permanent: bookmarks/history settle on the
+    canonical URL instead of the redirect lingering in the Back chain)."""
+    return RedirectResponse(f"/campaigns/{campaign.id}/settings", status_code=301)
 
 
 @app.post("/campaigns/{campaign_id}/edit")
@@ -1804,8 +1805,9 @@ def campaign_episodes(request: Request, user: CurrentUser, db: DbDep,
 
 @app.get("/campaigns/{campaign_id}/performance")
 def campaign_performance_redirect(campaign=Depends(get_owned_campaign)):
-    """Legacy performance URL → the hub's Overview tab (kept so old links/bookmarks still land)."""
-    return RedirectResponse(f"/campaigns/{campaign.id}", status_code=307)
+    """Legacy performance URL → the hub's Overview tab (301 permanent so it settles on the canonical
+    URL instead of lingering in the Back chain)."""
+    return RedirectResponse(f"/campaigns/{campaign.id}", status_code=301)
 
 
 @app.post("/campaigns/{campaign_id}/learning/reset")

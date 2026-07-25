@@ -84,6 +84,18 @@
 </div>
 {%- endmacro %}
 
+{# One "Episodes" surface, three layouts. A segmented view-switcher (like the campaign-hub tabs)
+   replaces the old lateral "↗" links between /episodes, /assets and /tasks — so switching a view is
+   an explicit, active-stated tab, never a jump that loses you. `active` ∈ list|render|review. #}
+{% macro episode_views(active, scope_cid=None) -%}
+{% set cq = ('?channel=' ~ scope_cid) if scope_cid else '' %}
+<nav class="seg" aria-label="Episode views">
+  <a class="seg-item {{ 'active' if active == 'list' }}" href="/episodes{{ cq }}"{{ ' aria-current=page' if active == 'list' }}>📋 All episodes</a>
+  <a class="seg-item {{ 'active' if active == 'render' }}" href="/tasks{{ cq }}"{{ ' aria-current=page' if active == 'render' }}>≣ Render log</a>
+  <a class="seg-item {{ 'active' if active == 'review' }}" href="/assets{{ cq }}"{{ ' aria-current=page' if active == 'review' }}>▦ Review</a>
+</nav>
+{%- endmacro %}
+
 {# Grouped IANA timezone picker. `current` = the stored zone (or none); a stored value outside the
    curated set is kept selectable under a "Saved" group so a legacy/custom zone is never lost.
    `default_note` labels the blank (= server default) option. Offsets come from tz_choices() live. #}

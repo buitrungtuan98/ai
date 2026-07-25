@@ -930,6 +930,25 @@ already computes (classification, retention drop-offs, the playbook) — no new 
 every addition fail-open so the operations loop is never put at risk by a learning/observability
 feature.
 
+### ADR-050 — One "Episodes" surface + kill the lateral navigation loop
+**Decision:** `/episodes`, `/assets` (Review) and `/tasks` (render log) are three *layouts of one
+thing* — the episode pipeline. They previously cross-linked with scattered "↗" buttons and no
+active-state, so clicking between them felt like an endless loop with no "you are here" (the
+operator's "back keeps looping" report; a link-graph crawl confirmed the `/episodes ⇄ /assets ⇄
+/tasks` cycle). Fix: a single segmented **view-switcher** (`ui.episode_views`, styled `.seg` like
+the campaign-hub tabs) rendered at the top of all three, with the current view active-stated — so
+switching a view is an explicit, oriented tab, never a jump that loses you. The old lateral "↗"
+links are removed, and the episode DETAIL page now links only UP to its campaign (it used to link
+sideways to `/tasks`). Legacy duplicate routes (`/campaigns/{id}/performance`, `/{id}/edit`) return
+**301** (was 307) so they settle on the canonical hub URL instead of lingering in the Back chain.
+**Why (and what was deliberately NOT done):** the operator's pain was disorientation, not URL
+count. A view-switcher with active-state fixes disorientation directly and safely. The stricter
+"one physical URL" fold — merging the `/assets` and `/tasks` route handlers into `/episodes?stage=`
+with mass 301s — was deliberately deferred: it would reconcile two different chip vocabularies and
+churn ~11 test call-sites for a purity gain the switcher already delivers to the user. A regression
+test (`test_episode_surface_unified_no_lateral_loop`) locks the switcher's presence, the
+detail-links-up rule, and the 301s so the loop cannot silently return.
+
 ### ADR-049 — Navigation: one rail of destinations, lenses live inside their owner
 **Decision:** separate navigation by job. The global rail carries only top-level DESTINATIONS you go
 *to* — Dashboard, Autopilot, Campaigns, Episodes, Channels, and a Setup cluster (Credentials,

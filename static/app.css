@@ -493,6 +493,13 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 .chip.active { background: var(--primary-weak); border-color: var(--st-working-bd); color: var(--text); }
 .chip.sm { padding: 3px 10px; font-size: var(--fs-xs); }
 .reason-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: var(--sp-2); }
+/* Segmented view-switcher — the three Episodes layouts (list / render log / review) as one surface. */
+.seg { display: inline-flex; flex-wrap: wrap; gap: 2px; padding: 3px; margin-bottom: var(--sp-4);
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); }
+.seg-item { padding: 6px 14px; border-radius: var(--radius-sm); font-size: var(--fs-sm);
+  font-weight: var(--fw-medium); color: var(--muted); white-space: nowrap; }
+.seg-item:hover { color: var(--text); }
+.seg-item.active { background: var(--surface); color: var(--text); box-shadow: var(--shadow-1); }
 .kbd-active { outline: 2px solid var(--primary); outline-offset: 2px; }
 
 /* Breadcrumbs + scope note (drill-down orientation) */

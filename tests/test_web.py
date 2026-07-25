@@ -359,6 +359,35 @@ def test_scope_switcher_and_scoped_nav(client):
     assert f'value="{cid}" selected' in scoped  # the active channel is marked in the switcher
 
 
+def test_episode_surface_unified_no_lateral_loop(client):
+    """Loop-fix regression: the three episode views share ONE switcher (not lateral '↗' links), the
+    episode detail links only UP to its campaign, and legacy duplicate URLs 301 to their canonical
+    home (so they settle instead of lingering in the Back chain)."""
+    cam = _seed_campaign(client)
+    from database.db_session import SessionLocal
+    from database.models import Task
+    from database.types import TaskStatus
+
+    db = SessionLocal()
+    t = Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=1, status=TaskStatus.COMPLETED,
+             synopsis="s")
+    db.add(t)
+    db.commit()
+    db.refresh(t)
+    tid = t.id
+    db.close()
+
+    # The three lens pages all render the shared view-switcher — one coherent surface.
+    for path in ("/episodes", "/assets", "/tasks"):
+        assert 'class="seg"' in client.get(path).text, f"{path} missing the view switcher"
+    # The episode detail no longer links sideways to the render log / review list (the old loop).
+    detail = client.get(f"/episodes/{tid}").text
+    assert 'href="/tasks"' not in detail and 'href="/assets"' not in detail
+    # Legacy duplicate campaign URLs are permanent (301) redirects to the canonical hub.
+    assert client.get(f"/campaigns/{cam.id}/performance", follow_redirects=False).status_code == 301
+    assert client.get(f"/campaigns/{cam.id}/edit", follow_redirects=False).status_code == 301
+
+
 def test_nav_facets_link_to_their_owner(client):
     """The demoted lenses stay reachable + traceable: Calendar is a view of Campaigns (mutual links),
     and the render log + Review show an 'up to Episodes' path; Episodes surfaces both facets."""

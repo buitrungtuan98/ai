@@ -905,6 +905,23 @@ competing menus (a bottom bar duplicating the drawer, "Home" vs "Dashboard" for 
   per-object ACL, and episode/aesthetic config already lives in the campaign hub's Settings tab +
   the episode detail page. Building hollow ACL/drawer UI would violate the repo's KISS/YAGNI contract.
 
+## Kill the navigation loop — one Episodes surface `DONE`
+The operator reported "back keeps looping" + "hard to manage." A link-graph crawl + a real-browser
+Back tracer proved: the browser Back button is fine (Chrome collapses the 307s), but `/episodes`,
+`/assets` and `/tasks` cross-linked laterally with scattered "↗" buttons and no active-state — a
+genuine in-app loop with no "you are here."
+- **Unified surface + loop kill** `DONE`: a single segmented view-switcher (`ui.episode_views` /
+  `.seg`) now sits atop `/episodes`, `/assets` and `/tasks`, active-stated, so the three read as one
+  "Episodes" surface (verified: each shows the correct active tab). The old lateral "↗" links are
+  gone; the episode detail links only UP to its campaign. Legacy dup routes
+  (`/campaigns/{id}/performance`, `/{id}/edit`) now 301 (was 307) so they settle instead of
+  lingering in Back. A regression test locks all of this. Browser + crawler verified; 226 tests
+  (1 new), ruff clean, docs green. See ADR-050.
+- Deliberately deferred (larger, lower-value): the strict single-physical-URL fold (merging the
+  `/assets` + `/tasks` handlers into `/episodes?stage=` with mass 301s) — it reconciles two chip
+  vocabularies and churns ~11 test call-sites for a purity gain the switcher already delivers to the
+  operator. Revisit only if a strict canonical-URL requirement appears.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download
