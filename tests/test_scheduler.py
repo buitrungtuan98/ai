@@ -381,3 +381,38 @@ def test_expire_recovers_scheduled_task(session, user, channel, tmp_path):
     sch.expire_stale_buffers(session, now=datetime(2026, 7, 17, 10, 0))
     session.refresh(task)
     assert task.status == TaskStatus.FAILED and "Retry" in task.error_message
+
+
+def test_clear_orphaned_render_lock_is_two_tick_and_concurrency_safe(session, user, channel):
+    """A crashed-worker lock is freed only after TWO ticks with no active render (so a just-acquired
+    lock is never yanked mid-setup); a live render (a working-status task) is never cleared."""
+    from database.models import Campaign, Task
+    from database.types import CampaignStatus, TaskStatus
+    from workers import scheduler as sch
+    from workers.task_queue import LOCK_KEY, conn
+
+    conn.delete(LOCK_KEY)
+    conn.delete(sch._LOCK_SUSPECT_KEY)
+    assert sch.clear_orphaned_render_lock(session) is False  # no lock → nothing to do
+
+    # Lock held, nothing rendering: tick 1 only suspects, tick 2 clears.
+    conn.set(LOCK_KEY, "1")
+    assert sch.clear_orphaned_render_lock(session) is False
+    assert conn.get(LOCK_KEY)                                # still held after one tick
+    assert sch.clear_orphaned_render_lock(session) is True
+    assert not conn.get(LOCK_KEY)                            # freed on the second tick
+
+    # A genuinely live render (a task in a working status) is NEVER mistaken for orphaned.
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="X", total_episodes=5,
+                   status=CampaignStatus.active)
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    session.add(Task(campaign_id=cam.id, user_id=user.id, episode_number=1,
+                     status=TaskStatus.RENDERING))
+    session.commit()
+    conn.set(LOCK_KEY, "1")
+    assert sch.clear_orphaned_render_lock(session) is False  # working task → protected
+    assert sch.clear_orphaned_render_lock(session) is False  # ...even across two ticks
+    assert conn.get(LOCK_KEY)                                # lock preserved (render-concurrency-1)
+    conn.delete(LOCK_KEY)

@@ -391,6 +391,68 @@ def test_episode_surface_unified_no_lateral_loop(client):
     assert client.get(f"/campaigns/{cam.id}/edit", follow_redirects=False).status_code == 301
 
 
+def test_api_tasks_no_ghost_progress_and_true_render_time(client):
+    """A re-queued task shows 0% (not a ghost % left in Redis by a crashed attempt), and the TIME
+    column reports render seconds — not the wait-for-slot that inflated finished−started to hours."""
+    from datetime import datetime, timedelta
+
+    from database.db_session import SessionLocal
+    from database.models import Task
+    from database.types import TaskStatus
+    from workers import task_queue
+
+    cam = _seed_campaign(client)
+    db = SessionLocal()
+    t1 = Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=1,
+              status=TaskStatus.PENDING_QUEUE, progress_pct=0)
+    t2 = Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=2, status=TaskStatus.COMPLETED,
+              started_at=datetime.utcnow() - timedelta(hours=14), finished_at=datetime.utcnow(),
+              render_json={"render_seconds": 120})  # rendered in 2m, published 14h later at its slot
+    db.add_all([t1, t2])
+    db.commit()
+    db.refresh(t1)
+    db.refresh(t2)
+    id1, id2 = t1.id, t2.id
+    db.close()
+    task_queue.set_progress(id1, 89.2)  # ghost from a crashed render of a now-requeued task
+
+    tasks = {t["id"]: t for t in client.get("/api/tasks").json()["tasks"]}
+    assert tasks[id1]["progress"] == 0            # PENDING shows 0, not the 89.2 ghost
+    assert tasks[id2]["duration_s"] == 120        # render time, not the 14h (886m) slot wait
+    task_queue.clear_progress(id1)
+
+
+def test_retry_clears_ghost_progress(client):
+    """Retrying a failed task drops any stale Redis % so it doesn't show ghost progress while queued."""
+    from database.db_session import SessionLocal
+    from database.models import Task
+    from database.types import TaskStatus
+    from workers import task_queue
+
+    cam = _seed_campaign(client)
+    db = SessionLocal()
+    t = Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=1, status=TaskStatus.FAILED,
+             progress_pct=89)
+    db.add(t)
+    db.commit()
+    db.refresh(t)
+    tid = t.id
+    db.close()
+    task_queue.set_progress(tid, 89.2)
+    client.post(f"/api/tasks/{tid}/retry")
+    assert task_queue.get_progress(tid) == 0.0    # ghost cleared on retry
+
+
+def test_tasks_page_warns_when_worker_down(client, monkeypatch):
+    """The render log shows an unmistakable banner when the worker isn't running (nothing renders)."""
+    from workers import task_queue
+
+    monkeypatch.setattr(task_queue, "worker_alive", lambda: False)
+    assert "Nothing will render or publish until" in client.get("/tasks").text
+    monkeypatch.setattr(task_queue, "worker_alive", lambda: True)
+    assert "Nothing will render or publish until" not in client.get("/tasks").text
+
+
 def test_nav_facets_link_to_their_owner(client):
     """The demoted lenses stay reachable + traceable: Calendar is a view of Campaigns (mutual links),
     and the render log + Review show an 'up to Episodes' path; Episodes surfaces both facets."""

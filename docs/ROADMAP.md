@@ -905,6 +905,25 @@ competing menus (a bottom bar duplicating the drawer, "Home" vs "Dashboard" for 
   per-object ACL, and episode/aesthetic config already lives in the campaign hub's Settings tab +
   the episode detail page. Building hollow ACL/drawer UI would violate the repo's KISS/YAGNI contract.
 
+## "Queue stuck" — Task Logs was lying (+ real stuck-detection) `DONE`
+A screenshot showed a "stuck" queue. Tracing it, the queue was mostly healthy (rendered episodes
+waiting for their posting slots) — the Task Logs DISPLAY had two bugs that made it look frozen, plus
+a genuine stuck-worker case wasn't surfaced.
+- **F1 — ghost progress** `DONE`: `/api/tasks` showed live Redis % for any non-terminal status, so a
+  re-queued task that crashed mid-render kept showing e.g. "Pending Queue · 89.2%". Now live % shows
+  only for actively-working statuses; `clear_progress` is called on every re-queue path (retry route,
+  `apply_reject` rerender, the reaper).
+- **F2 — honest TIME** `DONE`: the TIME column was `finished_at − started_at`, but `finished_at` is
+  overwritten with the PUBLISH time for slot-scheduled episodes — so a 2-min render that published
+  14 h later at its slot read "886m". Now the render wall-time is stored (`render_json.render_seconds`)
+  and shown instead.
+- **F3 — real stuck-detection** `DONE`: a worker-down banner on the render log (nothing renders or
+  publishes without the worker), and a render-concurrency-SAFE orphaned-lock clear
+  (`clear_orphaned_render_lock` — two-tick confirmation so a live render is never mistaken for
+  orphaned) so a crashed-worker lock frees fast instead of waiting out the ~46-min TTL.
+- Verified in a browser (worker banner shows; a slot-waited task reads "2m 42s" not 886m; pending
+  rows show 0% not a ghost). 230 tests (4 new), ruff clean, docs green.
+
 ## Component dedup — one control per job, shared macros, dead code out `DONE`
 An audit of every macro/partial/CSS class for redundancy + confusing patterns.
 - **R1 — one episode tab bar** `DONE`: `/episodes` had TWO overlapping controls (the view-switcher

@@ -206,10 +206,43 @@ def reap_stuck_tasks(db, now: datetime | None = None) -> int:
         task.finished_at = now
         task.error_message = ("Worker crashed, timed out, or the job was lost (no progress for a "
                               "long time). Use Retry.")
+        task_queue.clear_progress(task.id)  # a crash skipped the finally — drop the ghost % (F1)
     if stuck:
         db.commit()
         logger.warning("Reaped %d stuck task(s)", len(stuck))
     return len(stuck)
+
+
+_LOCK_SUSPECT_KEY = "render:lock-suspect"
+
+
+def clear_orphaned_render_lock(db) -> bool:
+    """Free a render lock left behind by a hard-crashed worker (its release `finally` was skipped),
+    so the queue doesn't have to wait out the full lock TTL (~46 min) before anything renders again.
+
+    SAFE for the render-concurrency-1 guarantee: the lock is cleared only after TWO consecutive ticks
+    where the lock is held but NO task is in a working status and NO live progress exists. A real
+    render sets a working status (AI_GENERATION) within milliseconds of acquiring the lock, so a live
+    render can never be seen as orphaned across two ticks. Returns True if it cleared the lock."""
+    try:
+        if not task_queue.conn.get(task_queue.LOCK_KEY):
+            task_queue.conn.delete(_LOCK_SUSPECT_KEY)
+            return False
+        working = db.scalar(select(func.count()).select_from(Task)
+                            .where(Task.status.in_(_STUCK_STATUSES))) or 0
+        if working or task_queue.active_render_task_ids():
+            task_queue.conn.delete(_LOCK_SUSPECT_KEY)  # a render is genuinely live — not orphaned
+            return False
+        # Lock held but nothing is actually rendering. Require the condition to persist across two
+        # ticks (nx marker) before clearing, so a just-acquired lock is never yanked mid-setup.
+        if not task_queue.conn.set(_LOCK_SUSPECT_KEY, "1", nx=True, ex=600):
+            task_queue.conn.delete(task_queue.LOCK_KEY)
+            task_queue.conn.delete(_LOCK_SUSPECT_KEY)
+            logger.warning("Cleared an orphaned render lock — held with no active render across two ticks")
+            return True
+    except Exception:  # noqa: BLE001 — housekeeping must never raise
+        logger.debug("orphaned-lock check failed", exc_info=True)
+    return False
 
 
 def maybe_distill_campaign(db, campaign: Campaign, now: datetime | None = None) -> bool:
@@ -941,6 +974,7 @@ def periodic_tick(db=None, now: datetime | None = None) -> dict:
     summary = {"swept": 0, "expired": 0, "hydrated": [], "published": [], "learning": None, "reaped": 0}
     try:
         summary["reaped"] = reap_stuck_tasks(db)
+        summary["lock_cleared"] = clear_orphaned_render_lock(db)  # unwedge a crashed-worker lock (F3)
         # Disk hygiene. Never sweep the workspace of a render in flight (its dir mtime goes stale
         # during a long single-scene encode), even under disk pressure.
         active = task_queue.active_render_task_ids()

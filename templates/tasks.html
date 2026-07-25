@@ -4,6 +4,9 @@
 {% block content %}
 {% call ui.page_head('Render log', 'Live render pipeline · refreshes every few seconds. Pending → AI Generation → Audio Synced → Rendering → Publishing → Completed. Retry a failed episode in one tap.') %}{% endcall %}
 {{ ui.stage_tabs(stage_counts, 'rendering', scope_channel.id if scope_channel else None) }}
+{% if worker_ok is defined and not worker_ok %}
+{% call ui.banner('danger') %}⚠ <b>The render worker isn’t running.</b> Nothing will render or publish until it’s back — queued episodes just wait (they are not lost). Start the worker container/process, then this clears.{% endcall %}
+{% endif %}
 
 {% if scope_campaign %}
 {{ ui.breadcrumb([{'label': 'Campaigns', 'href': '/campaigns'}, {'label': scope_campaign.topic_name, 'href': '/campaigns/' ~ scope_campaign.id}, {'label': 'Render log'}]) }}

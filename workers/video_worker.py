@@ -336,6 +336,7 @@ def apply_reject(db, item, reason: str = "", *, rerender: bool = False) -> None:
         task.error_message = None
         task.progress_pct = 0
         task.retry_count += 1
+        clear_progress(task.id)  # no ghost % carries into the re-queued render (F1)
         db.commit()
         task.rq_job_id = enqueue_render(task.id)
         db.commit()
@@ -558,8 +559,13 @@ def render_task(task_id: int) -> None:
         qc_failed = qc_report is not None and not qc_report["passed"]
         _record_clip_usage(db, channel.id, result.used_clip_ids)  # so future episodes vary footage
         # Persist the scene map + duration on the Task (it outlives the buffer item) so the retention
-        # curve fetched days later can be attributed to the scene that lost viewers.
-        task.render_json = {"scenes": result.scene_map, "duration": result.duration}
+        # curve fetched days later can be attributed to the scene that lost viewers. `render_seconds`
+        # is the true render wall-time — the Task Logs TIME column reads it instead of
+        # finished_at−started_at, which for slot-scheduled episodes wrongly counts the wait-for-slot.
+        render_seconds = (int((datetime.utcnow() - task.started_at).total_seconds())
+                          if task.started_at else None)
+        task.render_json = {"scenes": result.scene_map, "duration": result.duration,
+                            "render_seconds": render_seconds}
         _set_status(db, task, TaskStatus.AUDIO_SYNCED, 88)
 
         # Carry distribution settings into the stored metadata so the publish step (now or after
