@@ -622,8 +622,7 @@ def autopilot_page(request: Request, user: CurrentUser, db: DbDep, page: int = 1
         request, "autopilot.html",
         {"request": request, "user": user, "nav": "autopilot", "proposed": proposed,
          "history": feed, "ap_channels": ap_channels, "chan_by_id": chan_by_id,
-         "page": page, "has_prev": page > 1,
-         "has_next": page * _AUTOPILOT_FEED_PAGE < total, "feed_total": total},
+         "page": page, "feed_pages": max(1, -(-total // _AUTOPILOT_FEED_PAGE)), "feed_total": total},
     )
 
 
@@ -1174,8 +1173,9 @@ def campaign_settings(request: Request, user: CurrentUser, db: DbDep,
 
 @app.get("/campaigns/{campaign_id}/edit")
 def campaign_edit_form(campaign=Depends(get_owned_campaign)):
-    """Legacy edit URL → the hub's Settings tab (kept so old links/bookmarks still land right)."""
-    return RedirectResponse(f"/campaigns/{campaign.id}/settings", status_code=307)
+    """Legacy edit URL → the hub's Settings tab (301 permanent: bookmarks/history settle on the
+    canonical URL instead of the redirect lingering in the Back chain)."""
+    return RedirectResponse(f"/campaigns/{campaign.id}/settings", status_code=301)
 
 
 @app.post("/campaigns/{campaign_id}/edit")
@@ -1443,6 +1443,7 @@ def assets_page(request: Request, user: CurrentUser, db: DbDep,
          "status": status, "status_counts": status_counts, "total_all": total_all,
          "pool_total": pool_total, "chips": chips, "q": q, "scope_hidden": scope_hidden,
          "page": page, "pages": pages, "scope_qs": scope_qs,
+         "stage_counts": _episode_stage_counts(db, user, campaign=campaign, channel=channel),
          # Post-action feedback (whitelisted — never echo arbitrary input back into the page).
          "flash": flash if flash in ("publish", "rerender", "rejected", "missing") else "",
          "flash_reason": flash_reason[:200]},
@@ -1616,6 +1617,24 @@ _STATUS_TO_STAGE = {st: stage for stage, sts in _STAGE_STATUSES.items() for st i
 _EPISODES_LIST_PER_PAGE = 25
 
 
+def _episode_stage_counts(db, user, *, campaign: int | None = None,
+                          channel: int | None = None) -> dict:
+    """{stage: count} (+ 'all') across the user's episodes in scope. Powers the unified stage-tab bar
+    shared by /episodes, /assets and /tasks so all three show one consistent set of stage counts."""
+    conds = [Task.user_id == user.id]
+    if campaign:
+        conds.append(Task.campaign_id == campaign)
+    elif channel:
+        camp_ids = list(db.scalars(select(Campaign.id).where(
+            Campaign.user_id == user.id, Campaign.channel_id == channel)))
+        conds.append(Task.campaign_id.in_(camp_ids or [-1]))
+    raw = {s.value: n for s, n in db.execute(
+        select(Task.status, func.count()).where(*conds).group_by(Task.status)).all()}
+    counts = {stage: sum(raw.get(st, 0) for st in sts) for stage, sts in _STAGE_STATUSES.items()}
+    counts["all"] = sum(raw.values())
+    return counts
+
+
 def _episode_list_ctx(db, user, *, campaign: int | None = None, channel: int | None = None,
                       status: str = "", q: str = "", page: int = 1) -> dict:
     """Shared episode-list query + chip/pager context. Powers both the global /episodes list and the
@@ -1662,7 +1681,8 @@ def _episode_list_ctx(db, user, *, campaign: int | None = None, channel: int | N
         for stage in _STAGE_STATUSES]
     return {"episodes": episodes, "camp_by_id": camp_by_id, "chan_by_id": chan_by_id,
             "status_to_stage": _STATUS_TO_STAGE, "chips": chips, "status": stage, "q": q,
-            "total_all": total_all, "total": total, "page": page, "pages": pages}
+            "total_all": total_all, "total": total, "page": page, "pages": pages,
+            "stage_counts": {**stage_counts, "all": total_all}}
 
 
 @app.get("/episodes", response_class=HTMLResponse)
@@ -1804,8 +1824,9 @@ def campaign_episodes(request: Request, user: CurrentUser, db: DbDep,
 
 @app.get("/campaigns/{campaign_id}/performance")
 def campaign_performance_redirect(campaign=Depends(get_owned_campaign)):
-    """Legacy performance URL → the hub's Overview tab (kept so old links/bookmarks still land)."""
-    return RedirectResponse(f"/campaigns/{campaign.id}", status_code=307)
+    """Legacy performance URL → the hub's Overview tab (301 permanent so it settles on the canonical
+    URL instead of lingering in the Back chain)."""
+    return RedirectResponse(f"/campaigns/{campaign.id}", status_code=301)
 
 
 @app.post("/campaigns/{campaign_id}/learning/reset")
@@ -1924,7 +1945,8 @@ def tasks_page(request: Request, user: CurrentUser, db: DbDep,
     return templates.TemplateResponse(
         request, "tasks.html",
         {"request": request, "user": user, "nav": "tasks",
-         "scope_campaign": scope, "scope_channel": scope_channel})
+         "scope_campaign": scope, "scope_channel": scope_channel,
+         "stage_counts": _episode_stage_counts(db, user, campaign=campaign, channel=channel)})
 
 
 _TASKS_PER_PAGE = 25

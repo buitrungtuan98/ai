@@ -158,16 +158,12 @@ code { font-family: var(--font-mono); font-size: .92em; background: var(--surfac
   gap: var(--sp-4); margin-bottom: var(--sp-6); flex-wrap: wrap; }
 .page-head h1 { font-size: var(--fs-2xl); margin: 0; font-weight: var(--fw-bold); }
 .subtitle { color: var(--muted); margin: var(--sp-1) 0 0; font-size: var(--fs-sm); max-width: 68ch; }
-.section-title { font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .6px;
-  color: var(--text-subtle); font-weight: var(--fw-semibold); margin: var(--sp-8) 0 var(--sp-3); }
-
 /* ── 4. Grid + cards ───────────────────────────────────────────────────────── */
 .grid { display: grid; gap: var(--sp-5); }
 .grid.cols-3 { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
 .grid.cols-2 { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
 .grid-12 { display: grid; grid-template-columns: repeat(12, 1fr); gap: var(--sp-5); }
-.col-4 { grid-column: span 4; } .col-6 { grid-column: span 6; }
-.col-8 { grid-column: span 8; } .col-12 { grid-column: span 12; }
+.col-6 { grid-column: span 6; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
   padding: var(--sp-5); box-shadow: var(--shadow-1); }
 .card h3 { margin: 0 0 var(--sp-1); font-size: var(--fs-md); }
@@ -314,7 +310,6 @@ th, td { text-align: left; padding: var(--sp-3) var(--sp-3); border-bottom: 1px 
 th { color: var(--muted); font-weight: var(--fw-semibold); font-size: var(--fs-xs);
   text-transform: uppercase; letter-spacing: .5px; }
 tbody tr:last-child td { border-bottom: none; }
-tr.win-row { background: var(--st-success-bg); }
 .err { color: var(--st-failed); font-size: var(--fs-xs); max-width: 340px; white-space: pre-wrap;
   background: var(--st-failed-bg); border: 1px solid var(--st-failed-bd); border-radius: var(--radius-sm);
   padding: var(--sp-2); }
@@ -332,9 +327,6 @@ tr.win-row { background: var(--st-success-bg); }
 .bar-fill { display: block; height: 100%; background: var(--st-working); border-radius: var(--radius-pill); }
 .bar-fill.win { background: var(--st-success); }
 .bar-val { font-variant-numeric: tabular-nums; min-width: 46px; text-align: right; color: var(--text); }
-.minibar { display: inline-block; width: 72px; height: 8px; background: var(--surface-2);
-  border-radius: var(--radius-pill); overflow: hidden; vertical-align: middle; }
-.minibar > span { display: block; height: 100%; background: var(--st-working); }
 .runway { display: inline-flex; align-items: center; gap: 6px; font-weight: var(--fw-semibold); }
 .runway .dot2 { box-shadow: none; }
 .runway.ok { color: var(--st-success); } .runway.low { color: var(--st-review); }
@@ -652,7 +644,7 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 }
 
 @media (max-width: 900px) {
-  .grid-12 .col-4, .grid-12 .col-6, .grid-12 .col-8 { grid-column: span 12; }
+  .grid-12 .col-6 { grid-column: span 12; }
 }
 
 /* Shell tier 2 — tablet: a compact icon rail (721–1024px). Full labels return above 1024px. */

@@ -905,6 +905,40 @@ competing menus (a bottom bar duplicating the drawer, "Home" vs "Dashboard" for 
   per-object ACL, and episode/aesthetic config already lives in the campaign hub's Settings tab +
   the episode detail page. Building hollow ACL/drawer UI would violate the repo's KISS/YAGNI contract.
 
+## Component dedup — one control per job, shared macros, dead code out `DONE`
+An audit of every macro/partial/CSS class for redundancy + confusing patterns.
+- **R1 — one episode tab bar** `DONE`: `/episodes` had TWO overlapping controls (the view-switcher
+  AND a stage chip-bar, both with Rendering/Review). Merged into a single `ui.stage_tabs` bar (All ·
+  Queued · Rendering→log · Review→workbench · Scheduled · Published · Failed + counts), rendered
+  identically on `/episodes`, `/assets`, `/tasks` via one `_episode_stage_counts` helper. Verified:
+  exactly one bar per page, correct active tab + consistent counts.
+- **R2/R3/R4** `DONE`: extracted shared `pager` (was hand-copied in the episodes table + Review +
+  Autopilot) and `scope_note` (was hand-copied across 5 templates) macros; deleted the unused `card`
+  macro. (The `/tasks` live-JS pager legitimately differs and is left alone.)
+- **Part 2/3** `DONE`: on `/assets` the buffer sub-filters now nest cleanly UNDER the stage-tab bar
+  (one hierarchy, not two rival vocabularies); scoped pages keep the breadcrumb and use the slim
+  `scope_note` escape.
+- **R5** `DONE`: removed dead CSS (`.seg*`, `.col-4/8/12`, `.section-title`, `.minibar`, `.win-row`).
+- Verified NOT loops (left as-is): channels⇄autopilot and settings⇄credentials are purposeful peer
+  cross-links (each direction a different job). 226 tests, ruff clean, docs green.
+
+## Kill the navigation loop — one Episodes surface `DONE`
+The operator reported "back keeps looping" + "hard to manage." A link-graph crawl + a real-browser
+Back tracer proved: the browser Back button is fine (Chrome collapses the 307s), but `/episodes`,
+`/assets` and `/tasks` cross-linked laterally with scattered "↗" buttons and no active-state — a
+genuine in-app loop with no "you are here."
+- **Unified surface + loop kill** `DONE`: a single segmented view-switcher (`ui.episode_views` /
+  `.seg`) now sits atop `/episodes`, `/assets` and `/tasks`, active-stated, so the three read as one
+  "Episodes" surface (verified: each shows the correct active tab). The old lateral "↗" links are
+  gone; the episode detail links only UP to its campaign. Legacy dup routes
+  (`/campaigns/{id}/performance`, `/{id}/edit`) now 301 (was 307) so they settle instead of
+  lingering in Back. A regression test locks all of this. Browser + crawler verified; 226 tests
+  (1 new), ruff clean, docs green. See ADR-050.
+- Deliberately deferred (larger, lower-value): the strict single-physical-URL fold (merging the
+  `/assets` + `/tasks` handlers into `/episodes?stage=` with mass 301s) — it reconciles two chip
+  vocabularies and churns ~11 test call-sites for a purity gain the switcher already delivers to the
+  operator. Revisit only if a strict canonical-URL requirement appears.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

@@ -19,14 +19,22 @@
 </div>
 {%- endmacro %}
 
-{# Card wrapper: {% call ui.card('Title', meta='…') %}…body…{% endcall %} #}
-{% macro card(title='', meta='', cls='') -%}
-<div class="card {{ cls }}">
-  {% if title or meta %}
-  <div class="card-head"><h3>{{ title }}</h3>{% if meta %}<span class="meta">{{ meta }}</span>{% endif %}</div>
-  {% endif %}
-  {{ caller() }}
+{# Scope note: "<label> <b>name</b>. Show all →" — the drill-down escape hatch, one definition
+   (reused on Episodes / Review / Render log / Campaigns / Calendar when scoped to a channel/campaign). #}
+{% macro scope_note(label, name, all_href) -%}
+<p class="scope-note">{{ label }} <b>{{ name }}</b>. <a href="{{ all_href }}">Show all →</a></p>
+{%- endmacro %}
+
+{# Pager: "← Newer · Page X of Y · Older →" — one definition, reused by every paginated list
+   (Episodes table, Review, Render log, Autopilot). `hidden` carries scope params onto the links. #}
+{% macro pager(action, page, pages, total=None, hidden={}, status='', q='') -%}
+{% if pages > 1 %}
+<div class="pager">
+  {% if page > 1 %}<a class="btn ghost sm" href="{{ action }}?{{ query_string(status=status, q=q, page=page - 1, **hidden) }}">← Newer</a>{% else %}<span class="btn ghost sm pager-off">← Newer</span>{% endif %}
+  <span class="meta">Page {{ page }} of {{ pages }}{% if total is not none %} · {{ total }} match{{ 'es' if total != 1 else '' }}{% endif %}</span>
+  {% if page < pages %}<a class="btn ghost sm" href="{{ action }}?{{ query_string(status=status, q=q, page=page + 1, **hidden) }}">Older →</a>{% else %}<span class="btn ghost sm pager-off">Older →</span>{% endif %}
 </div>
+{% endif %}
 {%- endmacro %}
 
 {# Stat tile. tone ∈ '', ok, warn, bad, work. Optional href makes it a link; `live` adds a
@@ -81,6 +89,32 @@
   {% if label_text %}<label {% if for_id %}for="{{ for_id }}"{% endif %}>{{ label_text }}</label>{% endif %}
   {{ caller() }}
   {% if hint %}<p class="hint">{{ hint }}</p>{% endif %}
+</div>
+{%- endmacro %}
+
+{# THE single episode navigation — one stage-tab bar shared by /episodes, /assets and /tasks, so
+   there is ONE control (not a switcher + a duplicate chip bar). Rendering→/tasks and Review→/assets
+   open the richer workbench layouts; the other stages filter /episodes in place. `active` ∈
+   ''|queued|rendering|review|scheduled|published|failed. `counts` = {stage: n, 'all': n}. When
+   `search`, an episode search box is appended (used on /episodes; the workbench pages keep their own). #}
+{% macro stage_tabs(counts, active, scope_cid=None, search=false, q='', scope_hidden={}) -%}
+{% set c = counts or {} %}
+{% set base = ('?channel=' ~ scope_cid) if scope_cid else '' %}
+{% set sq = ('&channel=' ~ scope_cid) if scope_cid else '' %}
+<div class="filter-bar" role="tablist" aria-label="Episode stages">
+  <a class="chip {{ 'active' if active in ['', 'all'] }}" href="/episodes{{ base }}">All ({{ c.get('all', 0) }})</a>
+  <a class="chip {{ 'active' if active == 'queued' }}" href="/episodes?status=queued{{ sq }}">Queued ({{ c.get('queued', 0) }})</a>
+  <a class="chip {{ 'active' if active == 'rendering' }}" href="/tasks{{ base }}" title="Live render log">≣ Rendering ({{ c.get('rendering', 0) }})</a>
+  <a class="chip {{ 'active' if active == 'review' }}" href="/assets{{ base }}" title="Video review workbench">▦ Review ({{ c.get('review', 0) }})</a>
+  <a class="chip {{ 'active' if active == 'scheduled' }}" href="/episodes?status=scheduled{{ sq }}">Scheduled ({{ c.get('scheduled', 0) }})</a>
+  <a class="chip {{ 'active' if active == 'published' }}" href="/episodes?status=published{{ sq }}">Published ({{ c.get('published', 0) }})</a>
+  <a class="chip {{ 'active' if active == 'failed' }}" href="/episodes?status=failed{{ sq }}">Failed ({{ c.get('failed', 0) }})</a>
+  {%- if search %}
+  <form method="get" action="/episodes" class="filter-search" role="search">
+    {%- for k, v in scope_hidden.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
+    <input class="search" type="search" name="q" value="{{ q }}" placeholder="🔎 Search episodes…" aria-label="Search episodes">
+  </form>
+  {%- endif %}
 </div>
 {%- endmacro %}
 

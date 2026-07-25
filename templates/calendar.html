@@ -15,7 +15,7 @@
 {% endcall %}
 
 {% if scope_channel %}
-<p class="scope-note">Calendar for channel <b>{{ scope_channel.channel_name }}</b>. <a href="/calendar">Show all →</a></p>
+{{ ui.scope_note('Calendar for channel', scope_channel.channel_name, '/calendar') }}
 {% endif %}
 
 {% if slotted %}
