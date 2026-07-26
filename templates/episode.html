@@ -113,11 +113,15 @@
 <div class="card mt">
   <div class="card-head"><h3>Published</h3>{% if task.published_url %}<a href="{{ task.published_url }}" target="_blank" rel="noopener">View on platform ↗</a>{% endif %}</div>
   {% if task.stats_json %}
+  {% set early = task.stats_json.get('avg_pct_viewed') is none %}
   <div class="stats mt">
-    {{ ui.stat((task.stats_json.get('avg_pct_viewed', '—')|string) ~ '%', 'Retention') }}
-    {{ ui.stat(task.stats_json.get('views', '—'), 'Views') }}
+    {{ ui.stat(('⏳' if early else (task.stats_json.get('avg_pct_viewed')|string) ~ '%'), 'Retention', '' if early else 'ok') }}
+    {{ ui.stat(task.stats_json.get('views', '—'), 'Views', 'work' if early else '') }}
     {{ ui.stat(task.stats_json.get('likes', '—'), 'Likes') }}
   </div>
+  {% if early %}
+  <p class="hint mt-sm">👁 Views &amp; likes are <b>live</b> (updated hourly). ⏳ <b>Retention arrives ~2 days after publish</b> — YouTube only finalises watch-time analytics then; it isn't missing, just not ready yet.</p>
+  {% endif %}
   {% if retention_curve and retention_curve|length >= 2 %}
   <h4 class="sub-h mt">Audience retention <span class="meta">— % still watching across the video; ✕ marks where most left</span></h4>
   {% set W = 600 %}{% set H = 70 %}

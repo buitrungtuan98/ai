@@ -905,6 +905,41 @@ competing menus (a bottom bar duplicating the drawer, "Home" vs "Dashboard" for 
   per-object ACL, and episode/aesthetic config already lives in the campaign hub's Settings tab +
   the episode detail page. Building hollow ACL/drawer UI would violate the repo's KISS/YAGNI contract.
 
+## Near-real-time analytics — early views in ~1h `DONE`
+Operator asked why analytics takes ~2 days / ~5 videos. Traced it: retention (Analytics API) has a
+~2-day lag by YouTube's design, AND we only polled once daily (stacking +24h), AND the 5-video
+learning threshold is deliberate. Fix: serve the data that CAN be fast, honestly.
+- **T1 — hourly early views** `DONE`: `collect_early_stats` uses YouTube's Data API (near-real-time
+  views/likes/comments, 50 ids/call ≈ 1 quota unit) + Facebook views, for episodes younger than the
+  Analytics lag, merged as `{views, likes, early}` on a separate `early_fetched_at` clock.
+- **T2 — unstuck retention** `DONE`: `collect_stats` moved from the once-daily pass to its own hourly
+  NX guard, so first retention lands ~48h sharp (the YouTube floor) instead of 48–72h. Distiller +
+  heartbeat stay daily.
+- **T3 — honest UI** `DONE`: the episode view shows live views + an explicit "⏳ Retention arrives
+  ~2 days after publish (YouTube processing delay)" note, so a young video reads "live", not broken.
+- **T4 — guardrails** `DONE`: early views never set `avg_pct_viewed`; the distiller threshold and the
+  Overview scorecard now require it, so early data never trips learning/autopilot. See ADR-051.
+- Zero Gemini cost, ~24 YT quota units/day, no new env var. 233 tests (3 new), ruff clean, docs green.
+
+## "Queue stuck" — Task Logs was lying (+ real stuck-detection) `DONE`
+A screenshot showed a "stuck" queue. Tracing it, the queue was mostly healthy (rendered episodes
+waiting for their posting slots) — the Task Logs DISPLAY had two bugs that made it look frozen, plus
+a genuine stuck-worker case wasn't surfaced.
+- **F1 — ghost progress** `DONE`: `/api/tasks` showed live Redis % for any non-terminal status, so a
+  re-queued task that crashed mid-render kept showing e.g. "Pending Queue · 89.2%". Now live % shows
+  only for actively-working statuses; `clear_progress` is called on every re-queue path (retry route,
+  `apply_reject` rerender, the reaper).
+- **F2 — honest TIME** `DONE`: the TIME column was `finished_at − started_at`, but `finished_at` is
+  overwritten with the PUBLISH time for slot-scheduled episodes — so a 2-min render that published
+  14 h later at its slot read "886m". Now the render wall-time is stored (`render_json.render_seconds`)
+  and shown instead.
+- **F3 — real stuck-detection** `DONE`: a worker-down banner on the render log (nothing renders or
+  publishes without the worker), and a render-concurrency-SAFE orphaned-lock clear
+  (`clear_orphaned_render_lock` — two-tick confirmation so a live render is never mistaken for
+  orphaned) so a crashed-worker lock frees fast instead of waiting out the ~46-min TTL.
+- Verified in a browser (worker banner shows; a slot-waited task reads "2m 42s" not 886m; pending
+  rows show 0% not a ghost). 230 tests (4 new), ruff clean, docs green.
+
 ## Component dedup — one control per job, shared macros, dead code out `DONE`
 An audit of every macro/partial/CSS class for redundancy + confusing patterns.
 - **R1 — one episode tab bar** `DONE`: `/episodes` had TWO overlapping controls (the view-switcher

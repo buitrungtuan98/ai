@@ -381,3 +381,92 @@ def test_expire_recovers_scheduled_task(session, user, channel, tmp_path):
     sch.expire_stale_buffers(session, now=datetime(2026, 7, 17, 10, 0))
     session.refresh(task)
     assert task.status == TaskStatus.FAILED and "Retry" in task.error_message
+
+
+def test_clear_orphaned_render_lock_is_two_tick_and_concurrency_safe(session, user, channel):
+    """A crashed-worker lock is freed only after TWO ticks with no active render (so a just-acquired
+    lock is never yanked mid-setup); a live render (a working-status task) is never cleared."""
+    from database.models import Campaign, Task
+    from database.types import CampaignStatus, TaskStatus
+    from workers import scheduler as sch
+    from workers.task_queue import LOCK_KEY, conn
+
+    conn.delete(LOCK_KEY)
+    conn.delete(sch._LOCK_SUSPECT_KEY)
+    assert sch.clear_orphaned_render_lock(session) is False  # no lock → nothing to do
+
+    # Lock held, nothing rendering: tick 1 only suspects, tick 2 clears.
+    conn.set(LOCK_KEY, "1")
+    assert sch.clear_orphaned_render_lock(session) is False
+    assert conn.get(LOCK_KEY)                                # still held after one tick
+    assert sch.clear_orphaned_render_lock(session) is True
+    assert not conn.get(LOCK_KEY)                            # freed on the second tick
+
+    # A genuinely live render (a task in a working status) is NEVER mistaken for orphaned.
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="X", total_episodes=5,
+                   status=CampaignStatus.active)
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    session.add(Task(campaign_id=cam.id, user_id=user.id, episode_number=1,
+                     status=TaskStatus.RENDERING))
+    session.commit()
+    conn.set(LOCK_KEY, "1")
+    assert sch.clear_orphaned_render_lock(session) is False  # working task → protected
+    assert sch.clear_orphaned_render_lock(session) is False  # ...even across two ticks
+    assert conn.get(LOCK_KEY)                                # lock preserved (render-concurrency-1)
+    conn.delete(LOCK_KEY)
+
+
+def test_collect_early_stats_merges_and_throttles(session, user, channel, monkeypatch):
+    """Near-real-time views for a young video: merged as {views, likes, early} without a retention
+    field, on a separate hourly clock; throttled within the window, refetched after it."""
+    from datetime import timedelta
+
+    from database.models import Campaign, Task
+    from database.types import CampaignStatus, TaskStatus
+    from services import analytics_service as an
+
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="Y", total_episodes=9,
+                   status=CampaignStatus.active)
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    now = datetime.utcnow()
+    young = Task(campaign_id=cam.id, user_id=user.id, episode_number=1, status=TaskStatus.COMPLETED,
+                 published_video_id="vY", finished_at=now - timedelta(hours=3))  # inside the <48h window
+    session.add(young)
+    session.commit()
+
+    monkeypatch.setattr(an, "fetch_youtube_early_stats",
+                        lambda ch, ids: {"vY": {"views": 1200, "likes": 40, "comments": 5}})
+    assert an.collect_early_stats(session, now=now) == 1
+    session.refresh(young)
+    assert young.stats_json["views"] == 1200 and young.stats_json["early"] is True
+    assert "avg_pct_viewed" not in young.stats_json          # never sets retention (T4)
+    assert young.stats_json.get("early_fetched_at")          # its own clock, not `fetched_at`
+    assert "fetched_at" not in young.stats_json              # retention refresh untouched
+
+    assert an.collect_early_stats(session, now=now + timedelta(minutes=30)) == 0   # throttled
+    assert an.collect_early_stats(session, now=now + timedelta(hours=2)) == 1      # window passed
+
+
+def test_early_only_episodes_do_not_trip_distiller(session, user, channel, monkeypatch):
+    """Early-view episodes (no retention yet) must not count toward the 5-measured learning threshold."""
+    from database.models import Campaign, Task
+    from database.types import CampaignStatus, TaskStatus
+    from workers import scheduler as sch
+
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="E", total_episodes=30,
+                   status=CampaignStatus.active)
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    now = datetime.utcnow()
+    for ep in range(1, 6):  # 5 episodes with EARLY views but no retention
+        session.add(Task(campaign_id=cam.id, user_id=user.id, episode_number=ep,
+                         status=TaskStatus.COMPLETED, synopsis=f"s{ep}",
+                         stats_json={"views": 100 * ep, "early": True,
+                                     "early_fetched_at": now.isoformat()}))
+    session.commit()
+    assert sch.maybe_distill_campaign(session, cam, now=now) is False  # none measured → no distill

@@ -1789,7 +1789,9 @@ def campaign_overview(request: Request, user: CurrentUser, db: DbDep,
     episodes = db.scalars(
         select(Task).where(Task.campaign_id == campaign.id).order_by(Task.episode_number)
     ).all()
-    measured = [t for t in episodes if t.stats_json]
+    # "Measured" = retention present. Early views (near-real-time, no retention yet) carry stats_json
+    # but no avg_pct_viewed, so they must NOT count toward the scorecard/best-retention (T4).
+    measured = [t for t in episodes if t.stats_json and t.stats_json.get("avg_pct_viewed") is not None]
     best = max(measured, key=lambda t: t.stats_json.get("avg_pct_viewed", 0), default=None)
     hub = _hub_context(db, user, campaign)  # single channel fetch, reused for the audience line
     return templates.TemplateResponse(
@@ -1946,6 +1948,7 @@ def tasks_page(request: Request, user: CurrentUser, db: DbDep,
         request, "tasks.html",
         {"request": request, "user": user, "nav": "tasks",
          "scope_campaign": scope, "scope_channel": scope_channel,
+         "worker_ok": task_queue.worker_alive(),  # F3: surface a dead worker unmistakably
          "stage_counts": _episode_stage_counts(db, user, campaign=campaign, channel=channel)})
 
 
@@ -1981,17 +1984,30 @@ def api_tasks(user: CurrentUser, db: DbDep,
         select(Campaign).where(Campaign.user_id == user.id)).all()}
     channels = {c.id: c for c in db.scalars(
         select(Channel).where(Channel.user_id == user.id)).all()}
-    terminal = ("COMPLETED", "FAILED", "AWAITING_REVIEW", "SCHEDULED")
+    # Statuses where a job is ACTIVELY working — the only ones whose live Redis % is meaningful. A
+    # queued/parked/terminal task uses its durable column, so a re-queued task never shows ghost
+    # progress left in Redis by a crashed prior attempt (that skipped clear_progress).
+    rendering = ("AI_GENERATION", "AUDIO_SYNCED", "RENDERING", "PUBLISHING")
     out = []
     for t in rows:
-        # Live % comes from Redis while running; fall back to the durable column.
-        live = task_queue.get_progress(t.id) if t.status.value not in terminal else t.progress_pct
+        working = t.status.value in rendering
+        live = task_queue.get_progress(t.id) if working else t.progress_pct
         campaign = campaigns.get(t.campaign_id)
         channel = channels.get(campaign.channel_id) if campaign else None
-        duration_s = None
-        if t.started_at:
+        # Duration = RENDER time, not the wait-for-slot. `finished_at` is later overwritten with the
+        # publish time for slot-scheduled / review episodes, so a 2-min render that publishes 14h
+        # later would otherwise read "886m". Prefer the stored render_seconds; live-elapse while
+        # working; fall back to started→finished only for legacy rows without render_seconds.
+        render_seconds = (t.render_json or {}).get("render_seconds")
+        if working and t.started_at:
+            duration_s = max(0, int((datetime.utcnow() - t.started_at).total_seconds()))
+        elif render_seconds is not None:
+            duration_s = max(0, int(render_seconds))
+        elif t.started_at:
             end = t.finished_at or datetime.utcnow()
             duration_s = max(0, int((end - t.started_at).total_seconds()))
+        else:
+            duration_s = None
         out.append({
             "id": t.id, "campaign_id": t.campaign_id, "episode": t.episode_number,
             "topic": campaign.topic_name if campaign else f"C{t.campaign_id}",
@@ -2067,6 +2083,7 @@ def retry_task(task_id: int, user: CurrentUser, db: DbDep, return_to: str = Form
     task.retry_count += 1
     task.progress_pct = 0
     task.status = TaskStatus.PENDING_QUEUE
+    task_queue.clear_progress(task.id)  # drop any ghost % from a crashed prior attempt (F1)
     buf = db.scalar(select(BufferPoolItem).where(
         BufferPoolItem.campaign_id == task.campaign_id,
         BufferPoolItem.episode_number == task.episode_number,
