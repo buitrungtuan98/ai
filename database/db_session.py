@@ -88,6 +88,7 @@ _COLUMN_UPGRADES: dict[str, dict[str, str]] = {
     "users": {
         "gemini_model": "VARCHAR(200)",
         "gemini_image_model": "VARCHAR(200)",
+        "pollinations_token": "TEXT",  # EncryptedString (Fernet ciphertext stored as text)
         "settings_json": "TEXT",
     },
 }

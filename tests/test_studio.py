@@ -238,6 +238,136 @@ def test_produce_studio_chains_references_and_skips_pexels(tmp_path, monkeypatch
     assert scene_calls[2]["refs"] == [sheet_path, scene_calls[1]["out"]]
 
 
+# ── Pollinations image provider + provider chain (ADR-053) ───────────────────
+def test_pollinations_seed_is_deterministic_per_prompt():
+    from core.ai_engine import _pollinations_seed
+
+    assert _pollinations_seed("same prompt") == _pollinations_seed("same prompt")
+    assert _pollinations_seed("scene a") != _pollinations_seed("scene b")   # scenes vary
+    assert 0 <= _pollinations_seed("x") < 1_000_000
+
+
+def test_call_pollinations_builds_request_and_writes(tmp_path, monkeypatch):
+    import requests
+
+    from core import ai_engine
+
+    captured = {}
+
+    class FakeResp:
+        status_code = 200
+        headers = {"content-type": "image/jpeg"}
+        content = b"IMGDATA"
+
+        def raise_for_status(self):
+            pass
+
+    def fake_get(url, params=None, timeout=None):
+        captured["url"] = url
+        captured["params"] = params
+        return FakeResp()
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    out = str(tmp_path / "o.png")
+    res = ai_engine._call_pollinations(model="flux", prompt="a hero jumping", out_path=out,
+                                       token="tok", width=1080, height=1920, seed=42)
+    assert res == out and open(out, "rb").read() == b"IMGDATA"
+    assert "image.pollinations.ai/prompt/" in captured["url"] and "a%20hero%20jumping" in captured["url"]
+    p = captured["params"]
+    assert p["model"] == "flux" and p["width"] == 1080 and p["height"] == 1920 and p["seed"] == 42
+    assert p["token"] == "tok" and p["safe"] == "true" and p["nologo"] == "true"
+
+
+def test_call_pollinations_rejects_non_image(tmp_path, monkeypatch):
+    import requests
+
+    from core import ai_engine
+    from core.ai_engine import ImageGenError
+
+    class FakeResp:
+        status_code = 200
+        headers = {"content-type": "text/html"}   # a blocked/failed prompt returns an error page
+        content = b"<html>no</html>"
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResp())
+    with pytest.raises(ImageGenError):
+        ai_engine._call_pollinations(model="flux", prompt="x", out_path=str(tmp_path / "o.png"),
+                                     token=None, width=10, height=10, seed=1)
+
+
+def test_generate_image_dispatches_to_pollinations(tmp_path, monkeypatch):
+    from core import ai_engine
+
+    seen = {}
+
+    def fake_poll(*, model, prompt, out_path, token, width, height, seed):
+        seen.update(model=model, token=token, width=width, height=height)
+        open(out_path, "wb").write(b"P")
+        return out_path
+
+    monkeypatch.setattr(ai_engine, "_call_pollinations", fake_poll)
+    monkeypatch.setattr(ai_engine, "_call_gemini_image",
+                        lambda **k: (_ for _ in ()).throw(AssertionError("Gemini called for a pollinations entry")))
+    out = str(tmp_path / "o.png")
+    res = ai_engine.generate_image(prompt="p", api_key="k", out_path=out, model="pollinations:flux",
+                                   pollinations_token="tok", width=720, height=1280)
+    assert res == out and seen == {"model": "flux", "token": "tok", "width": 720, "height": 1280}
+
+
+def test_generate_image_falls_back_gemini_to_pollinations(tmp_path, monkeypatch):
+    from core import ai_engine
+
+    monkeypatch.setattr(ai_engine, "_BACKOFF_BASE_SECONDS", 0)
+
+    def dead_gemini(**k):
+        raise RuntimeError("500 transient server error")   # → GeminiError after retries
+
+    def fake_poll(*, model, prompt, out_path, token, width, height, seed):
+        open(out_path, "wb").write(b"P")
+        return out_path
+
+    monkeypatch.setattr(ai_engine, "_call_gemini_image", dead_gemini)
+    monkeypatch.setattr(ai_engine, "_call_pollinations", fake_poll)
+    out = str(tmp_path / "o.png")
+    res = ai_engine.generate_image(prompt="p", api_key="k", out_path=out,
+                                   model="gemini-2.5-flash-image,pollinations:flux")
+    assert res == out and open(out, "rb").read() == b"P"    # Google down → drew for free on Pollinations
+
+
+def test_generate_image_pollinations_primary_skips_gemini(tmp_path, monkeypatch):
+    from core import ai_engine
+
+    def fake_poll(*, model, prompt, out_path, token, width, height, seed):
+        open(out_path, "wb").write(b"P")
+        return out_path
+
+    monkeypatch.setattr(ai_engine, "_call_pollinations", fake_poll)
+    monkeypatch.setattr(ai_engine, "_call_gemini_image",
+                        lambda **k: (_ for _ in ()).throw(AssertionError("Gemini called though Pollinations is primary")))
+    out = str(tmp_path / "o.png")
+    ai_engine.generate_image(prompt="p", api_key="k", out_path=out,
+                             model="pollinations:flux,gemini-2.5-flash-image")
+    assert open(out, "rb").read() == b"P"
+
+
+def test_generate_image_block_does_not_reroute_to_pollinations(tmp_path, monkeypatch):
+    from core import ai_engine
+    from core.ai_engine import GeminiBlockedError
+
+    monkeypatch.setattr(ai_engine, "_BACKOFF_BASE_SECONDS", 0)
+    poll_calls = []
+    monkeypatch.setattr(ai_engine, "_call_gemini_image",
+                        lambda **k: (_ for _ in ()).throw(GeminiBlockedError("blocked")))
+    monkeypatch.setattr(ai_engine, "_call_pollinations", lambda **k: poll_calls.append(1))
+    with pytest.raises(GeminiBlockedError):
+        ai_engine.generate_image(prompt="p", api_key="k", out_path=str(tmp_path / "o.png"),
+                                 model="gemini-2.5-flash-image,pollinations:flux")
+    assert not poll_calls   # unsafe content is terminal — never rerouted to another provider
+
+
 def test_produce_studio_requires_a_cast(tmp_path):
     """Studio Mode with an empty cast fails clearly instead of silently rendering stock."""
     import pytest

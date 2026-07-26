@@ -699,6 +699,40 @@ def test_gemini_model_chain_save_semantics(client):
     assert stored() is None  # back to the server default
 
 
+def test_pollinations_token_save_and_encrypted_at_rest(client, tmp_path, monkeypatch):
+    """The Pollinations token saves like the other secrets: only overwritten when provided, and
+    stored Fernet-encrypted (never plaintext in the DB)."""
+    import sqlite3
+
+    from core.config import settings
+    from database.db_session import SessionLocal
+    from database.models import User
+
+    def stored():
+        db = SessionLocal()
+        v = db.query(User).first().pollinations_token
+        db.close()
+        return v
+
+    client.post("/credentials", data={"pollinations_token": "poll-secret-123"}, follow_redirects=False)
+    assert stored() == "poll-secret-123"                       # decrypts back on read
+    client.post("/credentials", data={"gemini_model": "x"}, follow_redirects=False)  # token field absent
+    assert stored() == "poll-secret-123"                       # kept (blank/absent never wipes a secret)
+
+    db_path = settings.DATABASE_URL.split("sqlite:///", 1)[-1]
+    raw = sqlite3.connect(db_path).execute("SELECT pollinations_token FROM users").fetchone()[0]
+    assert raw and "poll-secret-123" not in raw                # ciphertext at rest, not plaintext
+
+
+def test_credentials_test_pollinations(client, monkeypatch):
+    """The Credentials page can live-test Pollinations (keyless is valid — it tests reachability)."""
+    from services import verification
+
+    monkeypatch.setattr(verification, "verify_pollinations", lambda t: (True, "reachable (keyless)"))
+    r = client.post("/credentials/test/pollinations").json()
+    assert r["ok"] and "reachable" in r["detail"]
+
+
 def test_gemini_models_endpoint(client, monkeypatch):
     """Live model list annotated with curated free-tier limits; known-quota models sort first;
     no key anywhere → 400 with a actionable message."""

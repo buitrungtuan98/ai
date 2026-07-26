@@ -974,6 +974,30 @@ the image model's config and quota separate from the text model avoids one spent
 killing the other. This ADR (U1) lands the data model, config, and operator UI; the image-generation
 primitive and the Studio render path follow in the same feature.
 
+### ADR-053 — Studio Mode image generation is a $0 provider chain (Gemini + Pollinations FLUX)
+**Decision:** the Studio-Mode image model (ADR-052) becomes a comma-separated **provider chain**, reusing
+the same fallback mechanism as the text model. A `gemini-*` entry draws with the Gemini image model
+(multi-image input → reference-image conditioning for character/temporal consistency); a
+`pollinations:flux` entry draws with **Pollinations** — a free, **keyless** HTTPS image API — via
+`ai_engine._call_pollinations`. Either provider may lead, and on **any** provider failure the chain
+falls over to the next entry — **except a content block, which is terminal** (unsafe content is never
+rerouted to a second provider). Pollinations is text-to-image only, so it cannot use the reference
+sheet; consistency there is carried by the character *description* plus a **deterministic per-prompt
+seed** (same scene → same image on re-render; different scenes vary). An optional per-user
+`pollinations_token` (encrypted at rest, editable on Credentials, with a Test button) or the
+`POLLINATIONS_TOKEN` env raises the free rate limits; blank uses the anonymous tier. The Credentials
+"Image model" card offers Gemini-first / Pollinations-first / Pollinations-only presets. The worker
+binds the token + output geometry into the image generator; Pollinations calls are **not** metered
+against the Gemini daily budget (different, free provider).
+**Why:** the operator asked for a fallback "in case Google doesn't work" that keeps cost at $0 —
+covering not just a spent Gemini image quota but outages/rate-limits, and optionally making the free
+provider the default. Reusing the existing model-chain machinery means it's a config change, not a new
+code path (DRY): the same `generate_image` orchestrates both providers behind one seam, so
+`video_factory`/`studio` stay provider-agnostic. Gemini stays the recommended primary because
+reference-image conditioning gives markedly better character consistency — Pollinations is the graceful
+degrade (a slightly-less-consistent video beats a failed render), but the chain lets the operator flip
+the order or go Pollinations-only. Not rerouting *blocked* content preserves the brand-safety gate.
+
 ### ADR-050 — One "Episodes" surface + kill the lateral navigation loop
 **Decision:** `/episodes`, `/assets` (Review) and `/tasks` (render log) are three *layouts of one
 thing* — the episode pipeline. They previously cross-linked with scattered "↗" buttons and no

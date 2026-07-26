@@ -1331,6 +1331,10 @@ def test_credential(provider: str, user: CurrentUser):
         key = settings.FREESOUND_API_KEY  # server-wide (.env) — powers Auto background music
         ok, detail = verification.verify_freesound(key) if key else \
             (False, "FREESOUND_API_KEY is not set in .env — Auto background music can't run.")
+    elif provider == "pollinations":
+        # Keyless is valid — this tests reachability (+ the token if one is saved). Studio image fallback.
+        token = user.pollinations_token or settings.POLLINATIONS_TOKEN
+        ok, detail = verification.verify_pollinations(token)
     else:
         raise HTTPException(404, "Unknown provider")
     return {"ok": ok, "detail": detail}
@@ -1344,6 +1348,7 @@ def save_credentials(
     pexels_api_key: str = Form(""),
     telegram_token: str = Form(""),
     telegram_chat_id: str = Form(""),
+    pollinations_token: str = Form(""),
     gemini_model: str | None = Form(None),
     gemini_image_model: str | None = Form(None),
 ):
@@ -1356,6 +1361,8 @@ def save_credentials(
         user.telegram_token = telegram_token
     if telegram_chat_id:
         user.telegram_chat_id = telegram_chat_id
+    if pollinations_token:
+        user.pollinations_token = pollinations_token
     # Model chain is NOT a secret and has its own form: when the field is present, the submitted
     # value replaces the stored one — an EMPTY submission means "back to the server default".
     if gemini_model is not None:

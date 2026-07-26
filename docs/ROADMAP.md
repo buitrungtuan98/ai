@@ -1000,6 +1000,23 @@ diffusion, no paid API). See ADR-052.
 - Verified: 245 tests passing (12 new), 11 skipped (1 new ffmpeg-gated), ruff clean, docs guard green;
   the U1 operator UI checked in a real browser.
 
+## Studio Mode — Pollinations FLUX as a $0 image provider `DONE`
+A second image provider behind (or ahead of) Gemini, so Studio Mode keeps drawing for free when
+Google's image model is down/blocked/quota-spent — or as the default. See ADR-053.
+- The image field is now a **provider chain**: `pollinations:flux` draws with Pollinations (free,
+  keyless, text-to-image); any entry may lead; any failure falls to the next except a content block.
+  `ai_engine.generate_image` dispatches per entry (`_call_pollinations` + a deterministic per-prompt
+  seed for reproducible, scene-varying frames); Pollinations isn't metered against the Gemini budget.
+- Credentials: an optional **Pollinations token** (encrypted at rest, Test button) + **Image model**
+  preset buttons (Gemini-first / Pollinations-first / Pollinations-only) to set the default in one click.
+- Worker binds the token + output geometry into the image generator; `POLLINATIONS_TOKEN` optional
+  server default; `.env.example` updated.
+- Consistency note: Gemini stays recommended primary (reference-sheet conditioning = tightest
+  character match); Pollinations holds the character by description + seed — looser, but a graceful
+  degrade beats a failed render.
+- Verified: 254 tests passing (9 new — provider dispatch, fallback, primary, block-not-rerouted,
+  request builder, seed, encrypted token save, Test endpoint), 11 skipped, ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download
