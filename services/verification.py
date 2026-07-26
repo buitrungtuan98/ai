@@ -63,6 +63,27 @@ def verify_freesound(api_key: str) -> tuple[bool, str]:
         return False, "Could not reach Freesound (network error)."
 
 
+def verify_pollinations(token: str | None = None) -> tuple[bool, str]:
+    """Draw one tiny image — proves Pollinations is reachable (and, if a token is set, that it's
+    accepted). The keyless anonymous tier is valid too, so no token is not a failure."""
+    try:
+        import requests
+
+        params: dict = {"model": "flux", "width": 256, "height": 256, "nologo": "true", "safe": "true"}
+        if token:
+            params["token"] = token
+        resp = requests.get("https://image.pollinations.ai/prompt/a%20tiny%20test%20icon",
+                            params=params, timeout=90)
+        ctype = resp.headers.get("content-type", "")
+        if resp.status_code == 200 and ctype.startswith("image/") and resp.content:
+            tier = "token accepted" if token else "keyless anonymous tier"
+            return True, f"Pollinations is reachable ({tier}) — Studio Mode can draw for free."
+        return False, f"Pollinations did not return an image (HTTP {resp.status_code}, {ctype!r})."
+    except Exception as exc:  # noqa: BLE001 — the exception text can embed the token; never expose it
+        logger.warning("Pollinations verification network error: %s", type(exc).__name__)
+        return False, "Could not reach Pollinations (network error)."
+
+
 def verify_telegram(token: str, chat_id: str | None = None) -> tuple[bool, str]:
     try:
         import requests

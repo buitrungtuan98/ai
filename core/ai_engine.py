@@ -173,6 +173,11 @@ class GeminiError(RuntimeError):
     """Generation failed after all retries."""
 
 
+class ImageGenError(RuntimeError):
+    """A non-Gemini image provider (e.g. Pollinations) failed after all retries. Caught by the image
+    provider-chain so a dead provider falls over to the next entry (ADR-053)."""
+
+
 # ── The raw call (mock this in tests) ────────────────────────────────────────
 def _call_gemini(
     *,
@@ -1003,31 +1008,101 @@ def _call_gemini_image(
 
 def generate_image(
     *, prompt: str, api_key: str, out_path: str,
-    model: str | None = None, reference_paths: list[str] | None = None, max_retries: int = 2,
+    model: str | None = None, reference_paths: list[str] | None = None,
+    pollinations_token: str | None = None, width: int = 1080, height: int = 1920,
+    max_retries: int = 2,
 ) -> str:
-    """Draw one image with the Gemini image model, writing it to `out_path` and returning the path.
+    """Draw one image, writing it to `out_path` and returning the path.
 
-    `model` may be a comma-separated fallback chain (like the text model) — a retired model (404) or
-    a spent daily image quota fails over to the next entry. A content block is NOT retried. Reference
-    images condition the drawing for character/temporal consistency."""
+    `model` is a comma-separated PROVIDER chain (ADR-053): a `gemini-*` entry draws with the Gemini
+    image model (reference-image conditioning for character/temporal consistency); a `pollinations:*`
+    entry draws with Pollinations FLUX (free, no key — text-to-image, so it can't use the reference
+    images and relies on the prompt + a deterministic seed). Either provider may lead. On ANY provider
+    failure the chain falls over to the next entry — EXCEPT a content block, which is terminal (unsafe
+    content is never rerouted to another provider). `width`/`height` size the Pollinations request;
+    Gemini ignores them. `pollinations_token` (optional) raises Pollinations' free rate limits."""
     model = model or settings.GEMINI_IMAGE_MODEL
     refs = reference_paths or []
-    models = model_chain(model)
-    last: GeminiError | None = None
-    for i, m in enumerate(models):
+    entries = model_chain(model)
+    last: Exception | None = None
+    for i, entry in enumerate(entries):
         try:
+            if entry.lower().startswith("pollinations"):
+                sub = entry.split(":", 1)[1].strip() if ":" in entry else "flux"
+                return _generate_pollinations_single(
+                    prompt=prompt, model=sub or "flux", out_path=out_path,
+                    token=pollinations_token, width=width, height=height, max_retries=max_retries,
+                )
             return _generate_image_single(
-                prompt=prompt, api_key=api_key, model=m, out_path=out_path,
+                prompt=prompt, api_key=api_key, model=entry, out_path=out_path,
                 reference_paths=refs, max_retries=max_retries,
             )
-        except GeminiError as exc:
-            msg = str(exc)
-            if i < len(models) - 1 and ("daily quota" in msg or "model not found" in msg):
-                logger.warning("Image model %s unavailable — falling back to %s", m, models[i + 1])
+        except GeminiBlockedError:
+            raise  # a content block is terminal — do not reroute unsafe content to another provider
+        except (GeminiError, ImageGenError) as exc:
+            if i < len(entries) - 1:
+                logger.warning("Image provider %r failed — falling back to %r: %s",
+                               entry, entries[i + 1], exc)
                 last = exc
                 continue
             raise
-    raise last if last is not None else GeminiError("no image model in the chain succeeded")
+    raise last if last is not None else GeminiError("no image provider in the chain succeeded")
+
+
+def _pollinations_seed(prompt: str) -> int:
+    """A deterministic seed from the prompt: a re-render of the SAME scene reproduces its image, while
+    different scenes (different prompts) vary — character identity comes from the description, not the
+    seed, so scenes differ but the described character stays recognizable."""
+    import hashlib
+
+    return int(hashlib.sha1(prompt.encode("utf-8")).hexdigest()[:12], 16) % 1_000_000
+
+
+def _call_pollinations(
+    *, model: str, prompt: str, out_path: str, token: str | None,
+    width: int, height: int, seed: int,
+) -> str:
+    """Single point that calls the Pollinations image API (free, keyless). GET the drawn image and
+    write it to `out_path`. `safe=true` keeps it brand-safe; `nologo=true` drops the watermark."""
+    import urllib.parse
+
+    import requests
+
+    url = "https://image.pollinations.ai/prompt/" + urllib.parse.quote(prompt[:1800], safe="")
+    params: dict = {"model": model or "flux", "width": width, "height": height,
+                    "seed": seed, "nologo": "true", "safe": "true"}
+    if token:
+        params["token"] = token
+    resp = requests.get(url, params=params, timeout=120)
+    resp.raise_for_status()
+    ctype = resp.headers.get("content-type", "")
+    if not ctype.startswith("image/") or not resp.content:
+        # A blocked/failed prompt returns an error page, not an image — treat as a provider failure.
+        raise ImageGenError(f"Pollinations returned no image (content-type={ctype!r}, "
+                            f"{len(resp.content)} bytes)")
+    with open(out_path, "wb") as f:
+        f.write(resp.content)
+    return out_path
+
+
+def _generate_pollinations_single(
+    *, prompt: str, model: str, out_path: str, token: str | None,
+    width: int, height: int, max_retries: int,
+) -> str:
+    """One Pollinations provider's attempt loop: retry transient HTTP failures with backoff, then
+    raise ImageGenError so the provider chain can fall over to the next entry."""
+    seed = _pollinations_seed(prompt)
+    last: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            return _call_pollinations(model=model, prompt=prompt, out_path=out_path, token=token,
+                                      width=width, height=height, seed=seed)
+        except Exception as exc:  # noqa: BLE001 — transient HTTP errors are retryable
+            last = exc
+            logger.warning("Pollinations attempt %d/%d failed: %s", attempt + 1, max_retries, exc)
+            if attempt < max_retries - 1 and _BACKOFF_BASE_SECONDS:
+                time.sleep(_BACKOFF_BASE_SECONDS * (2**attempt))
+    raise ImageGenError(f"Pollinations failed after {max_retries} attempts: {last}")
 
 
 def _generate_image_single(

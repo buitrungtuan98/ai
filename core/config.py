@@ -49,8 +49,14 @@ class Settings(BaseSettings):
     # quota fails over to the next entry. `-latest` aliases auto-track current models.
     GEMINI_MODEL: str = "gemini-flash-lite-latest,gemini-flash-latest"
     # Image-generation model for Studio Mode (AI-drawn story visuals). SEPARATE from the text model
-    # so its quota/model can be managed on its own (a comma-separated fallback chain is allowed too).
+    # so its quota/model can be managed on its own. This is a comma-separated PROVIDER chain: a
+    # `pollinations:flux` entry draws with Pollinations (free, no key) instead of Gemini, so the chain
+    # can lead with either provider (e.g. "pollinations:flux,gemini-2.5-flash-image" makes the free
+    # provider primary). A failed entry falls over to the next (ADR-053).
     GEMINI_IMAGE_MODEL: str = "gemini-2.5-flash-image"
+    # Optional Pollinations token (raises the free tier's rate limits). Per-user token on Credentials
+    # takes priority; blank here + blank there = the keyless anonymous tier. Cost stays $0 either way.
+    POLLINATIONS_TOKEN: str | None = None
     # Your model's free-tier requests/day (see the AI Studio Rate limits page). Powers the
     # dashboard quota meter + heartbeat warnings. Optional — leave unset to just count calls.
     GEMINI_DAILY_BUDGET: int | None = None

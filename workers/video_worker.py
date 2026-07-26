@@ -15,11 +15,12 @@ import os
 import traceback
 from dataclasses import dataclass
 from datetime import datetime
+from functools import partial
 
 from sqlalchemy import func, select
 
 from core import video_factory
-from core.ai_engine import generate_script
+from core.ai_engine import generate_image, generate_script
 from core.config import settings
 from core.video_factory import Branding
 from database.db_session import SessionLocal
@@ -462,8 +463,14 @@ def render_task(task_id: int) -> None:
         gemini_key, pexels_key = _resolve_keys(user, visual_source=visual_source)
         # Model chain: the user's Credentials choice wins; .env GEMINI_MODEL is the server default.
         gemini_model = user.gemini_model or settings.GEMINI_MODEL
-        # Image model is managed separately from the text model (own field, own quota).
+        # Image model is managed separately from the text model (own field, own provider chain).
         image_model = user.gemini_image_model or settings.GEMINI_IMAGE_MODEL
+        # Studio image generator: bind the Pollinations token + output geometry once (ADR-053), so a
+        # `pollinations:flux` chain entry can draw for free when Gemini is unavailable — or as primary.
+        _prof = video_factory.resolve_profile(cfg.get("video_format", "short"))
+        image_gen = partial(generate_image,
+                            pollinations_token=(user.pollinations_token or settings.POLLINATIONS_TOKEN),
+                            width=_prof.width, height=_prof.height)
         task.started_at = datetime.utcnow()
 
         _set_status(db, task, TaskStatus.AI_GENERATION, 5)
@@ -550,6 +557,7 @@ def render_task(task_id: int) -> None:
                 image_api_key=gemini_key,
                 image_model=image_model,
                 studio_sheet_dir=os.path.join(settings.MEDIA_ROOT, "studio", "sheets", str(channel.id)),
+                gen_image=image_gen,
                 vet_batch=vet_batch,
                 on_progress=lambda p: set_progress(task_id, 10 + p * 0.8),
             )
