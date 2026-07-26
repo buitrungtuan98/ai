@@ -80,12 +80,16 @@ def _set_status(db, task: Task, status: TaskStatus, pct: float) -> None:
     set_progress(task.id, pct)
 
 
-def _resolve_keys(user: User) -> tuple[str, str]:
+def _resolve_keys(user: User, *, visual_source: str = "stock") -> tuple[str, str]:
+    """Gemini (script/QC/Studio-image) key is always required. Stock mode also needs a Pexels key;
+    Studio mode draws its visuals with the Gemini image model, so Pexels is optional there."""
     gemini = user.gemini_api_key or settings.GEMINI_API_KEY
     pexels = user.pexels_api_key or settings.PEXELS_API_KEY
-    if not gemini or not pexels:
-        raise RuntimeError("Missing Gemini/Pexels API key (set per-user in the dashboard or in .env).")
-    return gemini, pexels
+    if not gemini:
+        raise RuntimeError("Missing Gemini API key (set per-user in the dashboard or in .env).")
+    if visual_source != "studio" and not pexels:
+        raise RuntimeError("Missing Pexels API key (set per-user in the dashboard or in .env).")
+    return gemini, pexels or ""
 
 
 def _resolve_music(cfg: dict) -> tuple[str | None, dict | None]:
@@ -452,9 +456,14 @@ def render_task(task_id: int) -> None:
         # Default ON; every check fails open, so a vision-API outage never blocks an episode.
         auto_qc = cfg.get("auto_qc", "on") != "off"
 
-        gemini_key, pexels_key = _resolve_keys(user)
+        # Visual source (ADR-052): stock footage (Pexels) or Studio Mode (AI-drawn consistent
+        # characters). Studio draws with the Gemini image model, so it needs no Pexels key.
+        visual_source = "studio" if cfg.get("visual_source") == "studio" else "stock"
+        gemini_key, pexels_key = _resolve_keys(user, visual_source=visual_source)
         # Model chain: the user's Credentials choice wins; .env GEMINI_MODEL is the server default.
         gemini_model = user.gemini_model or settings.GEMINI_MODEL
+        # Image model is managed separately from the text model (own field, own quota).
+        image_model = user.gemini_image_model or settings.GEMINI_IMAGE_MODEL
         task.started_at = datetime.utcnow()
 
         _set_status(db, task, TaskStatus.AI_GENERATION, 5)
@@ -535,6 +544,12 @@ def render_task(task_id: int) -> None:
                 recent_clip_ids=recent_clips,
                 motion_seed=task.episode_number,
                 video_format=cfg.get("video_format", "short"),
+                visual_source=visual_source,
+                characters=channel.characters_json or None,
+                visual_style=cfg.get("visual_style"),
+                image_api_key=gemini_key,
+                image_model=image_model,
+                studio_sheet_dir=os.path.join(settings.MEDIA_ROOT, "studio", "sheets", str(channel.id)),
                 vet_batch=vet_batch,
                 on_progress=lambda p: set_progress(task_id, 10 + p * 0.8),
             )

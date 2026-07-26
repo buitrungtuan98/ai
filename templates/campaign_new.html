@@ -67,6 +67,24 @@
           the description, and allow part numbering in titles. They take much longer to render on one
           CPU — keep a small daily cap and a modest buffer.</p>
       </div>
+      <div class="form-row"><label>Visual source — where the picture comes from</label>
+        <select name="visual_source" id="visual-source">
+          <option value="stock" {{ 'selected' if cfg.get('visual_source','stock')!='studio' }}>Stock footage — real clips from Pexels (default, no image quota)</option>
+          <option value="studio" {{ 'selected' if cfg.get('visual_source')=='studio' }}>Studio — AI-drawn scenes with your channel's consistent characters</option>
+        </select>
+        <p class="hint">Studio Mode draws one keyframe per sentence starring a character from this
+          channel's cast (managed on the <a href="/channels">Channels</a> page), keeping the same face
+          and art style across the whole video, then animates them with gentle motion. It spends the
+          <b>image</b> model's daily quota (separate from the script model) — start with a small daily
+          cap. Stock footage never touches the image quota.</p>
+      </div>
+      <div class="form-row" id="visual-style-row" style="display:none">
+        <label>Art-style override for this campaign (optional)</label>
+        <input name="visual_style" value="{{ cfg.get('visual_style') or '' }}"
+               placeholder="e.g. hand-drawn pencil sketch, black &amp; white, bold ink outlines">
+        <p class="hint">Blank = use each character's own style. A value here restyles every drawn
+          frame in this campaign (great for a distinct look without editing the channel's cast).</p>
+      </div>
       <div class="form-row">
         <button type="button" class="btn ghost" id="script-preview">📝 Preview a script (1 AI call)</button>
         <p class="hint">Dry-run with the values in this form — read what the AI would write, tune the
@@ -352,6 +370,16 @@
   }
   applyFormatConstraints();
   if (fmtSel) fmtSel.addEventListener("change", applyFormatConstraints);
+
+  // Studio Mode: the art-style override only applies when the visual source is "studio", so hide it
+  // for stock-footage campaigns to keep the form uncluttered.
+  const vsSel = document.getElementById("visual-source");
+  const vsRow = document.getElementById("visual-style-row");
+  function applyVisualSource() {
+    if (vsRow) vsRow.style.display = (vsSel && vsSel.value === "studio") ? "" : "none";
+  }
+  applyVisualSource();
+  if (vsSel) vsSel.addEventListener("change", applyVisualSource);
 
   // Per-channel localization: switching the target channel re-seeds language / voice / timezone
   // from that channel's profile (only on a new campaign — the map is absent when editing).

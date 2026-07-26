@@ -974,6 +974,32 @@ genuine in-app loop with no "you are here."
   vocabularies and churns ~11 test call-sites for a purity gain the switcher already delivers to the
   operator. Revisit only if a strict canonical-URL requirement appears.
 
+## Studio Mode — AI-drawn consistent-character visuals (2nd video source) `DONE`
+A second way to build a video, alongside Pexels stock footage: AI-drawn scenes that keep a channel's
+consistent character(s) and art style and follow the story. $0 / CPU-only — Gemini free-tier image
+model draws keyframes, the existing Ken-Burns motion + crossfade stage animates them (no local
+diffusion, no paid API). See ADR-052.
+- **U1** `DONE`: data model + config + operator UI. `Channel.characters_json` cast (≤12 consistent
+  characters) with an add/remove "🎭 Studio cast" manager on Channels; campaign `visual_source`
+  (stock|studio) toggle + optional `visual_style` art-style override on the New Campaign form;
+  `GEMINI_IMAGE_MODEL` server default + per-user `gemini_image_model`, managed **separately** from the
+  text model via a new Credentials "Image model" card; additive migrations for all three columns.
+- **U2** `DONE`: `ai_engine.generate_image` (Gemini image model, reference-image conditioning, budget
+  metering, image-model fallback chain, quota/404 fail-fast, block not retried); new `core/studio.py`
+  — character selection (seed-deterministic per episode), art-style resolution, sheet + scene prompt
+  builders (dynamic pose / action lines / motion blur / no in-image text), `character_sheet` (draw
+  once + cache) and `scene_visual` (sheet + previous frame as references).
+- **U3** `DONE`: Studio render path in `core/video_factory.produce` — one drawn keyframe per scene,
+  looped into a clip by `still_to_clip`, fed through the SAME motion/caption/stitch stages; character
+  sheet cached in a stable per-channel dir for cross-episode consistency; fails clearly (no cast / no
+  image key) rather than silently rendering stock. Worker wiring passes cast + image model + visual
+  source; `_resolve_keys` needs no Pexels key in Studio mode.
+- **U4** `DONE`: 12 new unit/worker tests (character pick, style/prompt building, `generate_image`
+  fallback + block, `still_to_clip` args, produce() reference-chaining + no-cast guard, worker param
+  pass-through) + an ffmpeg-gated integration test proving the real still→clip→scene path.
+- Verified: 245 tests passing (12 new), 11 skipped (1 new ffmpeg-gated), ruff clean, docs guard green;
+  the U1 operator UI checked in a real browser.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

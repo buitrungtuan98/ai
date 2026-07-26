@@ -956,6 +956,118 @@ def _call_gemini_vision(
     return resp.text
 
 
+# ── Image generation (Studio Mode: AI-drawn story visuals) ───────────────────
+def _extract_image_bytes(resp) -> bytes | None:
+    """Pull the first inline image payload out of a Gemini image-model response. SDK versions expose
+    it as `part.inline_data.data`; returns None if the response carried no image (e.g. text-only)."""
+    for cand in getattr(resp, "candidates", None) or []:
+        content = getattr(cand, "content", None)
+        for part in getattr(content, "parts", None) or []:
+            inline = getattr(part, "inline_data", None)
+            data = getattr(inline, "data", None) if inline is not None else None
+            if data:
+                return data
+    return None
+
+
+def _call_gemini_image(
+    *, api_key: str, model: str, prompt: str, reference_paths: list[str], out_path: str,
+) -> str:
+    """Single point that calls a Gemini IMAGE model, writing the returned PNG to `out_path`.
+
+    Reference images (a character sheet, the previous scene's frame) are passed alongside the prompt
+    to condition the drawing — that reference conditioning is what keeps the character's face and the
+    art style consistent across an episode. Returns `out_path`."""
+    import google.generativeai as genai
+    from PIL import Image
+
+    record_ai_call()  # quota meter — every image attempt counts against the image model's daily cap
+    genai.configure(api_key=api_key)
+    gen_model = genai.GenerativeModel(model_name=model)
+    parts: list = [prompt, *[Image.open(p) for p in reference_paths]]
+    resp = gen_model.generate_content(parts)
+
+    # A safety/recitation block is deterministic — surface it as a non-retryable error.
+    for cand in getattr(resp, "candidates", None) or []:
+        reason = getattr(cand, "finish_reason", None)
+        if reason and str(reason).upper().endswith(("SAFETY", "RECITATION")):
+            raise GeminiBlockedError(f"Image model blocked the request (finish_reason={reason}).")
+    data = _extract_image_bytes(resp)
+    if not data:
+        feedback = getattr(resp, "prompt_feedback", None)
+        raise GeminiBlockedError(f"Image model returned no image (prompt_feedback={feedback}).")
+    with open(out_path, "wb") as f:
+        f.write(data)
+    return out_path
+
+
+def generate_image(
+    *, prompt: str, api_key: str, out_path: str,
+    model: str | None = None, reference_paths: list[str] | None = None, max_retries: int = 2,
+) -> str:
+    """Draw one image with the Gemini image model, writing it to `out_path` and returning the path.
+
+    `model` may be a comma-separated fallback chain (like the text model) — a retired model (404) or
+    a spent daily image quota fails over to the next entry. A content block is NOT retried. Reference
+    images condition the drawing for character/temporal consistency."""
+    model = model or settings.GEMINI_IMAGE_MODEL
+    refs = reference_paths or []
+    models = model_chain(model)
+    last: GeminiError | None = None
+    for i, m in enumerate(models):
+        try:
+            return _generate_image_single(
+                prompt=prompt, api_key=api_key, model=m, out_path=out_path,
+                reference_paths=refs, max_retries=max_retries,
+            )
+        except GeminiError as exc:
+            msg = str(exc)
+            if i < len(models) - 1 and ("daily quota" in msg or "model not found" in msg):
+                logger.warning("Image model %s unavailable — falling back to %s", m, models[i + 1])
+                last = exc
+                continue
+            raise
+    raise last if last is not None else GeminiError("no image model in the chain succeeded")
+
+
+def _generate_image_single(
+    *, prompt: str, api_key: str, model: str, out_path: str,
+    reference_paths: list[str], max_retries: int,
+) -> str:
+    """One image model's attempt loop: retry with backoff on transient errors; fail FAST (no retry
+    burn) on a spent daily quota or a missing model; a content block is not retried."""
+    last_error: Exception | None = None
+    for attempt in range(max_retries):
+        rate_limited = False
+        try:
+            return _call_gemini_image(
+                api_key=api_key, model=model, prompt=prompt,
+                reference_paths=reference_paths, out_path=out_path,
+            )
+        except GeminiBlockedError:
+            raise  # the content itself was refused — retrying can't help
+        except Exception as exc:  # noqa: BLE001 — transient API/network errors are retryable
+            last_error = exc
+            msg = str(exc)
+            if _is_daily_quota_error(msg):
+                raise GeminiError(
+                    "Gemini image daily quota exhausted — resets ~midnight US-Pacific; see RUNBOOK "
+                    f"'Gemini API quota & cost'. {exc}"
+                ) from exc
+            if _is_model_not_found(msg):
+                raise GeminiError(
+                    f"Gemini image model not found ({model}) — update GEMINI_IMAGE_MODEL. {exc}"
+                ) from exc
+            rate_limited = "429" in msg
+            logger.warning("Image call failed (attempt %d/%d): %s", attempt + 1, max_retries, exc)
+        if attempt < max_retries - 1 and _BACKOFF_BASE_SECONDS:
+            delay = _BACKOFF_BASE_SECONDS * (2**attempt)
+            if rate_limited:
+                delay = max(delay, _RATE_LIMIT_BACKOFF_SECONDS)
+            time.sleep(delay)
+    raise GeminiError(f"generate_image failed after {max_retries} attempts: {last_error}")
+
+
 class FootageVerdict(BaseModel):
     match_score: int = Field(ge=1, le=10, description="How well the footage fits the narration.")
     reason: str = ""

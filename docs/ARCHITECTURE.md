@@ -950,6 +950,30 @@ views/likes live in a *different*, near-real-time API we already have access to.
 signal at zero Gemini cost and negligible quota, without letting immature data pollute the
 learning/decision loops.
 
+### ADR-052 — Studio Mode: AI-drawn consistent-character visuals as a second video source
+**Decision:** add a second visual source alongside Pexels stock footage. A campaign's config carries
+`visual_source` (`stock` default | `studio`) and an optional `visual_style` override. In Studio Mode
+the render draws one keyframe per script scene with the **Gemini image model** (a free-tier model,
+`GEMINI_IMAGE_MODEL`, configured and quota-metered **separately** from the text `GEMINI_MODEL` —
+operators may need to manage the two independently), then animates each still with the *existing*
+Ken-Burns `zoompan` motion + crossfade machinery — **no** local diffusion model, **no** AnimateDiff,
+**no** paid API, so the CPU-only/$0 constraints hold. Character consistency comes from a per-channel
+**cast** (`Channel.characters_json`: `{id, name, description, style, sheet_path}`, ≤12): a one-time
+reference "character sheet" is generated per character and passed back as a reference image on every
+scene, and the previous scene's frame is passed as a second reference for temporal consistency. Each
+Studio episode picks one character at random from the channel's cast. Characters are **fictional
+brand mascots** (stickman, pencil sketch, …) — the description is a creative brief, never a real
+person; the same synthetic-content disclosure rules as personas apply.
+**Why:** the operator wanted a video style that keeps a channel's face/art-style and follows the story
+(dynamic poses, action lines, style transfer), not just generic stock B-roll. Local image/video
+models are far too heavy for one CPU-only ARM box, and paid image APIs break the zero-cost rule. The
+Gemini free-tier image model with reference-image conditioning delivers character/temporal
+consistency at $0, and reusing the render pipeline's motion stage means Studio Mode is a new *source*
+plugged into the existing renderer, not a parallel renderer (SOLID: one render orchestrator). Keeping
+the image model's config and quota separate from the text model avoids one spent quota silently
+killing the other. This ADR (U1) lands the data model, config, and operator UI; the image-generation
+primitive and the Studio render path follow in the same feature.
+
 ### ADR-050 — One "Episodes" surface + kill the lateral navigation loop
 **Decision:** `/episodes`, `/assets` (Review) and `/tasks` (render log) are three *layouts of one
 thing* — the episode pipeline. They previously cross-linked with scattered "↗" buttons and no

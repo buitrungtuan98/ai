@@ -66,6 +66,41 @@ def test_scene_render_and_concat_copy(tmp_path):
     assert media.probe_duration(master) > dur * 1.5  # two scenes stitched
 
 
+def test_studio_still_to_clip_and_scene(tmp_path):
+    """Studio Mode's still→clip→scene path on real ffmpeg: a drawn PNG is looped into a proper video
+    clip, which then feeds the unchanged build_scene_args (motion + captions) exactly like a Pexels
+    clip. Proves the AI-still visual source produces a valid vertical scene."""
+    from core import media
+    from core.captions import build_ass
+    from core.ffmpeg_runner import run_ffmpeg
+    from core.tts import WordTiming
+    from core.video_factory import build_scene_args, still_to_clip
+
+    d = str(tmp_path)
+    audio, _ = _make_inputs(d)
+    dur = media.probe_duration(audio)
+
+    # A real still (odd, non-vertical dimensions on purpose — still_to_clip must normalize geometry).
+    still = os.path.join(d, "drawn.png")
+    subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=size=777x513:rate=1",
+                    "-frames:v", "1", still], check=True, capture_output=True)
+
+    clip = os.path.join(d, "studio_clip.mp4")
+    still_to_clip(still, clip, dur)
+    assert os.path.exists(clip)
+    cmeta = media.probe_video_meta(clip)
+    assert cmeta["width"] == 1080 and cmeta["height"] == 1920            # normalized to vertical
+    assert media.probe_duration(clip) >= dur                            # spans the scene (padded)
+
+    ass = os.path.join(d, "s.ass")
+    build_ass([WordTiming("Drawn", 0.0, dur)], ass, clip_duration=dur)
+    scene = os.path.join(d, "studio_scene.mp4")
+    run_ffmpeg(build_scene_args([clip], audio, ass, scene, dur, None, motion_effect="zoom_in"))
+    smeta = media.probe_video_meta(scene)
+    assert smeta["width"] == 1080 and smeta["height"] == 1920
+    assert abs(media.probe_duration(scene) - dur) < 0.3                 # trimmed to the audio length
+
+
 def test_long_profile_scene_renders_16x9(tmp_path):
     """A scene rendered with the long profile is real 1920×1080 (landscape) — validates the
     profile-driven scale/crop/motion geometry on actual ffmpeg."""

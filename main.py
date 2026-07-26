@@ -564,7 +564,8 @@ def channels_page(request: Request, user: CurrentUser, db: DbDep, status: str = 
         {"request": request, "user": user, "channels": channels, "nav": "channels",
          "camp_counts": camp_counts, "chips": chips, "status": status, "q": q, "total_all": total_all,
          "ap": {c.id: (c.autopilot_json or {}) for c in channels},
-         "flash": flash if flash in ("profile", "autopilot") else ""},
+         "characters": {c.id: _sanitize_characters(c.characters_json) for c in channels},
+         "flash": flash if flash in ("profile", "autopilot", "character") else ""},
     )
 
 
@@ -695,6 +696,60 @@ def set_channel_profile(channel=Depends(get_owned_channel), db=Depends(get_db),
     channel.profile_json = p or None
     db.commit()
     return RedirectResponse("/channels?flash=profile", status_code=303)
+
+
+_MAX_CHARACTERS = 12  # per channel — plenty for random casting, small enough to keep the UI/quota sane
+
+
+def _sanitize_characters(raw) -> list[dict]:
+    """Coerce stored characters_json into the canonical shape, dropping anything malformed. One place
+    the character record schema is enforced (DRY) — used by the render path and the manager UI."""
+    out: list[dict] = []
+    for c in raw or []:
+        if not isinstance(c, dict) or not str(c.get("name", "")).strip():
+            continue
+        out.append({
+            "id": str(c.get("id") or "")[:32],
+            "name": str(c["name"]).strip()[:60],
+            "description": str(c.get("description") or "").strip()[:300],
+            "style": str(c.get("style") or "").strip()[:120],
+            # Path to the once-generated character reference sheet (set by the Studio render path).
+            "sheet_path": (str(c["sheet_path"]) if c.get("sheet_path") else None),
+        })
+    return out
+
+
+@app.post("/channels/{channel_id}/characters")
+def add_channel_character(channel=Depends(get_owned_channel), db=Depends(get_db),
+                          name: str = Form(...), description: str = Form(""),
+                          style: str = Form("")):
+    """Add a Studio-Mode character to a channel's cast (ADR-052). Each episode drawn in Studio Mode
+    picks one at random and keeps its face/style consistent across every frame. Fictional characters
+    only — the description is a creative brief, not a real person."""
+    cast = _sanitize_characters(channel.characters_json)
+    if name.strip() and len(cast) < _MAX_CHARACTERS:
+        import uuid
+
+        cast.append({
+            "id": uuid.uuid4().hex[:8],
+            "name": name.strip()[:60],
+            "description": description.strip()[:300],
+            "style": style.strip()[:120],
+            "sheet_path": None,
+        })
+        channel.characters_json = cast
+        db.commit()
+    return RedirectResponse("/channels?flash=character", status_code=303)
+
+
+@app.post("/channels/{channel_id}/characters/{char_id}/delete")
+def delete_channel_character(char_id: str, channel=Depends(get_owned_channel), db=Depends(get_db)):
+    """Remove a character from a channel's cast. Any generated reference sheet on disk is left for the
+    normal media cleanup sweep — no episode references it once the character is gone."""
+    cast = [c for c in _sanitize_characters(channel.characters_json) if c["id"] != char_id]
+    channel.characters_json = cast or None
+    db.commit()
+    return RedirectResponse("/channels?flash=character", status_code=303)
 
 
 @app.post("/channels/{channel_id}/autopilot")
@@ -970,6 +1025,7 @@ def _build_campaign_config(
     continuity: str, timezone: str,
     motion: str = "on", caption_theme: str = "highlight", self_critique: str = "on",
     script_depth: str = "standard", video_format: str = "short",
+    visual_source: str = "stock", visual_style: str = "",
     music_mode: str = "none", music_mood: str = "",
     color_grade: str = "", auto_qc: str = "on",
     max_per_day: str = "", min_per_day: str = "",
@@ -1010,6 +1066,11 @@ def _build_campaign_config(
         "script_depth": "deep" if script_depth == "deep" else "standard",
         # Output format: "short" = vertical 1080×1920 clips; "long" = horizontal 16:9 multi-minute.
         "video_format": "long" if video_format == "long" else "short",
+        # Visual source (ADR-052): "stock" = Pexels footage (default); "studio" = AI-drawn keyframes
+        # of the channel's consistent characters, animated by Ken-Burns motion. `visual_style` is an
+        # optional per-campaign art-style override (blank = the character's own style / channel default).
+        "visual_source": "studio" if visual_source == "studio" else "stock",
+        "visual_style": visual_style.strip()[:200] or None,
         # Music: none | auto (random CC0 by mood, per episode) | file (operator-supplied path).
         "music_mode": music_mode if music_mode in ("none", "auto", "file") else "none",
         "music_mood": music_mood.strip() or None,
@@ -1083,6 +1144,8 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
     self_critique: str = Form("on"),
     script_depth: str = Form("standard"),
     video_format: str = Form("short"),
+    visual_source: str = Form("stock"),
+    visual_style: str = Form(""),
     music_mode: str = Form("none"),
     music_mood: str = Form(""),
     color_grade: str = Form(""),
@@ -1108,6 +1171,7 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
             catchphrase_close=catchphrase_close, continuity=continuity, timezone=timezone,
             motion=motion, caption_theme=caption_theme, self_critique=self_critique,
             script_depth=script_depth, video_format=video_format,
+            visual_source=visual_source, visual_style=visual_style,
             music_mode=music_mode, music_mood=music_mood,
             color_grade=color_grade, auto_qc=auto_qc,
             max_per_day=max_per_day, min_per_day=min_per_day,
@@ -1281,6 +1345,7 @@ def save_credentials(
     telegram_token: str = Form(""),
     telegram_chat_id: str = Form(""),
     gemini_model: str | None = Form(None),
+    gemini_image_model: str | None = Form(None),
 ):
     # Only overwrite fields that were provided (blank keeps the existing stored value).
     if gemini_api_key:
@@ -1296,6 +1361,10 @@ def save_credentials(
     if gemini_model is not None:
         cleaned = ",".join(m.strip() for m in gemini_model.split(",") if m.strip())[:200]
         user.gemini_model = cleaned or None
+    # The image model is managed separately from the text model (own field, own quota).
+    if gemini_image_model is not None:
+        cleaned = ",".join(m.strip() for m in gemini_image_model.split(",") if m.strip())[:200]
+        user.gemini_image_model = cleaned or None
     db.add(user)
     db.commit()
     return RedirectResponse("/credentials", status_code=303)

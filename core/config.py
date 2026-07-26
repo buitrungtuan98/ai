@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     # May be a comma-separated FALLBACK CHAIN (first = primary): a retired model or a spent daily
     # quota fails over to the next entry. `-latest` aliases auto-track current models.
     GEMINI_MODEL: str = "gemini-flash-lite-latest,gemini-flash-latest"
+    # Image-generation model for Studio Mode (AI-drawn story visuals). SEPARATE from the text model
+    # so its quota/model can be managed on its own (a comma-separated fallback chain is allowed too).
+    GEMINI_IMAGE_MODEL: str = "gemini-2.5-flash-image"
     # Your model's free-tier requests/day (see the AI Studio Rate limits page). Powers the
     # dashboard quota meter + heartbeat warnings. Optional — leave unset to just count calls.
     GEMINI_DAILY_BUDGET: int | None = None

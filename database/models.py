@@ -61,6 +61,8 @@ class User(Base):
     # Gemini model chain chosen in the UI (comma-separated, first = primary, rest = fallbacks).
     # NULL = use the server default (GEMINI_MODEL in .env). A model id is not a secret.
     gemini_model: Mapped[str | None] = mapped_column(String(200))
+    # Image model for Studio Mode — managed SEPARATELY from the text model. NULL = GEMINI_IMAGE_MODEL.
+    gemini_image_model: Mapped[str | None] = mapped_column(String(200))
     # Per-user preferences (NOT secrets): new-campaign defaults + AI daily budget. Set on the
     # Settings page; NULL = fall back to the app defaults. See main.py `_new_campaign_defaults`.
     settings_json: Mapped[dict | None] = mapped_column(JSON)
@@ -96,6 +98,9 @@ class Channel(Base):
     # vision}. Seeds campaigns + conditions AI Propose + the autopilot strategist so every video is
     # localized to this channel's country/audience. See core/autopilot.py + ADR-045.
     profile_json: Mapped[dict | None] = mapped_column(JSON)
+    # Studio-Mode cast (NOT secrets): list of {id, name, description, style, sheet_path} — the
+    # consistent characters an AI-drawn episode picks from. NULL = none defined. See ADR-052.
+    characters_json: Mapped[list | None] = mapped_column(JSON)
 
     user: Mapped["User"] = relationship(back_populates="channels")
     campaigns: Mapped[list["Campaign"]] = relationship(

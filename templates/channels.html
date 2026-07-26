@@ -11,6 +11,8 @@
 {% call ui.banner('success') %}✓ <b>Channel profile saved.</b> New campaigns on this channel now inherit its language, voice &amp; timezone, and AI Propose localizes to its audience.{% endcall %}
 {% elif flash == 'autopilot' %}
 {% call ui.banner('success') %}✓ <b>Autopilot settings saved.</b>{% endcall %}
+{% elif flash == 'character' %}
+{% call ui.banner('success') %}✓ <b>Cast updated.</b> Studio-Mode campaigns on this channel draw from these characters.{% endcall %}
 {% endif %}
 
 {% if total_all %}
@@ -118,6 +120,41 @@
           </div>
           <button class="btn sm" type="submit">Save autopilot</button>
         </form>
+      </div>
+    </details>
+    {% set cast = characters.get(c.id, []) %}
+    <details class="disclosure mt-sm">
+      <summary><span class="sum"><span class="sum-l">🎭 Studio cast</span><span class="sum-v">{% if cast %}{{ cast|length }} character{{ 's' if cast|length != 1 }}{% else %}none{% endif %}</span></span></summary>
+      <div class="disclosure-body">
+        <p class="hint">Consistent characters for <b>Studio Mode</b> — campaigns set to the “Studio” visual
+          source draw AI scenes starring one of these, keeping the same face &amp; art style across every
+          frame of a video. Each episode picks one at random. Fictional characters only — the description
+          is a creative brief, not a real person.</p>
+        {% if cast %}
+        <ul class="cast-list">
+          {% for ch in cast %}
+          <li class="cast-item">
+            <div class="cast-body">
+              <b>{{ ch.name }}</b>{% if ch.style %} <span class="meta">· {{ ch.style }}</span>{% endif %}
+              {% if ch.description %}<p class="hint">{{ ch.description }}</p>{% endif %}
+            </div>
+            <form method="post" action="/channels/{{ c.id }}/characters/{{ ch.id }}/delete" data-confirm="Remove “{{ ch.name }}” from the cast?">
+              <button class="btn danger sm" type="submit">Remove</button>
+            </form>
+          </li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+        {% if cast|length < 12 %}
+        <form method="post" action="/channels/{{ c.id }}/characters" class="mt-sm">
+          {% call ui.field('Name') %}<input name="name" required maxlength="60" placeholder="Pencil the Stickman">{% endcall %}
+          {% call ui.field('Description — look & personality', hint='The creative brief kept consistent across every frame') %}<input name="description" maxlength="300" placeholder="A cheerful stick figure with big round eyes and a red scarf">{% endcall %}
+          {% call ui.field('Art style', hint='e.g. hand-drawn pencil sketch, black & white') %}<input name="style" maxlength="120" placeholder="hand-drawn pencil sketch, bold ink outlines">{% endcall %}
+          <button class="btn sm" type="submit">Add character</button>
+        </form>
+        {% else %}
+        <p class="hint">Cast is full (12 max). Remove one to add another.</p>
+        {% endif %}
       </div>
     </details>
   </div>

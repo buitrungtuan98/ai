@@ -108,6 +108,53 @@ def test_footage_dedupe_records_and_prefers(session, user, channel, monkeypatch)
     assert {100, 101} <= stored
 
 
+def test_studio_campaign_passes_visual_params_and_needs_no_pexels(session, user, channel, monkeypatch):
+    """A Studio-Mode campaign hands produce() the channel cast + image model + the Gemini key as the
+    image key, and renders WITHOUT a Pexels key (Studio draws its own visuals)."""
+    from core.video_factory import RenderResult
+    from database.models import Campaign, Task
+    from database.types import CampaignStatus
+    from workers import video_worker
+
+    user.pexels_api_key = None            # Studio must not require a Pexels key
+    user.gemini_image_model = "img-model-x"
+    channel.characters_json = [
+        {"id": "c1", "name": "Stickman", "description": "a stick figure", "style": "pencil", "sheet_path": None},
+    ]
+    session.commit()
+
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="R", current_episode=0,
+                   total_episodes=2, status=CampaignStatus.active,
+                   config_json={"language": "en", "auto_qc": "off",
+                                "visual_source": "studio", "visual_style": "noir ink"})
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    t = Task(campaign_id=cam.id, user_id=user.id, episode_number=1)
+    session.add(t)
+    session.commit()
+    session.refresh(t)
+
+    captured: dict = {}
+
+    def fake_produce(**k):
+        captured.update(k)
+        return RenderResult(master_path="/no/m.mp4", thumbnail_path="/no/t.jpg",
+                            metadata={"title": "T", "variant": "A"}, duration=10.0, scene_count=2)
+
+    monkeypatch.setattr(video_worker, "generate_script", lambda **k: _script())
+    monkeypatch.setattr(video_worker.video_factory, "produce", fake_produce)
+    monkeypatch.setattr(video_worker, "_publish", lambda *a, **k: "vid-x")
+
+    video_worker.render_task(t.id)   # must not raise despite the missing Pexels key
+    assert captured["visual_source"] == "studio"
+    assert captured["characters"] and captured["characters"][0]["name"] == "Stickman"
+    assert captured["visual_style"] == "noir ink"
+    assert captured["image_api_key"] == "gkey"       # Studio draws with the Gemini key
+    assert captured["image_model"] == "img-model-x"  # image model managed separately from the text model
+    assert "studio" in captured["studio_sheet_dir"]
+
+
 def test_render_task_full_flow_and_failure(session, user, channel, monkeypatch):
     from database.models import BufferPoolItem, Campaign, Task
     from database.types import BufferStatus, CampaignStatus, TaskStatus
