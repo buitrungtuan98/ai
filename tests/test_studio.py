@@ -1,0 +1,252 @@
+"""Studio Mode units (ADR-052): character selection, prompt building, the image primitive, and the
+still→clip arg builder. All pure/mockable — no Gemini key and no ffmpeg needed (the real ffmpeg
+still→clip→scene path is covered by the ffmpeg-gated integration test)."""
+from __future__ import annotations
+
+import types
+
+import pytest
+
+CAST = [
+    {"id": "a", "name": "Pencil", "description": "a cheerful stickman", "style": "pencil sketch", "sheet_path": None},
+    {"id": "b", "name": "Owl", "description": "a wise cartoon owl", "style": "flat vector", "sheet_path": None},
+    {"id": "c", "name": "Rex", "description": "a friendly dinosaur", "style": "", "sheet_path": None},
+]
+
+
+# ── character selection ──────────────────────────────────────────────────────
+def test_pick_character_deterministic_and_filters():
+    from core import studio
+
+    # Deterministic in the seed (so a re-render reuses the same character + cached sheet).
+    picks = {studio.pick_character(CAST, seed=n)["id"] for n in range(20)}
+    assert picks <= {"a", "b", "c"} and len(picks) > 1          # varies across episodes
+    assert studio.pick_character(CAST, seed=7)["id"] == studio.pick_character(CAST, seed=7)["id"]
+
+    # Malformed entries (non-dict, blank name) are dropped; an empty cast yields None.
+    messy = [*CAST, {"name": "  "}, "not a dict", {"id": "x"}]
+    assert studio.pick_character(messy, seed=1)["id"] in {"a", "b", "c"}
+    assert studio.pick_character([], seed=0) is None
+    assert studio.pick_character(None, seed=0) is None
+
+
+def test_style_resolution_priority():
+    from core import studio
+
+    char = CAST[0]  # own style "pencil sketch"
+    assert studio._style_for(char, "noir ink") == "noir ink"          # campaign override wins
+    assert studio._style_for(char, "") == "pencil sketch"             # else the character's own style
+    assert studio._style_for(CAST[2], None) == studio._BASE_STYLE     # else the house base style
+
+
+# ── prompt building ──────────────────────────────────────────────────────────
+def test_prompts_carry_identity_style_and_beat_direction():
+    from core import studio
+
+    sheet = studio.character_sheet_prompt(CAST[0], "noir ink")
+    assert "Pencil" in sheet and "cheerful stickman" in sheet and "noir ink" in sheet
+    assert "reference sheet" in sheet.lower() and "do not draw any text" in sheet.lower()
+
+    scene = studio.scene_prompt(CAST[0], "a rocket launch, night sky", mood="Did you know…")
+    assert "Pencil" in scene and "reference image" in scene.lower()
+    assert "rocket launch" in scene
+    # The operator's wishlist is baked into every beat: motion cues + a no-text instruction.
+    assert "motion blur" in scene.lower() and "action lines" in scene.lower()
+    assert "pencil sketch" in scene.lower()  # falls back to the character's own style
+
+
+# ── sheet + scene generation (injected gen_image, no key) ────────────────────
+def test_character_sheet_caches_and_calls_generator(tmp_path):
+    from core import studio
+
+    calls = []
+
+    def fake_gen(*, prompt, api_key, out_path, model=None, reference_paths=None):
+        calls.append(prompt)
+        open(out_path, "w").write("PNG")
+        return out_path
+
+    out = str(tmp_path / "sheet.png")
+    p1 = studio.character_sheet(CAST[0], api_key="k", out_path=out, gen_image=fake_gen)
+    assert p1 == out and len(calls) == 1
+    # A second call reuses the cached file on disk — the sheet defines the character, must not drift.
+    p2 = studio.character_sheet(CAST[0], api_key="k", out_path=out, gen_image=fake_gen)
+    assert p2 == out and len(calls) == 1
+
+
+def test_scene_visual_forwards_references(tmp_path):
+    from core import studio
+
+    seen = {}
+
+    def fake_gen(*, prompt, api_key, out_path, model=None, reference_paths=None):
+        seen["prompt"] = prompt
+        seen["refs"] = reference_paths
+        seen["model"] = model
+        return out_path
+
+    studio.scene_visual(
+        character=CAST[1], subject="an owl reading", api_key="k",
+        out_path=str(tmp_path / "s.png"), reference_paths=["sheet.png", "prev.png"],
+        model="img-x", gen_image=fake_gen,
+    )
+    assert seen["refs"] == ["sheet.png", "prev.png"] and seen["model"] == "img-x"
+    assert "owl reading" in seen["prompt"] and "Owl" in seen["prompt"]
+
+
+# ── the image primitive (mock the raw SDK call) ──────────────────────────────
+def test_extract_image_bytes():
+    from core.ai_engine import _extract_image_bytes
+
+    inline = types.SimpleNamespace(data=b"\x89PNG-bytes")
+    part = types.SimpleNamespace(inline_data=inline)
+    text_part = types.SimpleNamespace(inline_data=None)
+    cand = types.SimpleNamespace(content=types.SimpleNamespace(parts=[text_part, part]))
+    resp = types.SimpleNamespace(candidates=[cand])
+    assert _extract_image_bytes(resp) == b"\x89PNG-bytes"
+
+    empty = types.SimpleNamespace(candidates=[])
+    assert _extract_image_bytes(empty) is None
+
+
+def test_generate_image_writes_and_falls_back_on_quota(tmp_path, monkeypatch):
+    from core import ai_engine
+
+    monkeypatch.setattr(ai_engine, "_BACKOFF_BASE_SECONDS", 0)
+    seen_models = []
+
+    def fake_call(*, api_key, model, prompt, reference_paths, out_path):
+        seen_models.append(model)
+        if model == "img-a":
+            raise RuntimeError("429 ... quota_id ...PerDay... exhausted")
+        open(out_path, "wb").write(b"IMG")
+        return out_path
+
+    monkeypatch.setattr(ai_engine, "_call_gemini_image", fake_call)
+    out = str(tmp_path / "o.png")
+    res = ai_engine.generate_image(prompt="draw", api_key="k", out_path=out, model="img-a,img-b")
+    assert res == out and open(out, "rb").read() == b"IMG"
+    assert seen_models == ["img-a", "img-b"]   # spent daily quota → fell over to the next model
+
+
+def test_generate_image_block_is_not_retried_or_fallen_back(tmp_path, monkeypatch):
+    from core import ai_engine
+    from core.ai_engine import GeminiBlockedError
+
+    monkeypatch.setattr(ai_engine, "_BACKOFF_BASE_SECONDS", 0)
+    calls = []
+
+    def fake_call(**k):
+        calls.append(k["model"])
+        raise GeminiBlockedError("blocked")
+
+    monkeypatch.setattr(ai_engine, "_call_gemini_image", fake_call)
+    with pytest.raises(GeminiBlockedError):
+        ai_engine.generate_image(prompt="p", api_key="k", out_path=str(tmp_path / "o.png"),
+                                 model="img-a,img-b")
+    assert calls == ["img-a"]   # a content block is terminal — no retry, no fallback
+
+
+# ── still → clip arg builder (no ffmpeg) ─────────────────────────────────────
+def test_still_to_clip_args(monkeypatch):
+    from core import video_factory
+    from core.video_factory import LONG_PROFILE
+
+    captured = {}
+    monkeypatch.setattr(video_factory, "run_ffmpeg", lambda args, **k: captured.update(args=list(args)))
+
+    out = video_factory.still_to_clip("frame.png", "clip.mp4", 5.0)
+    a = captured["args"]
+    assert out == "clip.mp4" and a[-1] == "clip.mp4"
+    assert a[a.index("-loop") + 1] == "1"
+    assert a[a.index("-i") + 1] == "frame.png"
+    assert "-an" in a                                   # silent — audio comes from TTS downstream
+    assert abs(float(a[a.index("-t") + 1]) - 5.3) < 0.01  # padded so the downstream -t trim never overshoots
+    vf = a[a.index("-vf") + 1]
+    assert "1080" in vf and "1920" in vf                # vertical (short) geometry by default
+
+    # Long profile → 16:9 geometry.
+    video_factory.still_to_clip("f.png", "c.mp4", 2.0, profile=LONG_PROFILE)
+    vf2 = captured["args"][captured["args"].index("-vf") + 1]
+    assert "1920" in vf2 and "1080" in vf2
+
+
+# ── produce() Studio orchestration (fully mocked — no ffmpeg, no key) ─────────
+def _studio_script(n=3):
+    from core.ai_engine import VideoScript
+
+    return VideoScript(
+        language="en", topic="Robots", synopsis="Robots learn to dream",
+        scenes=[{"index": i, "narration": f"scene {i}", "pexels_keywords": [f"k{i}"]} for i in range(n)],
+        metadata_variations=[{"variant": v, "title": f"T{v}", "description": "d", "tags": ["a", "b", "c"]}
+                             for v in "ABC"],
+    )
+
+
+def test_produce_studio_chains_references_and_skips_pexels(tmp_path, monkeypatch):
+    """The Studio branch of produce(): draws the sheet ONCE, then one keyframe per scene, chaining the
+    previous frame in as a reference for temporal continuity — and never touches Pexels."""
+    from core import video_factory
+    from core.tts import WordTiming
+
+    # Stub every ffmpeg/TTS/thumbnail touchpoint so only the orchestration logic runs.
+    def fake_tts(text, out, **k):
+        open(out, "w").write("audio")
+        return [WordTiming("w", 0.0, 1.0)]
+
+    monkeypatch.setattr(video_factory.tts, "synthesize_paced", fake_tts)
+    monkeypatch.setattr(video_factory, "voice_check", lambda *a, **k: None)
+    monkeypatch.setattr(video_factory.media, "probe_duration", lambda p: 5.0)
+    monkeypatch.setattr(video_factory, "still_to_clip", lambda img, out, d, profile=None: out)
+    monkeypatch.setattr(video_factory, "build_ass", lambda *a, **k: open(a[1], "w").write("ass"))
+    monkeypatch.setattr(video_factory, "run_ffmpeg", lambda *a, **k: None)
+    monkeypatch.setattr(video_factory, "pick_metadata",
+                        lambda *a, **k: {"title": "T", "variant": "A", "description": "d"})
+    monkeypatch.setattr(video_factory, "generate_thumbnail", lambda *a, **k: None)
+    # Pexels must never be called in Studio Mode.
+    monkeypatch.setattr(video_factory.pexels, "download",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("Pexels touched in Studio")))
+    monkeypatch.setattr(video_factory, "search_footage",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("Pexels searched in Studio")))
+
+    gen_calls = []
+
+    def fake_gen(*, prompt, api_key, out_path, model=None, reference_paths=None):
+        gen_calls.append({"out": out_path, "refs": reference_paths})
+        open(out_path, "w").write("PNG")
+        return out_path
+
+    cast = [{"id": "hero", "name": "Hero", "description": "a hero", "style": "ink", "sheet_path": None}]
+    result = video_factory.produce(
+        script=_studio_script(3), episode_number=1, pexels_api_key="", job_id="studiojob",
+        output_dir=str(tmp_path / "out"), visual_source="studio", characters=cast,
+        image_api_key="gkey", image_model="img-x", studio_sheet_dir=str(tmp_path / "sheets"),
+        gen_image=fake_gen, motion=True,
+    )
+
+    assert result.scene_count == 3 and result.used_clip_ids == []      # drawn, not stock
+    # 1 sheet draw + 3 scene draws; the sheet is drawn exactly once (cached for later scenes).
+    assert len(gen_calls) == 4
+    sheet_calls = [c for c in gen_calls if c["refs"] is None]
+    scene_calls = [c for c in gen_calls if c["refs"] is not None]
+    assert len(sheet_calls) == 1 and len(scene_calls) == 3
+    sheet_path = sheet_calls[0]["out"]
+    assert sheet_path.endswith("hero.png")                              # stable per-character cache
+    # Reference chaining: scene 0 → [sheet]; scene 1 → [sheet, still0]; scene 2 → [sheet, still1].
+    assert scene_calls[0]["refs"] == [sheet_path]
+    assert scene_calls[1]["refs"] == [sheet_path, scene_calls[0]["out"]]
+    assert scene_calls[2]["refs"] == [sheet_path, scene_calls[1]["out"]]
+
+
+def test_produce_studio_requires_a_cast(tmp_path):
+    """Studio Mode with an empty cast fails clearly instead of silently rendering stock."""
+    import pytest
+
+    from core import video_factory
+
+    with pytest.raises(RuntimeError, match="no characters"):
+        video_factory.produce(
+            script=_studio_script(3), episode_number=1, pexels_api_key="", job_id="j",
+            output_dir=str(tmp_path / "o"), visual_source="studio", characters=[],
+            image_api_key="gkey",
+        )

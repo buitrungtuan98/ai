@@ -189,6 +189,28 @@ def motion_filter(effect: str, duration: float, profile: RenderProfile = SHORT_P
             f":x='(in_w-out_w)*min(t/{max(duration, 0.1):.3f},1)':y='(in_h-out_h)/2'")
 
 
+def still_to_clip(
+    image_path: str, out_path: str, duration: float, profile: RenderProfile = SHORT_PROFILE,
+) -> str:
+    """Turn one still image into a `duration`-second SILENT video clip at the profile's geometry, so
+    the render pipeline can treat an AI-drawn still exactly like a Pexels clip — motion (Ken Burns),
+    colour grade and captions are applied downstream by `build_scene_args`, unchanged. This is how
+    Studio Mode synthesizes its 'footage': draw a keyframe, loop it into a clip, animate it in the
+    normal per-scene encode. The clip is padded slightly so the downstream `-t` trim never runs past
+    its end (which would leave a black tail). Returns `out_path`."""
+    w, h, fps = profile.width, profile.height, profile.fps
+    d = max(0.1, duration + 0.3)
+    run_ffmpeg([
+        "-loop", "1", "-t", f"{d:.3f}", "-i", image_path,
+        "-vf", (f"scale={w}:{h}:force_original_aspect_ratio=increase:flags=lanczos,"
+                f"crop={w}:{h},setsar=1,fps={fps}"),
+        "-c:v", "libx264", "-preset", settings.FFMPEG_PRESET, "-crf", "23",
+        "-pix_fmt", "yuv420p", "-r", str(fps), "-an",
+        out_path,
+    ])
+    return out_path
+
+
 def build_scene_args(
     clip_paths: list[str],
     audio_path: str,
@@ -466,6 +488,13 @@ def produce(
     recent_clip_ids: set[int] | None = None,
     motion_seed: int = 0,
     video_format: str = "short",
+    visual_source: str = "stock",
+    characters: list[dict] | None = None,
+    visual_style: str | None = None,
+    image_api_key: str | None = None,
+    image_model: str | None = None,
+    studio_sheet_dir: str | None = None,
+    gen_image=None,
     vet_batch=None,
     on_progress=None,
 ) -> RenderResult:
@@ -475,6 +504,25 @@ def produce(
 
     profile = resolve_profile(video_format)
     branding = branding or Branding()
+
+    # Studio Mode (ADR-052): draw the visuals instead of fetching stock footage. Validate the
+    # prerequisites up front so the episode fails clearly rather than silently rendering stock — the
+    # operator chose Studio, so falling back would be dishonest (config-truth rule).
+    studio_mode = visual_source == "studio"
+    studio_character = None
+    if studio_mode:
+        from core import studio
+
+        studio_character = studio.pick_character(characters, seed=episode_number)
+        if studio_character is None:
+            raise RuntimeError(
+                "Studio Mode is on but this channel has no characters defined — add a character on "
+                "the Channels page, or switch the campaign's visual source back to stock footage."
+            )
+        if not image_api_key:
+            raise RuntimeError("Studio Mode needs a Gemini image API key (set it on Credentials).")
+        logger.info("Studio Mode: episode %d cast as %r", episode_number, studio_character.get("name"))
+
     if music_path and not os.path.exists(music_path):
         # Explicit failure beats a silently music-less video (config-truth rule).
         raise FileNotFoundError(f"Background music file not found: {music_path}")
@@ -499,6 +547,10 @@ def produce(
         # episodes; `episode_seen` grows as we go so two scenes in THIS episode don't lead with the
         # same clip (scenes with overlapping keywords otherwise would). Reordering only — fail-open.
         episode_seen: set[int] = set(recent_clip_ids or ())
+        # Studio Mode reference chaining: the character sheet is drawn once, and each scene's still
+        # is passed as a reference into the next so consecutive frames stay temporally continuous.
+        studio_sheet_path: str | None = None
+        studio_prev_still: str | None = None
         for si, scene in enumerate(script.scenes):
             # Safety filter narration before TTS (policy lives in safety_filter). If the filter
             # emptied a non-empty narration (whole scene was blacklisted), do NOT fall back to the
@@ -528,6 +580,39 @@ def produce(
                     raise RuntimeError(f"Scene {si} narration failed the voice check: {problem}")
             d_i = media.probe_duration(audio_path)
 
+            if studio_mode:
+                # Studio Mode: draw this scene's keyframe instead of fetching footage. The character
+                # sheet is drawn once (identity anchor); the previous scene's still is chained in as a
+                # second reference for temporal continuity. The still is then looped into a clip the
+                # rest of the pipeline treats exactly like a Pexels clip (one clip per scene, no cut
+                # rhythm — a drawn scene is one continuous shot). The scene's English visual keywords
+                # make the drawing subject; a narration snippet gives mood/context.
+                if studio_sheet_path is None:
+                    # Cache the character sheet in a STABLE per-character location when given one, so
+                    # the identical sheet anchors every episode (cross-episode consistency + one fewer
+                    # image call per later episode). Falls back to the ephemeral workspace otherwise.
+                    if studio_sheet_dir:
+                        os.makedirs(studio_sheet_dir, exist_ok=True)
+                        studio_sheet_path = os.path.join(
+                            studio_sheet_dir, f"{studio_character.get('id') or 'char'}.png")
+                    else:
+                        studio_sheet_path = ws.path("character_sheet.png")
+                    studio.character_sheet(
+                        studio_character, api_key=image_api_key, out_path=studio_sheet_path,
+                        style_override=visual_style, model=image_model, gen_image=gen_image)
+                still_path = ws.path(f"scene_{si}_still.png")
+                refs = [studio_sheet_path] + ([studio_prev_still] if studio_prev_still else [])
+                studio.scene_visual(
+                    character=studio_character, subject=", ".join(scene.pexels_keywords),
+                    mood=clean, api_key=image_api_key, out_path=still_path, reference_paths=refs,
+                    style_override=visual_style, model=image_model, gen_image=gen_image)
+                studio_prev_still = still_path
+                studio_clip = still_to_clip(still_path, ws.path(f"scene_{si}_studio.mp4"), d_i, profile)
+                plans.append({"clean": clean, "audio": audio_path, "timings": timings,
+                              "d": d_i, "studio_clip": studio_clip})
+                report("scenes", (si + 1) / n_scenes * 30)
+                continue
+
             # Footage to cover d_i (with keyword fallback chain). Orientation matches the format
             # (landscape for long-form); reorder so footage this channel hasn't used yet leads.
             safety_filter.assert_licensed_footage("pexels")
@@ -553,7 +638,8 @@ def produce(
             report("scenes", (si + 1) / n_scenes * 30)
 
         # Phase B — batched Auto-QC footage vetting: ≤2 vision calls per EPISODE, fail-open.
-        if vet_batch is not None:
+        # Studio Mode has no stock footage to vet — the drawing IS the intended visual by construction.
+        if vet_batch is not None and not studio_mode:
             _batch_vet_plans(
                 plans, vet_batch,
                 path_for=lambda i, k: ws.path(f"scene_{i}_vet_{k}.mp4"),
@@ -564,22 +650,28 @@ def produce(
         # Phase C — render each scene (multi-shot cut rhythm + captions + motion + grade in one pass).
         for si, plan in enumerate(plans):
             d_i = plan["d"]
-            # Slice the scene into shots (cut ~every 3s on a word boundary); each shot is a clip.
-            word_gaps = [t.end for t in plan["timings"]]
-            shots = plan_shots([c.duration for c in plan["found"]], word_gaps, d_i)
-            picks = [idx for idx, _ in shots]
-            shot_durations = [dur for _, dur in shots]
-            # Download each unique clip once (reusing vetted downloads), then expand `picks`
-            # (which repeats/cycles the pool) to file paths.
-            path_by_idx: dict[int, str] = dict(plan["pre"])
-            for k, idx in enumerate(dict.fromkeys(picks)):
-                if idx in path_by_idx:
-                    continue
-                p = ws.path(f"scene_{si}_clip_{k}.mp4")
-                pexels.download(plan["found"][idx].download_url, p)
-                path_by_idx[idx] = p
-            clip_paths = [path_by_idx[idx] for idx in picks]
-            used_clip_ids += [plan["found"][idx].id for idx in dict.fromkeys(picks)]
+            if studio_mode:
+                # One drawn keyframe per scene → one clip, played full (the still-clip already spans
+                # the scene). Motion (below) animates it; there's no multi-clip cut rhythm to plan.
+                clip_paths = [plan["studio_clip"]]
+                shot_durations = None
+            else:
+                # Slice the scene into shots (cut ~every 3s on a word boundary); each shot is a clip.
+                word_gaps = [t.end for t in plan["timings"]]
+                shots = plan_shots([c.duration for c in plan["found"]], word_gaps, d_i)
+                picks = [idx for idx, _ in shots]
+                shot_durations = [dur for _, dur in shots]
+                # Download each unique clip once (reusing vetted downloads), then expand `picks`
+                # (which repeats/cycles the pool) to file paths.
+                path_by_idx: dict[int, str] = dict(plan["pre"])
+                for k, idx in enumerate(dict.fromkeys(picks)):
+                    if idx in path_by_idx:
+                        continue
+                    p = ws.path(f"scene_{si}_clip_{k}.mp4")
+                    pexels.download(plan["found"][idx].download_url, p)
+                    path_by_idx[idx] = p
+                clip_paths = [path_by_idx[idx] for idx in picks]
+                used_clip_ids += [plan["found"][idx].id for idx in dict.fromkeys(picks)]
 
             ass_path = ws.path(f"scene_{si}.ass")
             build_ass(plan["timings"], ass_path, clip_duration=d_i, style=subtitle_style,
