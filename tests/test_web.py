@@ -1300,6 +1300,28 @@ def test_reject_reason_feeds_learning(client, tmp_path):
     db.close()
 
 
+def test_episode_view_early_stats_note(client):
+    """A young published episode shows live views + an honest 'retention arrives ~2 days' note (not a
+    blank/broken retention), because YouTube finalises watch-time analytics ~2 days after publish."""
+    from database.db_session import SessionLocal
+    from database.models import Task
+    from database.types import TaskStatus
+
+    cam = _seed_campaign(client)
+    db = SessionLocal()
+    t = Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=1, status=TaskStatus.COMPLETED,
+             synopsis="s", published_url="https://youtube.com/shorts/x",
+             stats_json={"views": 1234, "likes": 40, "early": True})  # no avg_pct_viewed yet
+    db.add(t)
+    db.commit()
+    db.refresh(t)
+    tid = t.id
+    db.close()
+    page = client.get(f"/episodes/{tid}").text
+    assert "1234" in page and "Retention arrives" in page   # live views + honest wait note
+    assert "⏳" in page                                     # retention pending, not "—"/broken
+
+
 def test_episode_view_shows_retention_dropoff(client):
     """The Episode view renders the retention curve and names the scene where most viewers left."""
     from database.db_session import SessionLocal

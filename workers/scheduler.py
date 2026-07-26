@@ -259,6 +259,9 @@ def maybe_distill_campaign(db, campaign: Campaign, now: datetime | None = None) 
         select(Task).where(Task.campaign_id == campaign.id, Task.stats_json.isnot(None))
         .order_by(Task.episode_number)
     ).all()
+    # Only MEASURED episodes count — early views (near-real-time, no retention yet) carry stats_json
+    # but no `avg_pct_viewed`, and must not trip the learning threshold or dilute the summary (T4).
+    rows = [r for r in rows if (r.stats_json or {}).get("avg_pct_viewed") is not None]
     if len(rows) < DISTILL_MIN_EPISODES:
         return False
     user = db.get(User, campaign.user_id)
@@ -380,18 +383,27 @@ def send_daily_heartbeat(db, now: datetime | None = None) -> int:
 
 
 def daily_learning_pass(db, now: datetime | None = None) -> dict:
-    """Once-a-day: collect platform stats, re-distill playbooks, check daily minimums, and send
-    the operator heartbeat digest."""
-    from services.analytics_service import collect_stats
-
-    result = {"stats_updated": 0, "distilled": 0, "min_alerts": 0, "heartbeats": 0}
-    result["stats_updated"] = collect_stats(db, now=now)
+    """Once-a-day: re-distill playbooks, check daily minimums, and send the operator heartbeat
+    digest. Stats collection moved to its own hourly pass (`hourly_stats_pass`) so first-retention
+    latency isn't the daily tick + the ~2-day Analytics lag stacked."""
+    result = {"distilled": 0, "min_alerts": 0, "heartbeats": 0}
     for campaign in db.scalars(select(Campaign)).all():
         if maybe_distill_campaign(db, campaign, now=now):
             result["distilled"] += 1
     result["min_alerts"] = check_daily_minimums(db, now=now)
     result["heartbeats"] = send_daily_heartbeat(db, now=now)
     return result
+
+
+def hourly_stats_pass(db, now: datetime | None = None) -> dict:
+    """Near-real-time early views for young videos (< the Analytics lag) + a retention refresh for
+    mature ones. Each internally throttles per-episode work (early ~55 min, retention 24 h), so
+    running this hourly is cheap; it just makes fresh data appear within the hour instead of the
+    next daily tick. Best-effort — a fetch failure never breaks the tick."""
+    from services.analytics_service import collect_early_stats, collect_stats
+
+    return {"early_stats": collect_early_stats(db, now=now),
+            "stats_updated": collect_stats(db, now=now)}
 
 
 # ── Autopilot: the "hands" — AI review / auto-reject / retry / catch-up publish (ADR-044) ──
@@ -1005,6 +1017,15 @@ def periodic_tick(db=None, now: datetime | None = None) -> dict:
             summary["autopilot"] = autopilot_pass(db, now=now)
         except Exception:  # noqa: BLE001
             logger.warning("Autopilot pass failed", exc_info=True)
+
+        # Hourly analytics (NX guard, ~1/hour across ticks/restarts): early views for young videos +
+        # a retention refresh for mature ones — so fresh data appears within the hour, not the daily
+        # tick. Separate from the daily pass; each fetch internally throttles per-episode work.
+        try:
+            if task_queue.conn.set("stats:hourly", "1", nx=True, ex=3600):
+                summary["stats"] = hourly_stats_pass(db, now=now)
+        except Exception:  # noqa: BLE001
+            logger.warning("Hourly stats pass failed", exc_info=True)
 
         # Self-improvement pass at most once per day (Redis NX guard across ticks/restarts).
         try:

@@ -130,6 +130,91 @@ def fetch_facebook_stats(channel: Channel, video_ids: list[str]) -> dict[str, di
     return out
 
 
+EARLY_REFRESH_MINUTES = 55  # young videos (< MIN_AGE_HOURS) get near-real-time views ~hourly
+
+
+def fetch_youtube_early_stats(channel: Channel, video_ids: list[str]) -> dict[str, dict]:
+    """Return {video_id: {views, likes, comments}} via the YouTube **Data** API (v3
+    `videos.list?part=statistics`) — near-real-time (minutes, not the ~2-day Analytics lag) and cheap
+    (50 ids/call, 1 quota unit). Retention is NOT available here; that's Analytics-only."""
+    from googleapiclient.discovery import build
+
+    from services.youtube_service import build_credentials
+
+    creds = build_credentials(channel)
+    yt = build("youtube", "v3", credentials=creds, cache_discovery=False)
+    out: dict[str, dict] = {}
+    for i in range(0, len(video_ids), 50):
+        batch = [v for v in video_ids[i:i + 50] if v]
+        if not batch:
+            continue
+        resp = yt.videos().list(part="statistics", id=",".join(batch), maxResults=50).execute()
+        for item in resp.get("items", []) or []:
+            s = item.get("statistics", {}) or {}
+            out[item["id"]] = {"views": int(s.get("viewCount", 0)),
+                               "likes": int(s.get("likeCount", 0)),
+                               "comments": int(s.get("commentCount", 0))}
+    return out
+
+
+def collect_early_stats(db, now: datetime | None = None) -> int:
+    """Near-real-time views/likes for YOUNG episodes (published < MIN_AGE_HOURS) — the window the
+    Analytics API is still blind in. Merges {views, likes, early, early_fetched_at} into stats_json
+    WITHOUT touching retention fields (a separate `early_fetched_at` clock, so this never starves the
+    retention refresh). Never sets `avg_pct_viewed`, so autopilot + the playbook ignore it (T4).
+    Returns tasks updated. Best-effort: a channel failure is skipped, never fatal."""
+    now = now or datetime.utcnow()
+    tasks = db.scalars(
+        select(Task).where(
+            Task.status == TaskStatus.COMPLETED,
+            Task.published_video_id.isnot(None),
+            Task.finished_at > now - timedelta(hours=MIN_AGE_HOURS),  # too young for retention
+        )
+    ).all()
+    due = [
+        t for t in tasks
+        if not (t.stats_json or {}).get("early_fetched_at")
+        or datetime.fromisoformat(t.stats_json["early_fetched_at"])
+        <= now - timedelta(minutes=EARLY_REFRESH_MINUTES)
+    ]
+    if not due:
+        return 0
+    by_channel: dict[int, list[Task]] = {}
+    campaigns = {c.id: c for c in db.scalars(select(Campaign)).all()}
+    for t in due:
+        campaign = campaigns.get(t.campaign_id)
+        if campaign:
+            by_channel.setdefault(campaign.channel_id, []).append(t)
+
+    updated = 0
+    for channel_id, channel_tasks in by_channel.items():
+        channel = db.get(Channel, channel_id)
+        if channel is None:
+            continue
+        ids = [t.published_video_id for t in channel_tasks]
+        try:
+            if channel.platform == Platform.youtube:
+                stats = fetch_youtube_early_stats(channel, ids)
+            else:
+                stats = fetch_facebook_stats(channel, ids)
+        except Exception:  # noqa: BLE001 — early stats must never break the factory
+            logger.warning("Early-stats fetch failed for channel %s", channel_id, exc_info=True)
+            continue
+        for t in channel_tasks:
+            if t.published_video_id not in stats:
+                continue
+            # Merge onto whatever is there; never clobber retention. `early` = no retention yet.
+            merged = {**(t.stats_json or {}), **stats[t.published_video_id],
+                      "early_fetched_at": now.isoformat()}
+            merged["early"] = merged.get("avg_pct_viewed") is None
+            t.stats_json = merged
+            updated += 1
+    if updated:
+        db.commit()
+        logger.info("collect_early_stats updated %d young episode(s)", updated)
+    return updated
+
+
 def collect_stats(db, now: datetime | None = None) -> int:
     """Fetch/refresh stats for eligible published episodes. Returns how many tasks were updated."""
     now = now or datetime.utcnow()

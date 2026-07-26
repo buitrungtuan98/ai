@@ -905,6 +905,22 @@ competing menus (a bottom bar duplicating the drawer, "Home" vs "Dashboard" for 
   per-object ACL, and episode/aesthetic config already lives in the campaign hub's Settings tab +
   the episode detail page. Building hollow ACL/drawer UI would violate the repo's KISS/YAGNI contract.
 
+## Near-real-time analytics — early views in ~1h `DONE`
+Operator asked why analytics takes ~2 days / ~5 videos. Traced it: retention (Analytics API) has a
+~2-day lag by YouTube's design, AND we only polled once daily (stacking +24h), AND the 5-video
+learning threshold is deliberate. Fix: serve the data that CAN be fast, honestly.
+- **T1 — hourly early views** `DONE`: `collect_early_stats` uses YouTube's Data API (near-real-time
+  views/likes/comments, 50 ids/call ≈ 1 quota unit) + Facebook views, for episodes younger than the
+  Analytics lag, merged as `{views, likes, early}` on a separate `early_fetched_at` clock.
+- **T2 — unstuck retention** `DONE`: `collect_stats` moved from the once-daily pass to its own hourly
+  NX guard, so first retention lands ~48h sharp (the YouTube floor) instead of 48–72h. Distiller +
+  heartbeat stay daily.
+- **T3 — honest UI** `DONE`: the episode view shows live views + an explicit "⏳ Retention arrives
+  ~2 days after publish (YouTube processing delay)" note, so a young video reads "live", not broken.
+- **T4 — guardrails** `DONE`: early views never set `avg_pct_viewed`; the distiller threshold and the
+  Overview scorecard now require it, so early data never trips learning/autopilot. See ADR-051.
+- Zero Gemini cost, ~24 YT quota units/day, no new env var. 233 tests (3 new), ruff clean, docs green.
+
 ## "Queue stuck" — Task Logs was lying (+ real stuck-detection) `DONE`
 A screenshot showed a "stuck" queue. Tracing it, the queue was mostly healthy (rendered episodes
 waiting for their posting slots) — the Task Logs DISPLAY had two bugs that made it look frozen, plus

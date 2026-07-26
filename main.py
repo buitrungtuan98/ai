@@ -1789,7 +1789,9 @@ def campaign_overview(request: Request, user: CurrentUser, db: DbDep,
     episodes = db.scalars(
         select(Task).where(Task.campaign_id == campaign.id).order_by(Task.episode_number)
     ).all()
-    measured = [t for t in episodes if t.stats_json]
+    # "Measured" = retention present. Early views (near-real-time, no retention yet) carry stats_json
+    # but no avg_pct_viewed, so they must NOT count toward the scorecard/best-retention (T4).
+    measured = [t for t in episodes if t.stats_json and t.stats_json.get("avg_pct_viewed") is not None]
     best = max(measured, key=lambda t: t.stats_json.get("avg_pct_viewed", 0), default=None)
     hub = _hub_context(db, user, campaign)  # single channel fetch, reused for the audience line
     return templates.TemplateResponse(

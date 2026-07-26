@@ -930,6 +930,26 @@ already computes (classification, retention drop-offs, the playbook) — no new 
 every addition fail-open so the operations loop is never put at risk by a learning/observability
 feature.
 
+### ADR-051 — Two-speed analytics: near-real-time early views vs mature retention
+**Decision:** split stats into two passes on two clocks. (Early) `collect_early_stats` polls YouTube's
+**Data** API (`videos.list?part=statistics`, 50 ids/call, ~1 quota unit) and Facebook views for
+episodes younger than the Analytics lag (`< MIN_AGE_HOURS`), ~hourly, merging `{views, likes,
+comments, early, early_fetched_at}` into `stats_json` — near-real-time, cheap, no new scope
+(`youtube.readonly` already requested). (Mature) `collect_stats` (the retention/geography/curve
+fetch) is unchanged but moved from the once-daily pass to its own **hourly** NX guard, so an episode
+crossing the 48 h line gets its first retention within the hour instead of the next daily tick. The
+two use **separate timestamps** (`early_fetched_at` vs `fetched_at`) so early polling never starves
+the retention refresh. **Guardrail:** early stats never set `avg_pct_viewed`, and every "is this
+measured?" check (`classify_campaigns`, the distiller threshold, the Overview scorecard) requires
+`avg_pct_viewed` — so the operator SEES views in ~1 h, but autopilot and the playbook still DECIDE
+only on mature retention.
+**Why:** the operator wanted near-real-time data. Retention is Analytics-only and Google finalises it
+~2 days after publish — that latency is YouTube's, not ours, and no amount of polling changes it. But
+views/likes live in a *different*, near-real-time API we already have access to. Serving those hourly
+(clearly labelled "live", with an explicit "retention arrives ~2 days" note) gives an honest early
+signal at zero Gemini cost and negligible quota, without letting immature data pollute the
+learning/decision loops.
+
 ### ADR-050 — One "Episodes" surface + kill the lateral navigation loop
 **Decision:** `/episodes`, `/assets` (Review) and `/tasks` (render log) are three *layouts of one
 thing* — the episode pipeline. They previously cross-linked with scattered "↗" buttons and no
