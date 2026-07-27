@@ -1049,8 +1049,17 @@ flux draw didn't match). Added the reference-capable models. See ADR-055.
   cast manager notes which image models honour an uploaded image. `PUBLIC_BASE_URL` added to config.
 - Trade-off (opt-in, surfaced in UI): the reference image is briefly public at an unguessable URL —
   fine for a mascot, discouraged for a personal photo.
-- Verified: 266 tests passing (5 new — kontext `image=` gating, reference_url forwarding,
-  `_cast_with_ref_urls`, public route, upload sets public token), 12 skipped, ruff clean, docs green.
+- Robustness fix: an image-editing model (kontext) invoked with NO reference URL (no upload, or
+  PUBLIC_BASE_URL unset) used to 500 the whole render; it now degrades to text-only `flux` and logs
+  why, so the episode still renders. (Prod traceback: kontext called without `image=`.)
+- Verified: 267 tests passing (6 new — kontext `image=` gating, reference_url forwarding,
+  `_cast_with_ref_urls`, public route, upload sets public token, kontext→flux degrade), 12 skipped,
+  ruff clean, docs green.
+- Upload UX fix: reference-image uploads used to fail SILENTLY (>5 MB phone photos rejected with no
+  feedback → "no file chosen" + no thumbnail). Now the cap is 15 MB (we downscale to 1024px anyway),
+  HEIC is decoded opportunistically if pillow-heif is present, the server logs the exact reason, and
+  the UI shows an explicit "✓ image saved" / "⚠ couldn't use that image (PNG/JPG/WebP ≤15 MB)" banner
+  plus an instant client-side size check. 268 tests (1 new), ruff clean, docs green.
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation

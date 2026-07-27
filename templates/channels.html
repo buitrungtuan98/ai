@@ -13,6 +13,10 @@
 {% call ui.banner('success') %}✓ <b>Autopilot settings saved.</b>{% endcall %}
 {% elif flash == 'character' %}
 {% call ui.banner('success') %}✓ <b>Cast updated.</b> Studio-Mode campaigns on this channel draw from these characters.{% endcall %}
+{% elif flash == 'char_img_ok' %}
+{% call ui.banner('success') %}✓ <b>Reference image saved.</b> Its thumbnail shows on the character below (📌).{% endcall %}
+{% elif flash == 'char_img_fail' %}
+{% call ui.banner('failed') %}⚠ <b>That image couldn’t be used.</b> The character was saved, but the picture must be a <b>PNG, JPG or WebP under 15&nbsp;MB</b> (iPhone HEIC isn’t supported — in Photos, share/export as JPG first). Use <b>Add image</b> on the character to try again.{% endcall %}
 {% endif %}
 
 {% if total_all %}
@@ -169,7 +173,7 @@
           {% call ui.field('Name') %}<input name="name" required maxlength="60" placeholder="Give your character a name">{% endcall %}
           {% call ui.field('Description — look & personality', hint='The creative brief kept consistent across every frame') %}<input name="description" maxlength="300" placeholder="Describe the character's look and personality">{% endcall %}
           {% call ui.field('Art style', hint='e.g. flat 2D cartoon · modern anime · soft 3D · pencil sketch') %}<input name="style" maxlength="120" placeholder="the visual style for this character">{% endcall %}
-          {% call ui.field('Reference image (optional — locks the exact look)', hint='PNG/JPG/WebP, ≤5 MB. Leave blank to let the AI draw the character.') %}<input type="file" name="image" accept="image/png,image/jpeg,image/webp">{% endcall %}
+          {% call ui.field('Reference image (optional — locks the exact look)', hint='PNG/JPG/WebP, ≤15 MB (not iPhone HEIC — export as JPG). Leave blank to let the AI draw the character.') %}<input type="file" name="image" accept="image/png,image/jpeg,image/webp">{% endcall %}
           <button class="btn sm" type="submit">Add character</button>
         </form>
         {% else %}
@@ -209,6 +213,20 @@
 
 {% block scripts %}
 <script>
+  // Studio cast: warn immediately (before submit) if a chosen reference image is too big — the
+  // server also enforces this, but instant feedback beats a silent round-trip.
+  var MAX_IMG_MB = 15;
+  document.querySelectorAll('input[type="file"][name="image"]').forEach(function (inp) {
+    inp.addEventListener("change", function () {
+      var f = inp.files && inp.files[0];
+      if (f && f.size > MAX_IMG_MB * 1024 * 1024) {
+        window.ui.toast("Image is " + (f.size / 1024 / 1024).toFixed(1) + " MB — must be under " +
+                        MAX_IMG_MB + " MB. Pick a smaller image.", "danger");
+        inp.value = "";
+      }
+    });
+  });
+
   // Studio cast: example presets fill the add form (name/description/style) so operators see the
   // range of styles (stickman / anime / 3D …) and can edit from there — not locked to any one look.
   document.querySelectorAll(".char-preset").forEach(function (btn) {
