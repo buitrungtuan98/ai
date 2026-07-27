@@ -1074,6 +1074,12 @@ flux draw didn't match). Added the reference-capable models. See ADR-055.
   last-resort text-only `flux` draw keeps Studio rendering instead of hard-failing the episode (the
   uploaded reference is NOT applied — character is description-only; logged loudly). A Gemini-only
   chain is respected (no reroute). 271 tests (3 new), ruff clean, docs green.
+- ROOT CAUSE of the kontext 500s (operator read the new API docs): backend auth is the
+  `Authorization: Bearer` HEADER — a `?token=` query param is not documented and was ignored, so our
+  authenticated requests actually hit the anonymous tier, which gated models (kontext) reject. Fixed
+  `_call_pollinations` + `verify_pollinations` to send the Bearer header (secret never rides in a URL
+  now); the new API's deterministic gates (401 auth / 402 pollen balance / 403 model access) raise
+  actionable messages instead of a bare failure. 272 tests (1 new), ruff clean, docs green.
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation

@@ -1104,15 +1104,25 @@ def _call_pollinations(
     url = "https://image.pollinations.ai/prompt/" + urllib.parse.quote(prompt[:700], safe="")
     params: dict = {"model": model or "flux", "width": width, "height": height,
                     "seed": seed, "nologo": "true", "safe": "true"}
-    if token:
-        params["token"] = token
+    # Backend auth per the Pollinations API docs is the Authorization: Bearer HEADER — a `token`
+    # query param is NOT documented and gets ignored, leaving the request on the anonymous tier
+    # (which gated models like kontext reject). Header auth also keeps the secret out of every URL,
+    # so it can never leak into logs via a failing request's URL.
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
     if reference_url and model in _POLLINATIONS_IMAGE_MODELS:
         params["image"] = reference_url   # image-to-image: keep the referenced character
     try:
-        resp = requests.get(url, params=params, timeout=120)
+        resp = requests.get(url, params=params, headers=headers, timeout=120)
+        if resp.status_code in (401, 402, 403):
+            # The new API's deterministic gates — say exactly what to do instead of a bare 500-alike.
+            why = {401: "authentication required — save a Pollinations token on Credentials",
+                   402: "pollen balance / API budget exhausted — top up at auth.pollinations.ai or "
+                        "switch the chain to flux/Gemini",
+                   403: "this token doesn't have access to this model"}[resp.status_code]
+            raise ImageGenError(f"Pollinations {model}: HTTP {resp.status_code} — {why}")
         resp.raise_for_status()
     except requests.RequestException as exc:
-        # The failing URL carries the token in its query string — NEVER let it into logs/errors.
+        # Defense in depth: if the secret ever appears in an error message, scrub it.
         msg = str(exc)
         if token:
             msg = msg.replace(token, "sk_***REDACTED***")
