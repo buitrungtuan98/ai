@@ -14,9 +14,10 @@ from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import Depends, FastAPI, Form, HTTPException, Request
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import (
+    FileResponse,
     HTMLResponse,
     JSONResponse,
     RedirectResponse,
@@ -701,6 +702,9 @@ def set_channel_profile(channel=Depends(get_owned_channel), db=Depends(get_db),
 _MAX_CHARACTERS = 12  # per channel — plenty for random casting, small enough to keep the UI/quota sane
 
 
+_MAX_CHARACTER_IMAGE_BYTES = 5 * 1024 * 1024  # 5 MB cap on an uploaded reference image
+
+
 def _sanitize_characters(raw) -> list[dict]:
     """Coerce stored characters_json into the canonical shape, dropping anything malformed. One place
     the character record schema is enforced (DRY) — used by the render path and the manager UI."""
@@ -713,28 +717,64 @@ def _sanitize_characters(raw) -> list[dict]:
             "name": str(c["name"]).strip()[:60],
             "description": str(c.get("description") or "").strip()[:300],
             "style": str(c.get("style") or "").strip()[:120],
+            # Operator-uploaded reference image (W4/ADR-054): the PERMANENT identity anchor the Studio
+            # render uses directly as the character sheet. NULL = the AI draws + caches its own sheet.
+            "ref_image": (str(c["ref_image"]) if c.get("ref_image") else None),
             # Path to the once-generated character reference sheet (set by the Studio render path).
             "sheet_path": (str(c["sheet_path"]) if c.get("sheet_path") else None),
         })
     return out
 
 
+def _character_image_dir(channel_id: int) -> str:
+    return os.path.join(settings.MEDIA_ROOT, "studio", "characters", str(channel_id))
+
+
+def _save_character_image(channel_id: int, char_id: str, upload: UploadFile) -> str | None:
+    """Re-encode an uploaded reference image to a normalized PNG under the channel's studio dir and
+    return its path (None if it isn't a valid image / too big). Re-encoding via PIL strips metadata
+    and guarantees a real image (never trusts the client's content-type or filename)."""
+    from PIL import Image
+
+    data = upload.file.read(_MAX_CHARACTER_IMAGE_BYTES + 1)
+    if not data or len(data) > _MAX_CHARACTER_IMAGE_BYTES:
+        return None
+    import io
+
+    try:
+        img = Image.open(io.BytesIO(data))
+        img.verify()  # detect a non-image / truncated upload before we trust it
+        img = Image.open(io.BytesIO(data)).convert("RGB")
+    except Exception:  # noqa: BLE001 — any decode failure = not a usable image
+        return None
+    img.thumbnail((1024, 1024))  # cap dimensions — a reference sheet needs no more
+    os.makedirs(_character_image_dir(channel_id), exist_ok=True)
+    path = os.path.join(_character_image_dir(channel_id), f"{char_id}.png")
+    img.save(path, "PNG")
+    return path
+
+
 @app.post("/channels/{channel_id}/characters")
 def add_channel_character(channel=Depends(get_owned_channel), db=Depends(get_db),
                           name: str = Form(...), description: str = Form(""),
-                          style: str = Form("")):
-    """Add a Studio-Mode character to a channel's cast (ADR-052). Each episode drawn in Studio Mode
-    picks one at random and keeps its face/style consistent across every frame. Fictional characters
-    only — the description is a creative brief, not a real person."""
+                          style: str = Form(""), image: UploadFile | None = File(None)):
+    """Add a Studio-Mode character to a channel's cast (ADR-052/054). Each episode drawn in Studio
+    Mode picks one at random and keeps its face/style consistent across every frame. An optional
+    uploaded reference image becomes the PERMANENT identity anchor (best consistency); without one the
+    AI draws a sheet from the description. Fictional characters only — a creative brief, not a real
+    person (a real photo is allowed only for yourself / with explicit consent)."""
     cast = _sanitize_characters(channel.characters_json)
     if name.strip() and len(cast) < _MAX_CHARACTERS:
         import uuid
 
+        cid = uuid.uuid4().hex[:8]
+        ref = _save_character_image(channel.id, cid, image) if (image and image.filename) else None
         cast.append({
-            "id": uuid.uuid4().hex[:8],
+            "id": cid,
             "name": name.strip()[:60],
             "description": description.strip()[:300],
             "style": style.strip()[:120],
+            "ref_image": ref,
             "sheet_path": None,
         })
         channel.characters_json = cast
@@ -742,12 +782,43 @@ def add_channel_character(channel=Depends(get_owned_channel), db=Depends(get_db)
     return RedirectResponse("/channels?flash=character", status_code=303)
 
 
+@app.post("/channels/{channel_id}/characters/{char_id}/image")
+def set_channel_character_image(char_id: str, channel=Depends(get_owned_channel),
+                                db=Depends(get_db), image: UploadFile = File(...)):
+    """Replace a character's reference image later (W4). Re-encoded + stored like the add path."""
+    cast = _sanitize_characters(channel.characters_json)
+    ch = next((c for c in cast if c["id"] == char_id), None)
+    if ch is not None and image and image.filename:
+        ref = _save_character_image(channel.id, char_id, image)
+        if ref:
+            ch["ref_image"] = ref
+            channel.characters_json = cast
+            db.commit()
+    return RedirectResponse("/channels?flash=character", status_code=303)
+
+
+@app.get("/channels/{channel_id}/characters/{char_id}/image")
+def get_channel_character_image(char_id: str, channel=Depends(get_owned_channel)):
+    """Serve a character's uploaded reference image for the cast-list preview (ownership-checked)."""
+    ch = next((c for c in _sanitize_characters(channel.characters_json) if c["id"] == char_id), None)
+    if not ch or not ch.get("ref_image") or not os.path.exists(ch["ref_image"]):
+        raise HTTPException(404, "No reference image")
+    return FileResponse(ch["ref_image"], media_type="image/png")
+
+
 @app.post("/channels/{channel_id}/characters/{char_id}/delete")
 def delete_channel_character(char_id: str, channel=Depends(get_owned_channel), db=Depends(get_db)):
-    """Remove a character from a channel's cast. Any generated reference sheet on disk is left for the
-    normal media cleanup sweep — no episode references it once the character is gone."""
-    cast = [c for c in _sanitize_characters(channel.characters_json) if c["id"] != char_id]
-    channel.characters_json = cast or None
+    """Remove a character from a channel's cast, deleting its uploaded reference image. Any generated
+    sheet is left for the normal media cleanup sweep — no episode references it once it's gone."""
+    cast = _sanitize_characters(channel.characters_json)
+    keep = [c for c in cast if c["id"] != char_id]
+    for c in cast:
+        if c["id"] == char_id and c.get("ref_image") and os.path.exists(c["ref_image"]):
+            try:
+                os.remove(c["ref_image"])
+            except OSError:
+                logger.warning("Could not remove character image %s", c["ref_image"])
+    channel.characters_json = keep or None
     db.commit()
     return RedirectResponse("/channels?flash=character", status_code=303)
 
@@ -1025,7 +1096,7 @@ def _build_campaign_config(
     continuity: str, timezone: str,
     motion: str = "on", caption_theme: str = "highlight", self_critique: str = "on",
     script_depth: str = "standard", video_format: str = "short",
-    visual_source: str = "stock", visual_style: str = "",
+    visual_source: str = "stock", visual_style: str = "", title_overlay: str = "off",
     music_mode: str = "none", music_mood: str = "",
     color_grade: str = "", auto_qc: str = "on",
     max_per_day: str = "", min_per_day: str = "",
@@ -1071,6 +1142,9 @@ def _build_campaign_config(
         # optional per-campaign art-style override (blank = the character's own style / channel default).
         "visual_source": "studio" if visual_source == "studio" else "stock",
         "visual_style": visual_style.strip()[:200] or None,
+        # Billboard title (ADR-054): burn the hook title into the video (top, two-tone) AND draw it as
+        # a poster-style thumbnail — the reference-channel look. One toggle drives both. Default off.
+        "title_overlay": "on" if title_overlay == "on" else "off",
         # Music: none | auto (random CC0 by mood, per episode) | file (operator-supplied path).
         "music_mode": music_mode if music_mode in ("none", "auto", "file") else "none",
         "music_mood": music_mood.strip() or None,
@@ -1146,6 +1220,7 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
     video_format: str = Form("short"),
     visual_source: str = Form("stock"),
     visual_style: str = Form(""),
+    title_overlay: str = Form("off"),
     music_mode: str = Form("none"),
     music_mood: str = Form(""),
     color_grade: str = Form(""),
@@ -1171,7 +1246,7 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
             catchphrase_close=catchphrase_close, continuity=continuity, timezone=timezone,
             motion=motion, caption_theme=caption_theme, self_critique=self_critique,
             script_depth=script_depth, video_format=video_format,
-            visual_source=visual_source, visual_style=visual_style,
+            visual_source=visual_source, visual_style=visual_style, title_overlay=title_overlay,
             music_mode=music_mode, music_mood=music_mood,
             color_grade=color_grade, auto_qc=auto_qc,
             max_per_day=max_per_day, min_per_day=min_per_day,

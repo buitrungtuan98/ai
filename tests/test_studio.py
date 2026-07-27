@@ -368,6 +368,85 @@ def test_generate_image_block_does_not_reroute_to_pollinations(tmp_path, monkeyp
     assert not poll_calls   # unsafe content is terminal — never rerouted to another provider
 
 
+def _mock_render_touchpoints(video_factory, monkeypatch):
+    """Stub every ffmpeg/TTS/thumbnail touchpoint so only produce()'s orchestration runs."""
+    from core.tts import WordTiming
+
+    def fake_tts(text, out, **k):
+        open(out, "w").write("audio")
+        return [WordTiming("w", 0.0, 1.0)]
+
+    monkeypatch.setattr(video_factory.tts, "synthesize_paced", fake_tts)
+    monkeypatch.setattr(video_factory, "voice_check", lambda *a, **k: None)
+    monkeypatch.setattr(video_factory.media, "probe_duration", lambda p: 5.0)
+    monkeypatch.setattr(video_factory, "still_to_clip", lambda img, out, d, profile=None: out)
+    monkeypatch.setattr(video_factory, "run_ffmpeg", lambda *a, **k: None)
+
+
+def test_produce_title_overlay_burns_headline_and_poster(tmp_path, monkeypatch):
+    """title_overlay=on feeds the hook title into build_ass (headline) AND the thumbnail (poster),
+    with the brand tint as the accent — so the in-video billboard and the thumbnail match."""
+    from core import video_factory
+
+    _mock_render_touchpoints(video_factory, monkeypatch)
+    cap: dict = {}
+
+    def fake_ass(timings, out, **k):
+        cap["headline"] = k.get("headline")
+        cap["accent"] = k.get("headline_accent_hex")
+        open(out, "w").write("ass")
+        return out
+
+    tcap: dict = {}
+
+    def fake_thumb(video, out, title, **k):
+        tcap.update(title=title, poster=k.get("poster"), accent=k.get("accent_hex"))
+        return out
+
+    monkeypatch.setattr(video_factory, "build_ass", fake_ass)
+    monkeypatch.setattr(video_factory, "generate_thumbnail", fake_thumb)
+
+    cast = [{"id": "h", "name": "Hero", "description": "d", "style": "s", "ref_image": None, "sheet_path": None}]
+    video_factory.produce(
+        script=_studio_script(3), episode_number=1, pexels_api_key="", job_id="ovl",
+        output_dir=str(tmp_path / "o"), visual_source="studio", characters=cast, image_api_key="k",
+        gen_image=lambda **kw: (open(kw["out_path"], "w").write("P"), kw["out_path"])[1],
+        title_overlay=True, branding=video_factory.Branding(tint_color="0xFF3B30"),
+    )
+    assert cap["headline"] == "TA" and cap["accent"] == "0xFF3B30"   # hook title (variant A) + brand accent
+    assert tcap["title"] == "TA" and tcap["poster"] is True and tcap["accent"] == "0xFF3B30"
+
+
+def test_produce_studio_uses_uploaded_ref_image(tmp_path, monkeypatch):
+    """A character with an uploaded reference image uses it as the anchor directly — the AI sheet is
+    NOT generated, and every scene draw references the uploaded image."""
+    from core import video_factory
+
+    _mock_render_touchpoints(video_factory, monkeypatch)
+    monkeypatch.setattr(video_factory, "build_ass", lambda t, o, **k: open(o, "w").write("a"))
+    monkeypatch.setattr(video_factory, "generate_thumbnail", lambda *a, **k: a[1])
+
+    ref = tmp_path / "myhero.png"
+    ref.write_bytes(b"a-real-uploaded-image")
+    gen_refs = []
+
+    def fake_gen(*, prompt, api_key, out_path, model=None, reference_paths=None):
+        gen_refs.append(reference_paths)
+        open(out_path, "w").write("P")
+        return out_path
+
+    cast = [{"id": "h", "name": "Hero", "description": "d", "style": "s",
+             "ref_image": str(ref), "sheet_path": None}]
+    video_factory.produce(
+        script=_studio_script(3), episode_number=1, pexels_api_key="", job_id="refimg",
+        output_dir=str(tmp_path / "o"), visual_source="studio", characters=cast, image_api_key="k",
+        gen_image=fake_gen,
+    )
+    # 3 scene draws, no 4th sheet-generation call; the uploaded image anchors every scene.
+    assert len(gen_refs) == 3
+    assert all(rp and rp[0] == str(ref) for rp in gen_refs)
+
+
 def test_produce_studio_requires_a_cast(tmp_path):
     """Studio Mode with an empty cast fails clearly instead of silently rendering stock."""
     import pytest

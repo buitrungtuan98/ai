@@ -123,6 +123,46 @@ LINE_MAX_CHARS = 28
 LINE_BREAK_GAP_S = 0.6
 
 
+def split_two_tone(text: str) -> tuple[str, str]:
+    """Split a headline into two balanced lines at a word boundary (line 1 gets the extra word), for
+    the two-tone billboard title (line 1 white, line 2 accent). A single word yields (word, "")."""
+    words = text.strip().split()
+    if len(words) <= 1:
+        return (text.strip(), "")
+    cut = (len(words) + 1) // 2
+    return (" ".join(words[:cut]), " ".join(words[cut:]))
+
+
+def _ass_inline_accent(headline_accent_hex: str | None) -> str:
+    """The inline ASS primary-colour override (`\\c&HBBGGRR&`) for the accent tone-line — the campaign
+    brand colour when set, else the default warm yellow."""
+    accent_ass = hex_to_ass(headline_accent_hex) if headline_accent_hex else DEFAULT_ACCENT_ASS
+    return r"\c&H" + accent_ass[4:] + "&"  # strip the '&H00' alpha prefix → \c&HBBGGRR&
+
+
+def _headline_style_and_event(
+    headline: str, *, width: int, height: int, font_name: str,
+    accent_hex: str | None, end_s: float,
+) -> tuple[str, str]:
+    """Build the top-anchored billboard title: a bold UPPERCASE two-tone headline that sits at the top
+    of the frame for the whole clip (reference-channel 'poster' look). Returns (style_line, event_line).
+    Line 1 is white; line 2 is the accent colour. Each tone-line wraps to the usable width."""
+    hpx = max(46, round(height * 0.052))
+    usable = width - 2 * MARGIN_PX
+    top_margin = round(height * 0.035)
+    line1, line2 = split_two_tone(headline.upper())
+    rows1 = wrap_text(_ass_escape(line1), hpx, usable)
+    text = "\\N".join(rows1)
+    if line2:
+        rows2 = wrap_text(_ass_escape(line2), hpx, usable)
+        text += "\\N{" + _ass_inline_accent(accent_hex) + "}" + "\\N".join(rows2)
+    # Alignment 8 = top-centre; heavy outline + shadow so the title reads over any footage/drawing.
+    style = (f"Style: Headline,{font_name},{hpx},&H00FFFFFF,&H00000000,&H80000000,"
+             f"1,0,1,6,3,8,{MARGIN_PX},{MARGIN_PX},{top_margin},1")
+    event = f"Dialogue: 0,{_ass_time(0)},{_ass_time(end_s)},Headline,,0,0,0,,{text}"
+    return style, event
+
+
 def group_words_into_lines(timings: list[WordTiming]) -> list[WordTiming]:
     """Merge word timings into phrase-level timings for the "line" subtitle style."""
     lines: list[WordTiming] = []
@@ -152,10 +192,16 @@ def build_ass(
     font_name: str = "DejaVu Sans",
     width: int = VIDEO_W,
     height: int = VIDEO_H,
+    headline: str | None = None,
+    headline_accent_hex: str | None = None,
 ) -> str:
     """Write an ASS file with one Dialogue per word (or per phrase in "line" style), styled by a
     caption theme (classic / highlight / boxed / neon). `width`/`height` set PlayRes so captions
-    position correctly for any output geometry (default vertical 1080×1920)."""
+    position correctly for any output geometry (default vertical 1080×1920).
+
+    When `headline` is given, a bold two-tone UPPERCASE billboard title is anchored to the TOP of the
+    frame for the whole clip (word captions still live in the lower third — no collision), matching
+    the reference-channel poster look."""
     if style == "line":
         timings = group_words_into_lines(timings)
     spec = CAPTION_THEMES.get(theme, CAPTION_THEMES["classic"])
@@ -179,11 +225,22 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Word,{font_name},{font_px},{primary},{spec['outline']},{spec['back']},1,0,{spec['border_style']},{spec['outline_w']},2,2,{MARGIN_PX},{MARGIN_PX},{margin_v},1
-
+"""
+    # Optional top billboard headline (drawn for the whole clip, above the word captions).
+    headline_event = ""
+    if headline and headline.strip():
+        hl_end = clip_duration if clip_duration else (timings[-1].end if timings else 3600.0)
+        style_line, headline_event = _headline_style_and_event(
+            headline.strip(), width=width, height=height, font_name=font_name,
+            accent_hex=headline_accent_hex, end_s=hl_end)
+        header += style_line + "\n"
+    header += """
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     lines = [header]
+    if headline_event:
+        lines.append(headline_event + "\n")
     n = len(timings)
     for i, wt in enumerate(timings):
         start = wt.start
