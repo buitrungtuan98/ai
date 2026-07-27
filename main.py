@@ -720,38 +720,45 @@ def _sanitize_characters(raw) -> list[dict]:
             # Operator-uploaded reference image (W4/ADR-054): the PERMANENT identity anchor the Studio
             # render uses directly as the character sheet. NULL = the AI draws + caches its own sheet.
             "ref_image": (str(c["ref_image"]) if c.get("ref_image") else None),
+            # Unguessable token → the PUBLIC url a Pollinations image-editing model (kontext) fetches
+            # the reference from (ADR-055). Random, so it can't be enumerated. NULL = no uploaded image.
+            "ref_token": (str(c["ref_token"]) if c.get("ref_token") else None),
             # Path to the once-generated character reference sheet (set by the Studio render path).
             "sheet_path": (str(c["sheet_path"]) if c.get("sheet_path") else None),
         })
     return out
 
 
-def _character_image_dir(channel_id: int) -> str:
-    return os.path.join(settings.MEDIA_ROOT, "studio", "characters", str(channel_id))
+def _public_ref_dir() -> str:
+    # Reference images live under one token-keyed dir; the public /studio/ref route serves from here.
+    return os.path.join(settings.MEDIA_ROOT, "studio", "public_refs")
 
 
-def _save_character_image(channel_id: int, char_id: str, upload: UploadFile) -> str | None:
-    """Re-encode an uploaded reference image to a normalized PNG under the channel's studio dir and
-    return its path (None if it isn't a valid image / too big). Re-encoding via PIL strips metadata
-    and guarantees a real image (never trusts the client's content-type or filename)."""
+def _save_character_image(upload: UploadFile) -> tuple[str, str] | None:
+    """Re-encode an uploaded reference image to a normalized PNG keyed by a random token; return
+    (path, token) or None if it isn't a valid image / too big. Re-encoding via PIL strips metadata
+    and guarantees a real image (never trusts the client's content-type or filename). The random token
+    is the file's name AND its public URL slug, so the public route needs no DB lookup and the image
+    can't be enumerated."""
+    import io
+    import secrets
+
     from PIL import Image
 
     data = upload.file.read(_MAX_CHARACTER_IMAGE_BYTES + 1)
     if not data or len(data) > _MAX_CHARACTER_IMAGE_BYTES:
         return None
-    import io
-
     try:
-        img = Image.open(io.BytesIO(data))
-        img.verify()  # detect a non-image / truncated upload before we trust it
+        Image.open(io.BytesIO(data)).verify()  # reject a non-image / truncated upload before trusting it
         img = Image.open(io.BytesIO(data)).convert("RGB")
     except Exception:  # noqa: BLE001 — any decode failure = not a usable image
         return None
     img.thumbnail((1024, 1024))  # cap dimensions — a reference sheet needs no more
-    os.makedirs(_character_image_dir(channel_id), exist_ok=True)
-    path = os.path.join(_character_image_dir(channel_id), f"{char_id}.png")
+    token = secrets.token_hex(16)
+    os.makedirs(_public_ref_dir(), exist_ok=True)
+    path = os.path.join(_public_ref_dir(), f"{token}.png")
     img.save(path, "PNG")
-    return path
+    return path, token
 
 
 @app.post("/channels/{channel_id}/characters")
@@ -767,14 +774,14 @@ def add_channel_character(channel=Depends(get_owned_channel), db=Depends(get_db)
     if name.strip() and len(cast) < _MAX_CHARACTERS:
         import uuid
 
-        cid = uuid.uuid4().hex[:8]
-        ref = _save_character_image(channel.id, cid, image) if (image and image.filename) else None
+        saved = _save_character_image(image) if (image and image.filename) else None
         cast.append({
-            "id": cid,
+            "id": uuid.uuid4().hex[:8],
             "name": name.strip()[:60],
             "description": description.strip()[:300],
             "style": style.strip()[:120],
-            "ref_image": ref,
+            "ref_image": saved[0] if saved else None,
+            "ref_token": saved[1] if saved else None,
             "sheet_path": None,
         })
         channel.characters_json = cast
@@ -782,16 +789,26 @@ def add_channel_character(channel=Depends(get_owned_channel), db=Depends(get_db)
     return RedirectResponse("/channels?flash=character", status_code=303)
 
 
+def _remove_ref_file(path: str | None) -> None:
+    if path and os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            logger.warning("Could not remove character image %s", path)
+
+
 @app.post("/channels/{channel_id}/characters/{char_id}/image")
 def set_channel_character_image(char_id: str, channel=Depends(get_owned_channel),
                                 db=Depends(get_db), image: UploadFile = File(...)):
-    """Replace a character's reference image later (W4). Re-encoded + stored like the add path."""
+    """Replace a character's reference image later (W4). Re-encoded + stored like the add path; the
+    old file is removed so a stale token stops resolving."""
     cast = _sanitize_characters(channel.characters_json)
     ch = next((c for c in cast if c["id"] == char_id), None)
     if ch is not None and image and image.filename:
-        ref = _save_character_image(channel.id, char_id, image)
-        if ref:
-            ch["ref_image"] = ref
+        saved = _save_character_image(image)
+        if saved:
+            _remove_ref_file(ch.get("ref_image"))
+            ch["ref_image"], ch["ref_token"] = saved
             channel.characters_json = cast
             db.commit()
     return RedirectResponse("/channels?flash=character", status_code=303)
@@ -806,6 +823,22 @@ def get_channel_character_image(char_id: str, channel=Depends(get_owned_channel)
     return FileResponse(ch["ref_image"], media_type="image/png")
 
 
+@app.get("/studio/ref/{token}")
+def public_character_reference(token: str):
+    """PUBLIC (no auth) reference-image endpoint so a Pollinations image-editing model (kontext) can
+    fetch a character's uploaded reference over the internet (ADR-055). The token is a 32-hex random
+    slug = the file name, so there's no DB lookup and no enumeration; the regex bars path traversal.
+    This is the one intentional public exposure of a reference image (the operator opted in)."""
+    import re
+
+    if not re.fullmatch(r"[a-f0-9]{8,64}", token):
+        raise HTTPException(404, "Not found")
+    path = os.path.join(_public_ref_dir(), f"{token}.png")
+    if not os.path.exists(path):
+        raise HTTPException(404, "Not found")
+    return FileResponse(path, media_type="image/png")
+
+
 @app.post("/channels/{channel_id}/characters/{char_id}/delete")
 def delete_channel_character(char_id: str, channel=Depends(get_owned_channel), db=Depends(get_db)):
     """Remove a character from a channel's cast, deleting its uploaded reference image. Any generated
@@ -813,11 +846,8 @@ def delete_channel_character(char_id: str, channel=Depends(get_owned_channel), d
     cast = _sanitize_characters(channel.characters_json)
     keep = [c for c in cast if c["id"] != char_id]
     for c in cast:
-        if c["id"] == char_id and c.get("ref_image") and os.path.exists(c["ref_image"]):
-            try:
-                os.remove(c["ref_image"])
-            except OSError:
-                logger.warning("Could not remove character image %s", c["ref_image"])
+        if c["id"] == char_id:
+            _remove_ref_file(c.get("ref_image"))
     channel.characters_json = keep or None
     db.commit()
     return RedirectResponse("/channels?flash=character", status_code=303)

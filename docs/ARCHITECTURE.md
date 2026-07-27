@@ -1022,6 +1022,26 @@ with an upload. Compliance: characters are fictional mascots; a real photo is al
 or with explicit consent, and it's personal data kept on the box like other media (it only leaves to
 the image API that draws with it — same trust boundary as scripts).
 
+### ADR-055 — Pollinations reference image via kontext (a public reference URL)
+**Decision:** let the free Pollinations provider honour an uploaded character reference (ADR-054/W4),
+not just Gemini. Base `flux` is text-to-image and can't — but **FLUX.1 Kontext** (`pollinations:kontext`)
+and the other image-editing models (nanobanana/gptimage/seedream) accept an `image=<URL>` input.
+Pollinations fetches that URL server-side, so the reference must be at a **public** URL. We serve it
+from a dedicated **unauthenticated** route `GET /studio/ref/{token}` where `token` is a 32-hex random
+slug that is also the file name (`MEDIA_ROOT/studio/public_refs/{token}.png`) — so there's no DB lookup
+and no enumeration, and a `[a-f0-9]` regex bars path traversal. The worker builds each character's
+`ref_url` from `PUBLIC_BASE_URL` (falls back to `OAUTH_REDIRECT_BASE`) and skips it on a non-public
+base (dev localhost), so kontext just degrades to the next chain entry there. `generate_image` gains a
+`reference_url` that only the image-editing Pollinations models use; Gemini keeps using the local
+`reference_paths`; `flux` ignores it. Content-block handling is unchanged (terminal, never rerouted).
+**Why:** the operator uploaded a character image, set Pollinations as the provider, and saw the output
+not match — because base `flux` silently ignores references. Kontext fixes that on the free tier. The
+one real cost is that the reference image becomes briefly public (an unguessable URL); that's an
+explicit, opt-in trade-off surfaced in the UI (fine for a fictional mascot, discouraged for a personal
+photo), and it's the only way an external image API can read a file that otherwise lives only on the
+box. The random-token-as-filename keeps the public surface minimal (one image per token, no listing,
+no traversal) and needs no new auth-exempt machinery — a dependency-free route is already public.
+
 ### ADR-050 — One "Episodes" surface + kill the lateral navigation loop
 **Decision:** `/episodes`, `/assets` (Review) and `/tasks` (render log) are three *layouts of one
 thing* — the episode pipeline. They previously cross-linked with scattered "↗" buttons and no

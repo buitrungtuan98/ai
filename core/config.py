@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_ID: str | None = None
     GOOGLE_CLIENT_SECRET: str | None = None
     OAUTH_REDIRECT_BASE: str = "http://127.0.0.1:8000"
+    # The box's PUBLIC https base (the Cloudflare Tunnel hostname). Used to build the temporary public
+    # URL that Pollinations `kontext` fetches a character reference image from (ADR-054/055). Blank →
+    # falls back to OAUTH_REDIRECT_BASE (also the public URL). If neither is a real public host (e.g.
+    # dev localhost), kontext reference-image editing simply can't run and the chain degrades.
+    PUBLIC_BASE_URL: str | None = None
 
     # --- Firebase (multi-tenant only) ---
     FIREBASE_CREDENTIALS_PATH: str | None = None

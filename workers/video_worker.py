@@ -81,6 +81,23 @@ def _set_status(db, task: Task, status: TaskStatus, pct: float) -> None:
     set_progress(task.id, pct)
 
 
+def _cast_with_ref_urls(characters) -> list[dict] | None:
+    """Attach a PUBLIC `ref_url` to each character that has an uploaded reference token (ADR-055), so
+    a Pollinations image-editing model can fetch it over the internet. Skipped when the box has no
+    real public base (dev localhost) — then only the Gemini leg (local file) can use the reference."""
+    if not characters:
+        return None
+    base = (settings.PUBLIC_BASE_URL or settings.OAUTH_REDIRECT_BASE or "").rstrip("/")
+    public = base.startswith(("http://", "https://")) and "127.0.0.1" not in base and "localhost" not in base
+    out = []
+    for c in characters:
+        c = dict(c)
+        if public and c.get("ref_token"):
+            c["ref_url"] = f"{base}/studio/ref/{c['ref_token']}"
+        out.append(c)
+    return out
+
+
 def _resolve_keys(user: User, *, visual_source: str = "stock") -> tuple[str, str]:
     """Gemini (script/QC/Studio-image) key is always required. Stock mode also needs a Pexels key;
     Studio mode draws its visuals with the Gemini image model, so Pexels is optional there."""
@@ -471,6 +488,10 @@ def render_task(task_id: int) -> None:
         image_gen = partial(generate_image,
                             pollinations_token=(user.pollinations_token or settings.POLLINATIONS_TOKEN),
                             width=_prof.width, height=_prof.height)
+        # Studio cast: attach each character's PUBLIC reference URL (ADR-055) so a Pollinations
+        # image-editing model (kontext) can fetch an uploaded reference over the internet. The Gemini
+        # leg uses the local file instead; a non-public base (dev localhost) yields no url → skipped.
+        studio_characters = _cast_with_ref_urls(channel.characters_json)
         task.started_at = datetime.utcnow()
 
         _set_status(db, task, TaskStatus.AI_GENERATION, 5)
@@ -552,7 +573,7 @@ def render_task(task_id: int) -> None:
                 motion_seed=task.episode_number,
                 video_format=cfg.get("video_format", "short"),
                 visual_source=visual_source,
-                characters=channel.characters_json or None,
+                characters=studio_characters,
                 visual_style=cfg.get("visual_style"),
                 image_api_key=gemini_key,
                 image_model=image_model,

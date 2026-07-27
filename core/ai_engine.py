@@ -1006,9 +1006,15 @@ def _call_gemini_image(
     return out_path
 
 
+# Pollinations models that accept an input/reference image (`image=<URL>`) for image-to-image /
+# editing — everything else (flux, turbo, stable-diffusion) is text-to-image and ignores it.
+_POLLINATIONS_IMAGE_MODELS = {"kontext", "nanobanana", "gptimage", "gptimage-large", "seedream"}
+
+
 def generate_image(
     *, prompt: str, api_key: str, out_path: str,
     model: str | None = None, reference_paths: list[str] | None = None,
+    reference_url: str | None = None,
     pollinations_token: str | None = None, width: int = 1080, height: int = 1920,
     max_retries: int = 2,
 ) -> str:
@@ -1020,7 +1026,10 @@ def generate_image(
     images and relies on the prompt + a deterministic seed). Either provider may lead. On ANY provider
     failure the chain falls over to the next entry — EXCEPT a content block, which is terminal (unsafe
     content is never rerouted to another provider). `width`/`height` size the Pollinations request;
-    Gemini ignores them. `pollinations_token` (optional) raises Pollinations' free rate limits."""
+    Gemini ignores them. `pollinations_token` (optional) raises Pollinations' free rate limits.
+    `reference_url` is a PUBLIC image URL for Pollinations image-editing models (e.g. `kontext`) so the
+    free provider can also honour an uploaded character reference; Gemini uses the local
+    `reference_paths` instead and ignores it, and text-only Pollinations models (`flux`) ignore it."""
     model = model or settings.GEMINI_IMAGE_MODEL
     refs = reference_paths or []
     entries = model_chain(model)
@@ -1031,7 +1040,8 @@ def generate_image(
                 sub = entry.split(":", 1)[1].strip() if ":" in entry else "flux"
                 return _generate_pollinations_single(
                     prompt=prompt, model=sub or "flux", out_path=out_path,
-                    token=pollinations_token, width=width, height=height, max_retries=max_retries,
+                    token=pollinations_token, width=width, height=height,
+                    reference_url=reference_url, max_retries=max_retries,
                 )
             return _generate_image_single(
                 prompt=prompt, api_key=api_key, model=entry, out_path=out_path,
@@ -1060,10 +1070,12 @@ def _pollinations_seed(prompt: str) -> int:
 
 def _call_pollinations(
     *, model: str, prompt: str, out_path: str, token: str | None,
-    width: int, height: int, seed: int,
+    width: int, height: int, seed: int, reference_url: str | None = None,
 ) -> str:
     """Single point that calls the Pollinations image API (free, keyless). GET the drawn image and
-    write it to `out_path`. `safe=true` keeps it brand-safe; `nologo=true` drops the watermark."""
+    write it to `out_path`. `safe=true` keeps it brand-safe; `nologo=true` drops the watermark. For an
+    image-editing model (`kontext`, …), a `reference_url` is passed as `image=` so the model transforms
+    that reference — this is how the uploaded character stays consistent on the free provider."""
     import urllib.parse
 
     import requests
@@ -1073,6 +1085,8 @@ def _call_pollinations(
                     "seed": seed, "nologo": "true", "safe": "true"}
     if token:
         params["token"] = token
+    if reference_url and model in _POLLINATIONS_IMAGE_MODELS:
+        params["image"] = reference_url   # image-to-image: keep the referenced character
     resp = requests.get(url, params=params, timeout=120)
     resp.raise_for_status()
     ctype = resp.headers.get("content-type", "")
@@ -1087,7 +1101,7 @@ def _call_pollinations(
 
 def _generate_pollinations_single(
     *, prompt: str, model: str, out_path: str, token: str | None,
-    width: int, height: int, max_retries: int,
+    width: int, height: int, max_retries: int, reference_url: str | None = None,
 ) -> str:
     """One Pollinations provider's attempt loop: retry transient HTTP failures with backoff, then
     raise ImageGenError so the provider chain can fall over to the next entry."""
@@ -1096,7 +1110,7 @@ def _generate_pollinations_single(
     for attempt in range(max_retries):
         try:
             return _call_pollinations(model=model, prompt=prompt, out_path=out_path, token=token,
-                                      width=width, height=height, seed=seed)
+                                      width=width, height=height, seed=seed, reference_url=reference_url)
         except Exception as exc:  # noqa: BLE001 — transient HTTP errors are retryable
             last = exc
             logger.warning("Pollinations attempt %d/%d failed: %s", attempt + 1, max_retries, exc)

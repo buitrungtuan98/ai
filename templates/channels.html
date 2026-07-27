@@ -133,7 +133,10 @@
         <p class="hint">Any style works — a stickman, an anime narrator, a 3D mascot, a watercolour
           animal; pick what fits this channel. <b>Upload a reference image</b> to lock the exact look
           across every video (best consistency); without one the AI draws the character from your
-          description. A real photo is only OK for yourself or with the person's consent.</p>
+          description. A real photo is only OK for yourself or with the person's consent.
+          <br><span class="meta">The uploaded image is used by the <b>Gemini</b> image model and by
+          Pollinations <b>kontext</b> — but NOT by Pollinations <code>flux</code> (text-only). Pick a
+          reference-capable image model on <a href="/credentials">Credentials</a> so your image is honoured.</span></p>
         {% if cast %}
         <ul class="cast-list">
           {% for ch in cast %}
