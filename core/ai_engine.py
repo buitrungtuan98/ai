@@ -1050,12 +1050,31 @@ def generate_image(
         except GeminiBlockedError:
             raise  # a content block is terminal — do not reroute unsafe content to another provider
         except (GeminiError, ImageGenError) as exc:
+            last = exc
             if i < len(entries) - 1:
                 logger.warning("Image provider %r failed — falling back to %r: %s",
                                entry, entries[i + 1], exc)
-                last = exc
                 continue
-            raise
+            # Terminal entry failed — fall through to the safety net below.
+
+    # Safety net: if the chain used Pollinations at all (and hasn't already tried plain text-only
+    # flux), draw with flux as a last resort so Studio Mode still produces a video instead of a hard
+    # failure. The uploaded reference is NOT applied here (flux is text-only) — the character comes
+    # from its description; the logs + the model chain say how to get the exact upload (Gemini, or a
+    # kontext URL the provider can actually fetch). A Gemini-only chain is respected (no net).
+    used_pollinations = any(e.lower().startswith("pollinations") for e in entries)
+    tried_flux = any(e.lower() in ("pollinations", "pollinations:flux") for e in entries)
+    if used_pollinations and not tried_flux:
+        logger.warning("All image providers failed — last-resort text-only flux so the episode still "
+                       "renders (the uploaded reference is NOT applied; character is description-only). "
+                       "Cause: %s", last)
+        try:
+            return _generate_pollinations_single(
+                prompt=prompt, model="flux", out_path=out_path, token=pollinations_token,
+                width=width, height=height, max_retries=max_retries,
+            )
+        except (GeminiError, ImageGenError) as exc:
+            last = exc
     raise last if last is not None else GeminiError("no image provider in the chain succeeded")
 
 
@@ -1080,15 +1099,34 @@ def _call_pollinations(
 
     import requests
 
-    url = "https://image.pollinations.ai/prompt/" + urllib.parse.quote(prompt[:1800], safe="")
+    # Keep the prompt short: it rides in the GET path, and an over-long/garbled prompt is a common
+    # cause of Pollinations 500s (especially for kontext). 700 chars is plenty for an image brief.
+    url = "https://image.pollinations.ai/prompt/" + urllib.parse.quote(prompt[:700], safe="")
     params: dict = {"model": model or "flux", "width": width, "height": height,
                     "seed": seed, "nologo": "true", "safe": "true"}
-    if token:
-        params["token"] = token
+    # Backend auth per the Pollinations API docs is the Authorization: Bearer HEADER — a `token`
+    # query param is NOT documented and gets ignored, leaving the request on the anonymous tier
+    # (which gated models like kontext reject). Header auth also keeps the secret out of every URL,
+    # so it can never leak into logs via a failing request's URL.
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
     if reference_url and model in _POLLINATIONS_IMAGE_MODELS:
         params["image"] = reference_url   # image-to-image: keep the referenced character
-    resp = requests.get(url, params=params, timeout=120)
-    resp.raise_for_status()
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=120)
+        if resp.status_code in (401, 402, 403):
+            # The new API's deterministic gates — say exactly what to do instead of a bare 500-alike.
+            why = {401: "authentication required — save a Pollinations token on Credentials",
+                   402: "pollen balance / API budget exhausted — top up at auth.pollinations.ai or "
+                        "switch the chain to flux/Gemini",
+                   403: "this token doesn't have access to this model"}[resp.status_code]
+            raise ImageGenError(f"Pollinations {model}: HTTP {resp.status_code} — {why}")
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        # Defense in depth: if the secret ever appears in an error message, scrub it.
+        msg = str(exc)
+        if token:
+            msg = msg.replace(token, "sk_***REDACTED***")
+        raise ImageGenError(f"Pollinations {model} request failed: {msg}") from None
     ctype = resp.headers.get("content-type", "")
     if not ctype.startswith("image/") or not resp.content:
         # A blocked/failed prompt returns an error page, not an image — treat as a provider failure.
@@ -1126,7 +1164,15 @@ def _generate_pollinations_single(
             logger.warning("Pollinations attempt %d/%d failed: %s", attempt + 1, max_retries, exc)
             if attempt < max_retries - 1 and _BACKOFF_BASE_SECONDS:
                 time.sleep(_BACKOFF_BASE_SECONDS * (2**attempt))
-    raise ImageGenError(f"Pollinations failed after {max_retries} attempts: {last}")
+    hint = ""
+    if model in _POLLINATIONS_IMAGE_MODELS and reference_url:
+        # A kontext 500 with a reference usually means Pollinations couldn't FETCH the image URL
+        # (tunnel down / Cloudflare Access challenge) or the free tier is flaky. Gemini reads the
+        # uploaded file locally (no public URL), so it's the reliable path for an uploaded reference.
+        hint = (f" — {model} is an image-editing model; verify {reference_url} is publicly reachable "
+                "(open it logged-out) and consider putting 'gemini-2.5-flash-image' first in the "
+                "image-model chain for a reliable uploaded-reference draw")
+    raise ImageGenError(f"Pollinations {model} failed after {max_retries} attempts: {last}{hint}")
 
 
 def _generate_image_single(

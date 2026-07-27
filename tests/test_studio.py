@@ -262,9 +262,10 @@ def test_call_pollinations_builds_request_and_writes(tmp_path, monkeypatch):
         def raise_for_status(self):
             pass
 
-    def fake_get(url, params=None, timeout=None):
+    def fake_get(url, params=None, headers=None, timeout=None):
         captured["url"] = url
         captured["params"] = params
+        captured["headers"] = headers
         return FakeResp()
 
     monkeypatch.setattr(requests, "get", fake_get)
@@ -275,7 +276,11 @@ def test_call_pollinations_builds_request_and_writes(tmp_path, monkeypatch):
     assert "image.pollinations.ai/prompt/" in captured["url"] and "a%20hero%20jumping" in captured["url"]
     p = captured["params"]
     assert p["model"] == "flux" and p["width"] == 1080 and p["height"] == 1920 and p["seed"] == 42
-    assert p["token"] == "tok" and p["safe"] == "true" and p["nologo"] == "true"
+    assert p["safe"] == "true" and p["nologo"] == "true"
+    # Auth rides in the Authorization header (documented backend auth), NEVER as a query param —
+    # a `token` param is ignored by the API (anonymous tier) and would leak the secret into URLs.
+    assert captured["headers"]["Authorization"] == "Bearer tok"
+    assert "token" not in p and "key" not in p
 
 
 def test_call_pollinations_rejects_non_image(tmp_path, monkeypatch):
@@ -384,7 +389,7 @@ def test_call_pollinations_kontext_uses_image_but_flux_ignores(tmp_path, monkeyp
         def raise_for_status(self):
             pass
 
-    monkeypatch.setattr(requests, "get", lambda url, params=None, timeout=None: (
+    monkeypatch.setattr(requests, "get", lambda url, params=None, headers=None, timeout=None: (
         captured.update(params=dict(params)), FakeResp())[1])
 
     # An image-editing model gets the reference passed as `image=`.
@@ -398,6 +403,89 @@ def test_call_pollinations_kontext_uses_image_but_flux_ignores(tmp_path, monkeyp
                                  token=None, width=1080, height=1920, seed=1,
                                  reference_url="https://f.example/studio/ref/abc")
     assert "image" not in captured["params"]
+
+
+def test_pollinations_token_never_leaks_into_error(tmp_path, monkeypatch):
+    """A failing Pollinations request must NOT put the token (a secret) into the raised error/logs."""
+    import requests
+
+    from core import ai_engine
+    from core.ai_engine import ImageGenError
+
+    def boom(url, params=None, headers=None, timeout=None):
+        # Simulate the secret surfacing in an error by any path (defense-in-depth scrub must catch it).
+        raise requests.RequestException(
+            f"500 Server Error, request headers were {headers}")
+
+    monkeypatch.setattr(requests, "get", boom)
+    with pytest.raises(ImageGenError) as ei:
+        ai_engine._call_pollinations(model="kontext", prompt="p", out_path=str(tmp_path / "o.png"),
+                                     token="sk_supersecret123", width=1080, height=1920, seed=1,
+                                     reference_url="https://f.example/ref/a")
+    assert "sk_supersecret123" not in str(ei.value) and "REDACTED" in str(ei.value)
+
+
+def test_pollinations_auth_gates_explained(tmp_path, monkeypatch):
+    """The new API's deterministic gates (401 auth / 402 pollen / 403 access) raise actionable
+    messages instead of a bare 500-alike."""
+    import requests
+
+    from core import ai_engine
+    from core.ai_engine import ImageGenError
+
+    class Gated:
+        status_code = 402
+        headers = {"content-type": "text/plain"}
+        content = b"pollen"
+
+        def raise_for_status(self):
+            raise AssertionError("should not reach raise_for_status for a handled gate")
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: Gated())
+    with pytest.raises(ImageGenError, match="pollen balance"):
+        ai_engine._call_pollinations(model="kontext", prompt="p", out_path=str(tmp_path / "o.png"),
+                                     token="tok", width=64, height=64, seed=1)
+
+
+def test_generate_image_safety_net_flux_when_chain_dies(tmp_path, monkeypatch):
+    """When every chain entry fails and Pollinations was in the chain, a last-resort text-only flux
+    draw keeps the episode rendering instead of hard-failing."""
+    from core import ai_engine
+    from core.ai_engine import ImageGenError
+
+    monkeypatch.setattr(ai_engine, "_BACKOFF_BASE_SECONDS", 0)
+    seen = []
+
+    def flaky_call(*, model, prompt, out_path, token, width, height, seed, reference_url=None):
+        seen.append(model)
+        if model == "kontext":
+            raise ImageGenError("500 kontext")   # kontext keeps 500-ing (e.g. blocked image fetch)
+        open(out_path, "wb").write(b"P")           # flux net succeeds
+        return out_path
+
+    monkeypatch.setattr(ai_engine, "_call_pollinations", flaky_call)
+    out = str(tmp_path / "o.png")
+    res = ai_engine.generate_image(prompt="p", api_key="k", out_path=out,
+                                   model="pollinations:kontext", reference_url="https://f.example/ref/a")
+    assert res == out and open(out, "rb").read() == b"P"
+    assert "kontext" in seen and seen[-1] == "flux"   # kontext failed → flux safety net drew the scene
+
+
+def test_generate_image_no_safety_net_for_gemini_only(tmp_path, monkeypatch):
+    """A Gemini-only chain that fails is NOT silently rerouted to Pollinations (the operator didn't
+    opt into it)."""
+    from core import ai_engine
+    from core.ai_engine import GeminiError
+
+    monkeypatch.setattr(ai_engine, "_BACKOFF_BASE_SECONDS", 0)
+    monkeypatch.setattr(ai_engine, "_call_gemini_image",
+                        lambda **k: (_ for _ in ()).throw(RuntimeError("500 down")))
+    poll = []
+    monkeypatch.setattr(ai_engine, "_call_pollinations", lambda **k: poll.append(1))
+    with pytest.raises(GeminiError):
+        ai_engine.generate_image(prompt="p", api_key="k", out_path=str(tmp_path / "o.png"),
+                                 model="gemini-2.5-flash-image")
+    assert not poll   # no Pollinations entry → no flux net
 
 
 def test_kontext_without_reference_degrades_to_flux(tmp_path, monkeypatch):

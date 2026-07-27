@@ -1060,6 +1060,26 @@ flux draw didn't match). Added the reference-capable models. See ADR-055.
   HEIC is decoded opportunistically if pillow-heif is present, the server logs the exact reason, and
   the UI shows an explicit "✓ image saved" / "⚠ couldn't use that image (PNG/JPG/WebP ≤15 MB)" banner
   plus an instant client-side size check. 268 tests (1 new), ruff clean, docs green.
+- kontext-500 hardening: a kontext draw could still 500 when the reference URL isn't publicly
+  reachable (Cloudflare Bot Fight Mode blocks the server-side fetch even though a browser loads it) or
+  the prompt is over-long/garbled. Trimmed the Pollinations prompt to 700 chars, added an actionable
+  error hint (verify the public URL + prefer Gemini-first), and reworked the Credentials presets to
+  steer uploaded-reference users to Gemini-first (`gemini-2.5-flash-image,pollinations:kontext`) —
+  Gemini reads the uploaded file locally, the reliable $0 path with no public URL and no kontext
+  flakiness.
+- SECURITY: the Pollinations token leaked into error messages/logs (the failing request URL carried
+  `?token=…`). `_call_pollinations` now scrubs the token from any raised error. Rotate any token that
+  appeared in logs.
+- Safety net: when every image provider in the chain fails AND Pollinations was in the chain, a
+  last-resort text-only `flux` draw keeps Studio rendering instead of hard-failing the episode (the
+  uploaded reference is NOT applied — character is description-only; logged loudly). A Gemini-only
+  chain is respected (no reroute). 271 tests (3 new), ruff clean, docs green.
+- ROOT CAUSE of the kontext 500s (operator read the new API docs): backend auth is the
+  `Authorization: Bearer` HEADER — a `?token=` query param is not documented and was ignored, so our
+  authenticated requests actually hit the anonymous tier, which gated models (kontext) reject. Fixed
+  `_call_pollinations` + `verify_pollinations` to send the Bearer header (secret never rides in a URL
+  now); the new API's deterministic gates (401 auth / 402 pollen balance / 403 model access) raise
+  actionable messages instead of a bare failure. 272 tests (1 new), ruff clean, docs green.
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
