@@ -1017,6 +1017,25 @@ Google's image model is down/blocked/quota-spent — or as the default. See ADR-
 - Verified: 254 tests passing (9 new — provider dispatch, fallback, primary, block-not-rerouted,
   request builder, seed, encrypted token save, Test endpoint), 11 skipped, ruff clean, docs guard green.
 
+## Studio Mode — billboard title + uploaded character reference (the "explainer" look) `DONE`
+Match a reference channel's look: a consistent character (any style) + a big two-tone title on the
+thumbnail AND burned into the video. See ADR-054.
+- **W1** `DONE`: the cast manager is style-agnostic with diverse example presets (stickman / anime /
+  3D mascot) — one click fills the form, nothing is locked to stickman.
+- **W2** `DONE`: per-campaign **Billboard title** toggle — burns the hook title (top, UPPERCASE,
+  white + brand accent, `split_two_tone`) into every scene as one ASS event (no extra encode, no AI
+  call; libass renders Vietnamese diacritics). Works for stock and Studio.
+- **W3** `DONE`: matching **poster thumbnail** — same two-tone title at the top (auto-fit font), so
+  thumbnail and video match. One toggle drives both.
+- **W4** `DONE`: upload your own **character reference image** (PNG/JPG/WebP ≤5 MB, re-encoded via
+  PIL) — used directly as the identity anchor across every video (skips AI sheet generation), the
+  tightest consistency; per-character add/replace/serve + cast-list preview. Works for any style
+  (anime, mascot, a photo of yourself). Gemini leg only; the Pollinations fallback stays
+  description-driven.
+- Verified: 261 tests passing (7 new — two-tone split, headline ASS, thumbnail accent/fit, poster
+  render, title_overlay flow, uploaded-ref render, character image CRUD) + 1 ffmpeg-gated headline
+  burn test, 12 skipped, ruff clean, docs guard green; posters + both form UIs checked in a browser.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

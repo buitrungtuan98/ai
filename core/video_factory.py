@@ -454,6 +454,9 @@ def pick_metadata(script: VideoScript, episode_number: int, ab_testing: bool = T
     variations = script.metadata_variations
     chosen = variations[0] if not ab_testing else variations[(max(episode_number, 1) - 1) % len(variations)]
     meta = chosen.model_dump()
+    # The raw AI hook (before any brand prefix/affiliate) — used for the on-screen billboard title so
+    # the drawn headline stays a clean hook, while the PUBLISHED title may still carry a brand prefix.
+    meta["hook_title"] = chosen.title
     if title_prefix and title_prefix.strip():
         meta["title"] = f"{title_prefix.strip()} {meta['title']}"[:100]  # YouTube's hard cap
     if affiliate_url:
@@ -495,6 +498,7 @@ def produce(
     image_model: str | None = None,
     studio_sheet_dir: str | None = None,
     gen_image=None,
+    title_overlay: bool = False,
     vet_batch=None,
     on_progress=None,
 ) -> RenderResult:
@@ -588,18 +592,26 @@ def produce(
                 # rhythm — a drawn scene is one continuous shot). The scene's English visual keywords
                 # make the drawing subject; a narration snippet gives mood/context.
                 if studio_sheet_path is None:
-                    # Cache the character sheet in a STABLE per-character location when given one, so
-                    # the identical sheet anchors every episode (cross-episode consistency + one fewer
-                    # image call per later episode). Falls back to the ephemeral workspace otherwise.
-                    if studio_sheet_dir:
-                        os.makedirs(studio_sheet_dir, exist_ok=True)
-                        studio_sheet_path = os.path.join(
-                            studio_sheet_dir, f"{studio_character.get('id') or 'char'}.png")
+                    ref = (studio_character.get("ref_image") or "").strip()
+                    if ref and os.path.exists(ref):
+                        # Operator-uploaded reference image (W4): use it directly as the identity
+                        # anchor — never regenerate, so the character matches exactly what they chose.
+                        studio_sheet_path = ref
+                        logger.info("Studio: using uploaded reference image for %r",
+                                    studio_character.get("name"))
                     else:
-                        studio_sheet_path = ws.path("character_sheet.png")
-                    studio.character_sheet(
-                        studio_character, api_key=image_api_key, out_path=studio_sheet_path,
-                        style_override=visual_style, model=image_model, gen_image=gen_image)
+                        # No upload → AI-draw the sheet. Cache it in a STABLE per-character location
+                        # when given one, so the identical sheet anchors every episode (cross-episode
+                        # consistency + one fewer image call per later episode).
+                        if studio_sheet_dir:
+                            os.makedirs(studio_sheet_dir, exist_ok=True)
+                            studio_sheet_path = os.path.join(
+                                studio_sheet_dir, f"{studio_character.get('id') or 'char'}.png")
+                        else:
+                            studio_sheet_path = ws.path("character_sheet.png")
+                        studio.character_sheet(
+                            studio_character, api_key=image_api_key, out_path=studio_sheet_path,
+                            style_override=visual_style, model=image_model, gen_image=gen_image)
                 still_path = ws.path(f"scene_{si}_still.png")
                 refs = [studio_sheet_path] + ([studio_prev_still] if studio_prev_still else [])
                 studio.scene_visual(
@@ -647,6 +659,14 @@ def produce(
         durations = [p["d"] for p in plans]
         used_clip_ids: list[int] = []
 
+        # Metadata is picked up front (deterministic) so the "billboard" title can be burned into the
+        # video (top of every scene) and drawn on the thumbnail — the same hook text in both places.
+        metadata = pick_metadata(script, episode_number, ab_testing=ab_testing,
+                                 title_prefix=title_prefix,
+                                 affiliate_url=affiliate_url, affiliate_label=affiliate_label)
+        headline = (metadata.get("hook_title") or metadata["title"]) if title_overlay else None
+        headline_accent = branding.tint_color  # brand colour as the accent; None → default warm yellow
+
         # Phase C — render each scene (multi-shot cut rhythm + captions + motion + grade in one pass).
         for si, plan in enumerate(plans):
             d_i = plan["d"]
@@ -676,7 +696,8 @@ def produce(
             ass_path = ws.path(f"scene_{si}.ass")
             build_ass(plan["timings"], ass_path, clip_duration=d_i, style=subtitle_style,
                       theme=caption_theme, accent_hex=branding.tint_color,
-                      width=profile.width, height=profile.height)
+                      width=profile.width, height=profile.height,
+                      headline=headline, headline_accent_hex=headline_accent)
             scene_out = ws.path(f"scene_{si}.mp4")
             # Motion effect seeded by episode so different episodes don't share an identical rhythm.
             effect = MOTION_EFFECTS[(motion_seed + si) % len(MOTION_EFFECTS)] if motion else None
@@ -703,21 +724,21 @@ def produce(
         run_ffmpeg(build_concat_args(list_file, master, music_path, music_volume, loudnorm=loudnorm))
         report("concat", 100)
 
-        # 6. Thumbnail + metadata.
-        metadata = pick_metadata(script, episode_number, ab_testing=ab_testing,
-                                 title_prefix=title_prefix,
-                                 affiliate_url=affiliate_url, affiliate_label=affiliate_label)
-        # Long-form gets YouTube chapter markers in the description (real-creator signal); the
-        # platform turns "0:00 Title" lines into a clickable chapter list.
+        # 6. Thumbnail (metadata was picked up front). Long-form gets YouTube chapter markers in the
+        # description (real-creator signal); the platform turns "0:00 Title" lines into a chapter list.
         if profile.name == "long":
             chapters = chapter_lines(script.scenes, durations)
             if chapters:
                 metadata["description"] = "\n".join(chapters) + "\n\n" + metadata.get("description", "")
         thumb = os.path.join(output_dir, f"episode_{episode_number}.jpg")
-        generate_thumbnail(master, thumb, metadata["title"],
+        # With the billboard on, the thumbnail draws the SAME hook title as the in-video headline (top,
+        # two-tone), so the two match; otherwise the standard bottom-title thumbnail.
+        generate_thumbnail(master, thumb,
+                           (metadata.get("hook_title") or metadata["title"]) if title_overlay else metadata["title"],
                            duration=sum(durations),  # sample across the video for the best frame
                            logo_path=branding.watermark_path,
-                           width=profile.width, height=profile.height)
+                           width=profile.width, height=profile.height,
+                           poster=title_overlay, accent_hex=branding.tint_color)
         report("thumb", 100)
 
     # Scene map (absolute-timed spans + caption-hook labels) so a retention curve fetched days later

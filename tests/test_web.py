@@ -724,6 +724,50 @@ def test_pollinations_token_save_and_encrypted_at_rest(client, tmp_path, monkeyp
     assert raw and "poll-secret-123" not in raw                # ciphertext at rest, not plaintext
 
 
+def test_channel_character_crud_and_image_upload(client):
+    """Studio cast: add a character with an uploaded reference image, serve it back, and confirm the
+    image is stored (re-encoded) + the record carries ref_image; delete removes both."""
+    import io
+
+    from PIL import Image
+
+    from database.db_session import SessionLocal
+    from database.models import Channel
+
+    client.post("/channels/facebook", data={"channel_name": "Cast Ch", "page_id": "9", "page_access_token": "t"},
+                follow_redirects=False)
+    db = SessionLocal()
+    ch = db.query(Channel).order_by(Channel.id.desc()).first()
+    cid = ch.id
+    db.close()
+
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 64), (200, 50, 50)).save(buf, "PNG")
+    buf.seek(0)
+    client.post(f"/channels/{cid}/characters",
+                data={"name": "Hero", "description": "a brave stickman", "style": "ink"},
+                files={"image": ("hero.png", buf, "image/png")}, follow_redirects=False)
+
+    db = SessionLocal()
+    cast = (db.get(Channel, cid).characters_json) or []
+    db.close()
+    assert len(cast) == 1 and cast[0]["name"] == "Hero"
+    char_id = cast[0]["id"]
+    assert cast[0]["ref_image"] and os.path.exists(cast[0]["ref_image"])   # stored on disk
+    assert cast[0]["ref_image"].endswith(".png")                          # re-encoded to PNG
+
+    # Served back as an image, ownership-checked.
+    img = client.get(f"/channels/{cid}/characters/{char_id}/image")
+    assert img.status_code == 200 and img.headers["content-type"] == "image/png"
+
+    stored_path = cast[0]["ref_image"]
+    client.post(f"/channels/{cid}/characters/{char_id}/delete", follow_redirects=False)
+    db = SessionLocal()
+    assert not (db.get(Channel, cid).characters_json)                # cast emptied
+    db.close()
+    assert not os.path.exists(stored_path)                                 # image file cleaned up
+
+
 def test_credentials_test_pollinations(client, monkeypatch):
     """The Credentials page can live-test Pollinations (keyless is valid — it tests reachability)."""
     from services import verification

@@ -85,6 +85,16 @@
         <p class="hint">Blank = use each character's own style. A value here restyles every drawn
           frame in this campaign (great for a distinct look without editing the channel's cast).</p>
       </div>
+      <div class="form-row"><label>Billboard title</label>
+        <select name="title_overlay">
+          <option value="off" {{ 'selected' if cfg.get('title_overlay','off')!='on' }}>Off — no title drawn on the video</option>
+          <option value="on" {{ 'selected' if cfg.get('title_overlay')=='on' }}>On — burn the hook title on the video + poster thumbnail</option>
+        </select>
+        <p class="hint">The reference "explainer" look: the episode's hook title is drawn big at the
+          top of the video (UPPERCASE, two-tone — white + your brand accent) for the whole clip, and
+          the thumbnail becomes a matching poster. The accent colour uses the campaign's brand tint
+          (Aesthetics tab); blank tint = a default warm yellow. Works for stock and Studio campaigns.</p>
+      </div>
       <div class="form-row">
         <button type="button" class="btn ghost" id="script-preview">📝 Preview a script (1 AI call)</button>
         <p class="hint">Dry-run with the values in this form — read what the AI would write, tune the

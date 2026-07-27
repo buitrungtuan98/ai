@@ -998,6 +998,30 @@ reference-image conditioning gives markedly better character consistency — Pol
 degrade (a slightly-less-consistent video beats a failed render), but the chain lets the operator flip
 the order or go Pollinations-only. Not rerouting *blocked* content preserves the brand-safety gate.
 
+### ADR-054 — Billboard title + operator-uploaded character reference image
+**Decision:** two additions that let a channel match the "explainer" reference look (bold consistent
+character + big two-tone title on the thumbnail AND in the video). (1) **Billboard title** — a
+per-campaign `title_overlay` toggle burns the episode's hook title (the raw AI title, pre-brand-prefix,
+exposed as `metadata["hook_title"]`) as a static top-anchored, UPPERCASE, two-tone (white + brand
+accent) ASS event for the whole clip, and draws the SAME title as a top "poster" on the thumbnail — so
+the two match. It's one extra ASS event per scene (no new encode pass, no AI call, libass renders
+Vietnamese diacritics) + a poster branch in the PIL thumbnail; the accent is the campaign brand tint
+(else default warm yellow); one toggle drives both video + thumbnail; works for stock and Studio. The
+title split is deterministic (`split_two_tone`: balanced at a word boundary, line 1 white / line 2
+accent). (2) **Uploaded character reference image** (W4) — the Studio cast form takes an optional image
+(PNG/JPG/WebP, ≤5 MB, re-encoded through PIL to strip metadata and guarantee a real image, stored per
+channel). When a character has a `ref_image`, the render uses it DIRECTLY as the reference sheet
+(skipping AI sheet generation), so the character is anchored to exactly what the operator chose — the
+strongest consistency, and it works for any style (stickman, anime, 3D, a real photo of yourself).
+**Why:** the operator pointed at a real channel and asked for that specific look and for the ability to
+pin a character by uploading an image. Burning the title as an ASS event (not a second encode) and a
+PIL poster keeps it $0/CPU-cheap and reuses the existing caption/thumbnail machinery (DRY). Uploaded
+references only condition the **Gemini** leg — the Pollinations fallback (ADR-053) is text-only, so the
+character there still leans on the written description; keeping the description accurate matters even
+with an upload. Compliance: characters are fictional mascots; a real photo is allowed only for oneself
+or with explicit consent, and it's personal data kept on the box like other media (it only leaves to
+the image API that draws with it — same trust boundary as scripts).
+
 ### ADR-050 — One "Episodes" surface + kill the lateral navigation loop
 **Decision:** `/episodes`, `/assets` (Review) and `/tasks` (render log) are three *layouts of one
 thing* — the episode pipeline. They previously cross-linked with scattered "↗" buttons and no

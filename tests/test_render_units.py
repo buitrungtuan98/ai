@@ -1,6 +1,8 @@
 """Pure rendering-logic units: clip selection, ffmpeg arg builders, captions, A/B rotation."""
 from __future__ import annotations
 
+import os
+
 
 def test_plan_shots_covers_and_caps_and_cycles():
     from core.video_factory import SHOT_MAX_S, plan_shots
@@ -258,6 +260,67 @@ def test_line_style_captions(tmp_path):
     build_ass(words, out, clip_duration=3.0, style="line")
     content = open(out).read()
     assert content.count("Dialogue:") == 2 and "The sun is hot" in content
+
+
+def test_split_two_tone():
+    from core.captions import split_two_tone
+
+    assert split_two_tone("a b c d") == ("a b", "c d")
+    assert split_two_tone("one two three") == ("one two", "three")   # line 1 gets the extra word
+    assert split_two_tone("solo") == ("solo", "")
+
+
+def test_build_ass_headline_billboard(tmp_path):
+    """The billboard title: a top-anchored two-tone Headline style + one event spanning the clip,
+    UPPERCASE, with the accent inline-colour on the second tone-line."""
+    from core.captions import build_ass, hex_to_ass
+    from core.tts import WordTiming
+
+    out = str(tmp_path / "h.ass")
+    build_ass([WordTiming("hello", 0.0, 1.0)], out, clip_duration=5.0,
+              headline="cách xử lý khi bị cắm sừng", headline_accent_hex="0xFF3B30")
+    txt = open(out, encoding="utf-8").read()
+    assert "Style: Headline" in txt and ",8," in txt                 # top-centre alignment (8)
+    assert "CÁCH" in txt and "SỪNG" in txt                           # uppercased Vietnamese, diacritics kept
+    accent = hex_to_ass("0xFF3B30")                                  # &H00BBGGRR
+    assert (r"\c&H" + accent[4:] + "&") in txt                       # accent tone-line colour
+    assert "Headline,,0,0,0,,".replace(" ", "") in txt.replace(" ", "")  # a Headline event exists
+    assert "0:00:05.00" in txt                                       # spans the whole clip
+    # No headline requested → no Headline style (unchanged behaviour).
+    out2 = str(tmp_path / "n.ass")
+    build_ass([WordTiming("x", 0.0, 1.0)], out2, clip_duration=2.0)
+    assert "Style: Headline" not in open(out2, encoding="utf-8").read()
+
+
+def test_thumbnail_accent_and_fit_helpers():
+    from core.thumbnail import _DEFAULT_ACCENT_RGB, _accent_rgb, _fit_font
+
+    assert _accent_rgb("#FF0000") == (255, 0, 0)
+    assert _accent_rgb("0x00FF00") == (0, 255, 0)
+    assert _accent_rgb(None) == _DEFAULT_ACCENT_RGB and _accent_rgb("bad") == _DEFAULT_ACCENT_RGB
+    # A long line is forced to a smaller font than a short one (fit-to-width).
+    _, px_short = _fit_font(["HI"], 400, 120, 40, None)
+    _, px_long = _fit_font(["A VERY LONG HEADLINE THAT CANNOT FIT AT ALL"], 400, 120, 40, None)
+    assert px_short >= px_long and px_long >= 40
+
+
+def test_poster_thumbnail_renders(tmp_path, monkeypatch):
+    """Poster mode draws a two-tone top title over a real frame and writes a correctly-sized JPEG
+    (no ffmpeg — the frame is stubbed in)."""
+    from PIL import Image
+
+    from core import thumbnail
+
+    def fake_select(video, frame_png, frac, dur):
+        Image.new("RGB", (400, 300), (30, 40, 60)).save(frame_png)
+
+    monkeypatch.setattr(thumbnail, "_select_frame", fake_select)
+    out = str(tmp_path / "poster.jpg")
+    thumbnail.generate_thumbnail("v.mp4", out, "cách xử lý khi bị cắm sừng",
+                                 poster=True, accent_hex="0xFF3B30", width=360, height=640)
+    assert os.path.exists(out)
+    with Image.open(out) as im:
+        assert im.size == (360, 640)
 
 
 def test_caption_wrap_and_ass(tmp_path):

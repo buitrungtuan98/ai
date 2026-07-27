@@ -588,8 +588,13 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 .cast-item { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-2);
   padding: var(--sp-2) 0; border-bottom: 1px solid var(--border); }
 .cast-item:last-child { border-bottom: 0; }
-.cast-body { min-width: 0; }
+.cast-body { min-width: 0; flex: 1; }
 .cast-body .hint { margin: 2px 0 0; }
+.cast-thumb { width: 56px; height: 56px; border-radius: var(--radius-sm); object-fit: cover;
+  border: 1px solid var(--border); flex: none; }
+.cast-img-form { display: flex; align-items: center; gap: var(--sp-2); margin-top: var(--sp-2);
+  flex-wrap: wrap; }
+.cast-img-form input[type=file] { font-size: var(--fs-xs); max-width: 100%; }
 
 /* Learning-loop note (Performance) */
 .loop-note { background: var(--st-success-bg); border: 1px solid var(--st-success-bd);

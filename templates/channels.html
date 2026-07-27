@@ -130,13 +130,23 @@
           source draw AI scenes starring one of these, keeping the same face &amp; art style across every
           frame of a video. Each episode picks one at random. Fictional characters only — the description
           is a creative brief, not a real person.</p>
+        <p class="hint">Any style works — a stickman, an anime narrator, a 3D mascot, a watercolour
+          animal; pick what fits this channel. <b>Upload a reference image</b> to lock the exact look
+          across every video (best consistency); without one the AI draws the character from your
+          description. A real photo is only OK for yourself or with the person's consent.</p>
         {% if cast %}
         <ul class="cast-list">
           {% for ch in cast %}
           <li class="cast-item">
+            {% if ch.ref_image %}<img class="cast-thumb" src="/channels/{{ c.id }}/characters/{{ ch.id }}/image" alt="">{% endif %}
             <div class="cast-body">
               <b>{{ ch.name }}</b>{% if ch.style %} <span class="meta">· {{ ch.style }}</span>{% endif %}
+              {% if ch.ref_image %}<span class="pill completed" style="margin-left:6px">📌 reference image</span>{% endif %}
               {% if ch.description %}<p class="hint">{{ ch.description }}</p>{% endif %}
+              <form method="post" action="/channels/{{ c.id }}/characters/{{ ch.id }}/image" enctype="multipart/form-data" class="cast-img-form">
+                <input type="file" name="image" accept="image/png,image/jpeg,image/webp" required>
+                <button class="btn ghost sm" type="submit">{{ 'Replace image' if ch.ref_image else 'Add image' }}</button>
+              </form>
             </div>
             <form method="post" action="/channels/{{ c.id }}/characters/{{ ch.id }}/delete" data-confirm="Remove “{{ ch.name }}” from the cast?">
               <button class="btn danger sm" type="submit">Remove</button>
@@ -146,10 +156,17 @@
         </ul>
         {% endif %}
         {% if cast|length < 12 %}
-        <form method="post" action="/channels/{{ c.id }}/characters" class="mt-sm">
-          {% call ui.field('Name') %}<input name="name" required maxlength="60" placeholder="Pencil the Stickman">{% endcall %}
-          {% call ui.field('Description — look & personality', hint='The creative brief kept consistent across every frame') %}<input name="description" maxlength="300" placeholder="A cheerful stick figure with big round eyes and a red scarf">{% endcall %}
-          {% call ui.field('Art style', hint='e.g. hand-drawn pencil sketch, black & white') %}<input name="style" maxlength="120" placeholder="hand-drawn pencil sketch, bold ink outlines">{% endcall %}
+        <form method="post" action="/channels/{{ c.id }}/characters" enctype="multipart/form-data" class="mt-sm char-add">
+          <div class="row-actions" style="margin-bottom:var(--sp-2)">
+            <span class="meta">Examples:</span>
+            <button type="button" class="btn ghost sm char-preset" data-name="Pencil the Stickman" data-desc="A cheerful white stick figure with a round head, two dot eyes, rectangular glasses, a dark suit and a blue tie; calm, thoughtful expression" data-style="flat 2D cartoon, bold black ink outlines, minimal detail, muted dark background">Stickman explainer</button>
+            <button type="button" class="btn ghost sm char-preset" data-name="Aya" data-desc="A friendly young anime woman with short teal hair, big expressive eyes, a yellow hoodie" data-style="clean modern anime, soft cel shading, bright palette">Anime narrator</button>
+            <button type="button" class="btn ghost sm char-preset" data-name="Bo the Bear" data-desc="A round, huggable cartoon bear cub with a tiny scarf, big friendly smile" data-style="soft 3D render, pastel colours, rounded shapes">3D mascot</button>
+          </div>
+          {% call ui.field('Name') %}<input name="name" required maxlength="60" placeholder="Give your character a name">{% endcall %}
+          {% call ui.field('Description — look & personality', hint='The creative brief kept consistent across every frame') %}<input name="description" maxlength="300" placeholder="Describe the character's look and personality">{% endcall %}
+          {% call ui.field('Art style', hint='e.g. flat 2D cartoon · modern anime · soft 3D · pencil sketch') %}<input name="style" maxlength="120" placeholder="the visual style for this character">{% endcall %}
+          {% call ui.field('Reference image (optional — locks the exact look)', hint='PNG/JPG/WebP, ≤5 MB. Leave blank to let the AI draw the character.') %}<input type="file" name="image" accept="image/png,image/jpeg,image/webp">{% endcall %}
           <button class="btn sm" type="submit">Add character</button>
         </form>
         {% else %}
@@ -189,6 +206,18 @@
 
 {% block scripts %}
 <script>
+  // Studio cast: example presets fill the add form (name/description/style) so operators see the
+  // range of styles (stickman / anime / 3D …) and can edit from there — not locked to any one look.
+  document.querySelectorAll(".char-preset").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var form = btn.closest("form");
+      if (!form) return;
+      form.querySelector('[name="name"]').value = btn.dataset.name || "";
+      form.querySelector('[name="description"]').value = btn.dataset.desc || "";
+      form.querySelector('[name="style"]').value = btn.dataset.style || "";
+    });
+  });
+
   // Each channel profile's voice picker follows its Language select — a voice from another language
   // would be a broken/mismatched narration. Rebuilt with textContent only (no innerHTML). A saved
   // voice from a different language stays selectable so an existing choice is never silently dropped.
