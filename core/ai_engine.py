@@ -1080,7 +1080,9 @@ def _call_pollinations(
 
     import requests
 
-    url = "https://image.pollinations.ai/prompt/" + urllib.parse.quote(prompt[:1800], safe="")
+    # Keep the prompt short: it rides in the GET path, and an over-long/garbled prompt is a common
+    # cause of Pollinations 500s (especially for kontext). 700 chars is plenty for an image brief.
+    url = "https://image.pollinations.ai/prompt/" + urllib.parse.quote(prompt[:700], safe="")
     params: dict = {"model": model or "flux", "width": width, "height": height,
                     "seed": seed, "nologo": "true", "safe": "true"}
     if token:
@@ -1126,7 +1128,15 @@ def _generate_pollinations_single(
             logger.warning("Pollinations attempt %d/%d failed: %s", attempt + 1, max_retries, exc)
             if attempt < max_retries - 1 and _BACKOFF_BASE_SECONDS:
                 time.sleep(_BACKOFF_BASE_SECONDS * (2**attempt))
-    raise ImageGenError(f"Pollinations failed after {max_retries} attempts: {last}")
+    hint = ""
+    if model in _POLLINATIONS_IMAGE_MODELS and reference_url:
+        # A kontext 500 with a reference usually means Pollinations couldn't FETCH the image URL
+        # (tunnel down / Cloudflare Access challenge) or the free tier is flaky. Gemini reads the
+        # uploaded file locally (no public URL), so it's the reliable path for an uploaded reference.
+        hint = (f" — {model} is an image-editing model; verify {reference_url} is publicly reachable "
+                "(open it logged-out) and consider putting 'gemini-2.5-flash-image' first in the "
+                "image-model chain for a reliable uploaded-reference draw")
+    raise ImageGenError(f"Pollinations {model} failed after {max_retries} attempts: {last}{hint}")
 
 
 def _generate_image_single(

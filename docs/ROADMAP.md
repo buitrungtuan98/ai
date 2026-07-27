@@ -1060,6 +1060,13 @@ flux draw didn't match). Added the reference-capable models. See ADR-055.
   HEIC is decoded opportunistically if pillow-heif is present, the server logs the exact reason, and
   the UI shows an explicit "✓ image saved" / "⚠ couldn't use that image (PNG/JPG/WebP ≤15 MB)" banner
   plus an instant client-side size check. 268 tests (1 new), ruff clean, docs green.
+- kontext-500 hardening: a kontext draw could still 500 when the reference URL isn't publicly
+  reachable (Cloudflare Access / tunnel) or the prompt is over-long/garbled. Trimmed the Pollinations
+  prompt to 700 chars (over-long GET prompts are a common 500 cause), added an actionable error hint
+  (verify the public URL + prefer Gemini-first), and reworked the Credentials presets to steer
+  uploaded-reference users to Gemini-first (`gemini-2.5-flash-image,pollinations:kontext`) — Gemini
+  reads the uploaded file locally, so it's the reliable $0 path with no public URL and no kontext
+  flakiness. Docs green.
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
