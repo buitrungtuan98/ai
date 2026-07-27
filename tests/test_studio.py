@@ -400,6 +400,24 @@ def test_call_pollinations_kontext_uses_image_but_flux_ignores(tmp_path, monkeyp
     assert "image" not in captured["params"]
 
 
+def test_kontext_without_reference_degrades_to_flux(tmp_path, monkeypatch):
+    """An image-editing model with no reference URL (no upload / PUBLIC_BASE_URL unset) must degrade
+    to text-only flux — NOT 500 the render by calling kontext with no input image."""
+    from core import ai_engine
+
+    seen: dict = {}
+
+    def fake_call(*, model, prompt, out_path, token, width, height, seed, reference_url=None):
+        seen["model"] = model
+        open(out_path, "wb").write(b"P")
+        return out_path
+
+    monkeypatch.setattr(ai_engine, "_call_pollinations", fake_call)
+    ai_engine.generate_image(prompt="p", api_key="k", out_path=str(tmp_path / "o.png"),
+                             model="pollinations:kontext")   # no reference_url
+    assert seen["model"] == "flux"   # degraded — the render succeeds instead of failing
+
+
 def test_generate_image_kontext_forwards_reference_url(tmp_path, monkeypatch):
     from core import ai_engine
 

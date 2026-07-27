@@ -1105,6 +1105,16 @@ def _generate_pollinations_single(
 ) -> str:
     """One Pollinations provider's attempt loop: retry transient HTTP failures with backoff, then
     raise ImageGenError so the provider chain can fall over to the next entry."""
+    # An image-editing model (kontext, …) REQUIRES an input image; called without one Pollinations
+    # returns a 500. That happens when the character has no uploaded reference, or the box has no
+    # public base (PUBLIC_BASE_URL unset) to serve it. Degrade to text-only `flux` so the render still
+    # succeeds instead of failing the episode — and log WHY so the operator can fix the setup.
+    if model in _POLLINATIONS_IMAGE_MODELS and not reference_url:
+        logger.warning(
+            "Pollinations %r needs a reference-image URL but none is available — drawing with "
+            "text-only 'flux' instead. For %r to keep your character, upload a reference image on the "
+            "character AND set PUBLIC_BASE_URL to a public https host.", model, model)
+        model = "flux"
     seed = _pollinations_seed(prompt)
     last: Exception | None = None
     for attempt in range(max_retries):
