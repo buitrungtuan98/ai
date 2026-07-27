@@ -61,7 +61,7 @@ def test_character_sheet_caches_and_calls_generator(tmp_path):
 
     calls = []
 
-    def fake_gen(*, prompt, api_key, out_path, model=None, reference_paths=None):
+    def fake_gen(*, prompt, api_key, out_path, model=None, reference_paths=None, reference_url=None):
         calls.append(prompt)
         open(out_path, "w").write("PNG")
         return out_path
@@ -79,7 +79,7 @@ def test_scene_visual_forwards_references(tmp_path):
 
     seen = {}
 
-    def fake_gen(*, prompt, api_key, out_path, model=None, reference_paths=None):
+    def fake_gen(*, prompt, api_key, out_path, model=None, reference_paths=None, reference_url=None):
         seen["prompt"] = prompt
         seen["refs"] = reference_paths
         seen["model"] = model
@@ -211,7 +211,7 @@ def test_produce_studio_chains_references_and_skips_pexels(tmp_path, monkeypatch
 
     gen_calls = []
 
-    def fake_gen(*, prompt, api_key, out_path, model=None, reference_paths=None):
+    def fake_gen(*, prompt, api_key, out_path, model=None, reference_paths=None, reference_url=None):
         gen_calls.append({"out": out_path, "refs": reference_paths})
         open(out_path, "w").write("PNG")
         return out_path
@@ -303,7 +303,7 @@ def test_generate_image_dispatches_to_pollinations(tmp_path, monkeypatch):
 
     seen = {}
 
-    def fake_poll(*, model, prompt, out_path, token, width, height, seed):
+    def fake_poll(*, model, prompt, out_path, token, width, height, seed, reference_url=None):
         seen.update(model=model, token=token, width=width, height=height)
         open(out_path, "wb").write(b"P")
         return out_path
@@ -325,7 +325,7 @@ def test_generate_image_falls_back_gemini_to_pollinations(tmp_path, monkeypatch)
     def dead_gemini(**k):
         raise RuntimeError("500 transient server error")   # → GeminiError after retries
 
-    def fake_poll(*, model, prompt, out_path, token, width, height, seed):
+    def fake_poll(*, model, prompt, out_path, token, width, height, seed, reference_url=None):
         open(out_path, "wb").write(b"P")
         return out_path
 
@@ -340,7 +340,7 @@ def test_generate_image_falls_back_gemini_to_pollinations(tmp_path, monkeypatch)
 def test_generate_image_pollinations_primary_skips_gemini(tmp_path, monkeypatch):
     from core import ai_engine
 
-    def fake_poll(*, model, prompt, out_path, token, width, height, seed):
+    def fake_poll(*, model, prompt, out_path, token, width, height, seed, reference_url=None):
         open(out_path, "wb").write(b"P")
         return out_path
 
@@ -366,6 +366,69 @@ def test_generate_image_block_does_not_reroute_to_pollinations(tmp_path, monkeyp
         ai_engine.generate_image(prompt="p", api_key="k", out_path=str(tmp_path / "o.png"),
                                  model="gemini-2.5-flash-image,pollinations:flux")
     assert not poll_calls   # unsafe content is terminal — never rerouted to another provider
+
+
+# ── Pollinations reference image via kontext (ADR-055) ───────────────────────
+def test_call_pollinations_kontext_uses_image_but_flux_ignores(tmp_path, monkeypatch):
+    import requests
+
+    from core import ai_engine
+
+    captured: dict = {}
+
+    class FakeResp:
+        status_code = 200
+        headers = {"content-type": "image/png"}
+        content = b"IMG"
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(requests, "get", lambda url, params=None, timeout=None: (
+        captured.update(params=dict(params)), FakeResp())[1])
+
+    # An image-editing model gets the reference passed as `image=`.
+    ai_engine._call_pollinations(model="kontext", prompt="p", out_path=str(tmp_path / "a.png"),
+                                 token=None, width=1080, height=1920, seed=1,
+                                 reference_url="https://f.example/studio/ref/abc")
+    assert captured["params"].get("image") == "https://f.example/studio/ref/abc"
+
+    # A text-only model ignores it (flux can't do image-to-image).
+    ai_engine._call_pollinations(model="flux", prompt="p", out_path=str(tmp_path / "b.png"),
+                                 token=None, width=1080, height=1920, seed=1,
+                                 reference_url="https://f.example/studio/ref/abc")
+    assert "image" not in captured["params"]
+
+
+def test_generate_image_kontext_forwards_reference_url(tmp_path, monkeypatch):
+    from core import ai_engine
+
+    seen: dict = {}
+
+    def fake_poll(*, model, prompt, out_path, token, width, height, seed, reference_url=None):
+        seen.update(model=model, ref_url=reference_url)
+        open(out_path, "wb").write(b"P")
+        return out_path
+
+    monkeypatch.setattr(ai_engine, "_call_pollinations", fake_poll)
+    ai_engine.generate_image(prompt="p", api_key="k", out_path=str(tmp_path / "o.png"),
+                             model="pollinations:kontext", reference_url="https://f.example/studio/ref/tok")
+    assert seen["model"] == "kontext" and seen["ref_url"] == "https://f.example/studio/ref/tok"
+
+
+def test_cast_with_ref_urls(monkeypatch):
+    from core.config import settings
+    from workers import video_worker
+
+    cast = [{"id": "a", "name": "A", "ref_token": "deadbeef01"}, {"id": "b", "name": "B", "ref_token": None}]
+    monkeypatch.setattr(settings, "PUBLIC_BASE_URL", "https://factory.example.com")
+    out = video_worker._cast_with_ref_urls(cast)
+    assert out[0]["ref_url"] == "https://factory.example.com/studio/ref/deadbeef01"
+    assert "ref_url" not in out[1]                              # no token → no public url
+    # A non-public base (dev localhost) is skipped — Pollinations couldn't reach it anyway.
+    monkeypatch.setattr(settings, "PUBLIC_BASE_URL", "http://127.0.0.1:8000")
+    assert "ref_url" not in video_worker._cast_with_ref_urls(cast)[0]
+    assert video_worker._cast_with_ref_urls(None) is None
 
 
 def _mock_render_touchpoints(video_factory, monkeypatch):
@@ -428,23 +491,26 @@ def test_produce_studio_uses_uploaded_ref_image(tmp_path, monkeypatch):
 
     ref = tmp_path / "myhero.png"
     ref.write_bytes(b"a-real-uploaded-image")
-    gen_refs = []
+    gen_refs, gen_urls = [], []
 
-    def fake_gen(*, prompt, api_key, out_path, model=None, reference_paths=None):
+    def fake_gen(*, prompt, api_key, out_path, model=None, reference_paths=None, reference_url=None):
         gen_refs.append(reference_paths)
+        gen_urls.append(reference_url)
         open(out_path, "w").write("P")
         return out_path
 
     cast = [{"id": "h", "name": "Hero", "description": "d", "style": "s",
-             "ref_image": str(ref), "sheet_path": None}]
+             "ref_image": str(ref), "ref_url": "https://f.example/studio/ref/tok", "sheet_path": None}]
     video_factory.produce(
         script=_studio_script(3), episode_number=1, pexels_api_key="", job_id="refimg",
         output_dir=str(tmp_path / "o"), visual_source="studio", characters=cast, image_api_key="k",
         gen_image=fake_gen,
     )
-    # 3 scene draws, no 4th sheet-generation call; the uploaded image anchors every scene.
+    # 3 scene draws, no 4th sheet-generation call; the uploaded image anchors every scene (local path
+    # for the Gemini leg AND the public url forwarded for the Pollinations kontext leg).
     assert len(gen_refs) == 3
     assert all(rp and rp[0] == str(ref) for rp in gen_refs)
+    assert all(u == "https://f.example/studio/ref/tok" for u in gen_urls)
 
 
 def test_produce_studio_requires_a_cast(tmp_path):

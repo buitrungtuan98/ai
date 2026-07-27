@@ -617,6 +617,7 @@ def produce(
                 studio.scene_visual(
                     character=studio_character, subject=", ".join(scene.pexels_keywords),
                     mood=clean, api_key=image_api_key, out_path=still_path, reference_paths=refs,
+                    reference_url=studio_character.get("ref_url"),
                     style_override=visual_style, model=image_model, gen_image=gen_image)
                 studio_prev_still = still_path
                 studio_clip = still_to_clip(still_path, ws.path(f"scene_{si}_studio.mp4"), d_i, profile)

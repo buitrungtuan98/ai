@@ -1036,6 +1036,22 @@ thumbnail AND burned into the video. See ADR-054.
   render, title_overlay flow, uploaded-ref render, character image CRUD) + 1 ffmpeg-gated headline
   burn test, 12 skipped, ruff clean, docs guard green; posters + both form UIs checked in a browser.
 
+## Studio Mode — Pollinations honours the uploaded reference (kontext) `DONE`
+Fix: base Pollinations `flux` is text-only and silently ignored an uploaded character image (so a
+flux draw didn't match). Added the reference-capable models. See ADR-055.
+- `generate_image` gains a `reference_url`; `pollinations:kontext` (FLUX.1 Kontext) + the other
+  image-editing models (nanobanana/gptimage/seedream) pass it as `image=` so the free provider keeps
+  the uploaded character; `flux` and Gemini ignore it (Gemini uses the local file).
+- New PUBLIC route `GET /studio/ref/{token}` (no auth, 32-hex random-token filename, traversal-barred)
+  so Pollinations can fetch the reference over the internet; the worker builds each character's public
+  `ref_url` from `PUBLIC_BASE_URL` (falls back to the tunnel base; skipped on dev localhost).
+- Credentials: a "Kontext → Gemini (uses your image)" preset + a clear flux-vs-kontext explanation;
+  cast manager notes which image models honour an uploaded image. `PUBLIC_BASE_URL` added to config.
+- Trade-off (opt-in, surfaced in UI): the reference image is briefly public at an unguessable URL —
+  fine for a mascot, discouraged for a personal photo.
+- Verified: 266 tests passing (5 new — kontext `image=` gating, reference_url forwarding,
+  `_cast_with_ref_urls`, public route, upload sets public token), 12 skipped, ruff clean, docs green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

@@ -768,6 +768,52 @@ def test_channel_character_crud_and_image_upload(client):
     assert not os.path.exists(stored_path)                                 # image file cleaned up
 
 
+def test_public_character_reference_route(client):
+    """The PUBLIC (no-auth) reference endpoint Pollinations kontext fetches: serves a token PNG,
+    rejects a bad token, 404s on a missing one — and needs no session."""
+    import os
+
+    from PIL import Image
+
+    import main
+
+    d = main._public_ref_dir()
+    os.makedirs(d, exist_ok=True)
+    token = "deadbeef0123456789abcdef01234567"
+    Image.new("RGB", (32, 32), (10, 120, 200)).save(os.path.join(d, f"{token}.png"))
+
+    ok = client.get(f"/studio/ref/{token}")
+    assert ok.status_code == 200 and ok.headers["content-type"] == "image/png"
+    assert client.get("/studio/ref/not-hex!!").status_code == 404      # path-traversal / junk barred
+    assert client.get("/studio/ref/abcdef0123").status_code == 404     # valid shape, no such file
+
+
+def test_character_upload_sets_public_token(client):
+    """An uploaded reference gets a random public token; the character's public URL then resolves."""
+    import io
+
+    from PIL import Image
+
+    from database.db_session import SessionLocal
+    from database.models import Channel
+
+    client.post("/channels/facebook", data={"channel_name": "Tok Ch", "page_id": "7", "page_access_token": "t"},
+                follow_redirects=False)
+    db = SessionLocal()
+    cid = db.query(Channel).order_by(Channel.id.desc()).first().id
+    db.close()
+    buf = io.BytesIO()
+    Image.new("RGB", (48, 48), (0, 0, 0)).save(buf, "PNG")
+    buf.seek(0)
+    client.post(f"/channels/{cid}/characters", data={"name": "Ref"},
+                files={"image": ("r.png", buf, "image/png")}, follow_redirects=False)
+    db = SessionLocal()
+    ch = (db.get(Channel, cid).characters_json)[0]
+    db.close()
+    assert ch["ref_token"] and len(ch["ref_token"]) >= 16
+    assert client.get(f"/studio/ref/{ch['ref_token']}").status_code == 200   # public URL resolves
+
+
 def test_credentials_test_pollinations(client, monkeypatch):
     """The Credentials page can live-test Pollinations (keyless is valid — it tests reachability)."""
     from services import verification

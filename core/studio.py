@@ -112,14 +112,16 @@ def character_sheet(
 def scene_visual(
     *, character: dict, subject: str, api_key: str, out_path: str,
     mood: str | None = None, style_override: str | None = None,
-    reference_paths: list[str] | None = None, model: str | None = None,
-    gen_image: GenImage | None = None,
+    reference_paths: list[str] | None = None, reference_url: str | None = None,
+    model: str | None = None, gen_image: GenImage | None = None,
 ) -> str:
     """Draw one scene keyframe starring `character`, conditioned on `reference_paths` (the character
-    sheet first, then the previous scene's frame for temporal continuity). Returns the image path."""
+    sheet first, then the previous scene's frame for temporal continuity — used by the Gemini leg) and
+    `reference_url` (a public image URL used by Pollinations image-editing models like `kontext`, so
+    the free provider can honour an uploaded reference too). Returns the image path."""
     gen = gen_image or ai_engine.generate_image
     return gen(
         prompt=scene_prompt(character, subject, mood=mood, style_override=style_override),
         api_key=api_key, out_path=out_path,
-        reference_paths=reference_paths or [], model=model,
+        reference_paths=reference_paths or [], reference_url=reference_url, model=model,
     )
