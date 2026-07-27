@@ -400,6 +400,66 @@ def test_call_pollinations_kontext_uses_image_but_flux_ignores(tmp_path, monkeyp
     assert "image" not in captured["params"]
 
 
+def test_pollinations_token_never_leaks_into_error(tmp_path, monkeypatch):
+    """A failing Pollinations request must NOT put the token (a secret) into the raised error/logs."""
+    import requests
+
+    from core import ai_engine
+    from core.ai_engine import ImageGenError
+
+    def boom(url, params=None, timeout=None):
+        raise requests.RequestException(
+            f"500 Server Error for url: https://image.pollinations.ai/prompt/x?token={params['token']}")
+
+    monkeypatch.setattr(requests, "get", boom)
+    with pytest.raises(ImageGenError) as ei:
+        ai_engine._call_pollinations(model="kontext", prompt="p", out_path=str(tmp_path / "o.png"),
+                                     token="sk_supersecret123", width=1080, height=1920, seed=1,
+                                     reference_url="https://f.example/ref/a")
+    assert "sk_supersecret123" not in str(ei.value) and "REDACTED" in str(ei.value)
+
+
+def test_generate_image_safety_net_flux_when_chain_dies(tmp_path, monkeypatch):
+    """When every chain entry fails and Pollinations was in the chain, a last-resort text-only flux
+    draw keeps the episode rendering instead of hard-failing."""
+    from core import ai_engine
+    from core.ai_engine import ImageGenError
+
+    monkeypatch.setattr(ai_engine, "_BACKOFF_BASE_SECONDS", 0)
+    seen = []
+
+    def flaky_call(*, model, prompt, out_path, token, width, height, seed, reference_url=None):
+        seen.append(model)
+        if model == "kontext":
+            raise ImageGenError("500 kontext")   # kontext keeps 500-ing (e.g. blocked image fetch)
+        open(out_path, "wb").write(b"P")           # flux net succeeds
+        return out_path
+
+    monkeypatch.setattr(ai_engine, "_call_pollinations", flaky_call)
+    out = str(tmp_path / "o.png")
+    res = ai_engine.generate_image(prompt="p", api_key="k", out_path=out,
+                                   model="pollinations:kontext", reference_url="https://f.example/ref/a")
+    assert res == out and open(out, "rb").read() == b"P"
+    assert "kontext" in seen and seen[-1] == "flux"   # kontext failed → flux safety net drew the scene
+
+
+def test_generate_image_no_safety_net_for_gemini_only(tmp_path, monkeypatch):
+    """A Gemini-only chain that fails is NOT silently rerouted to Pollinations (the operator didn't
+    opt into it)."""
+    from core import ai_engine
+    from core.ai_engine import GeminiError
+
+    monkeypatch.setattr(ai_engine, "_BACKOFF_BASE_SECONDS", 0)
+    monkeypatch.setattr(ai_engine, "_call_gemini_image",
+                        lambda **k: (_ for _ in ()).throw(RuntimeError("500 down")))
+    poll = []
+    monkeypatch.setattr(ai_engine, "_call_pollinations", lambda **k: poll.append(1))
+    with pytest.raises(GeminiError):
+        ai_engine.generate_image(prompt="p", api_key="k", out_path=str(tmp_path / "o.png"),
+                                 model="gemini-2.5-flash-image")
+    assert not poll   # no Pollinations entry → no flux net
+
+
 def test_kontext_without_reference_degrades_to_flux(tmp_path, monkeypatch):
     """An image-editing model with no reference URL (no upload / PUBLIC_BASE_URL unset) must degrade
     to text-only flux — NOT 500 the render by calling kontext with no input image."""

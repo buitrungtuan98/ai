@@ -1050,12 +1050,31 @@ def generate_image(
         except GeminiBlockedError:
             raise  # a content block is terminal — do not reroute unsafe content to another provider
         except (GeminiError, ImageGenError) as exc:
+            last = exc
             if i < len(entries) - 1:
                 logger.warning("Image provider %r failed — falling back to %r: %s",
                                entry, entries[i + 1], exc)
-                last = exc
                 continue
-            raise
+            # Terminal entry failed — fall through to the safety net below.
+
+    # Safety net: if the chain used Pollinations at all (and hasn't already tried plain text-only
+    # flux), draw with flux as a last resort so Studio Mode still produces a video instead of a hard
+    # failure. The uploaded reference is NOT applied here (flux is text-only) — the character comes
+    # from its description; the logs + the model chain say how to get the exact upload (Gemini, or a
+    # kontext URL the provider can actually fetch). A Gemini-only chain is respected (no net).
+    used_pollinations = any(e.lower().startswith("pollinations") for e in entries)
+    tried_flux = any(e.lower() in ("pollinations", "pollinations:flux") for e in entries)
+    if used_pollinations and not tried_flux:
+        logger.warning("All image providers failed — last-resort text-only flux so the episode still "
+                       "renders (the uploaded reference is NOT applied; character is description-only). "
+                       "Cause: %s", last)
+        try:
+            return _generate_pollinations_single(
+                prompt=prompt, model="flux", out_path=out_path, token=pollinations_token,
+                width=width, height=height, max_retries=max_retries,
+            )
+        except (GeminiError, ImageGenError) as exc:
+            last = exc
     raise last if last is not None else GeminiError("no image provider in the chain succeeded")
 
 
@@ -1089,8 +1108,15 @@ def _call_pollinations(
         params["token"] = token
     if reference_url and model in _POLLINATIONS_IMAGE_MODELS:
         params["image"] = reference_url   # image-to-image: keep the referenced character
-    resp = requests.get(url, params=params, timeout=120)
-    resp.raise_for_status()
+    try:
+        resp = requests.get(url, params=params, timeout=120)
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        # The failing URL carries the token in its query string — NEVER let it into logs/errors.
+        msg = str(exc)
+        if token:
+            msg = msg.replace(token, "sk_***REDACTED***")
+        raise ImageGenError(f"Pollinations {model} request failed: {msg}") from None
     ctype = resp.headers.get("content-type", "")
     if not ctype.startswith("image/") or not resp.content:
         # A blocked/failed prompt returns an error page, not an image — treat as a provider failure.
