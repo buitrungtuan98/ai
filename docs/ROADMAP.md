@@ -1055,6 +1055,11 @@ flux draw didn't match). Added the reference-capable models. See ADR-055.
 - Verified: 267 tests passing (6 new — kontext `image=` gating, reference_url forwarding,
   `_cast_with_ref_urls`, public route, upload sets public token, kontext→flux degrade), 12 skipped,
   ruff clean, docs green.
+- Upload UX fix: reference-image uploads used to fail SILENTLY (>5 MB phone photos rejected with no
+  feedback → "no file chosen" + no thumbnail). Now the cap is 15 MB (we downscale to 1024px anyway),
+  HEIC is decoded opportunistically if pillow-heif is present, the server logs the exact reason, and
+  the UI shows an explicit "✓ image saved" / "⚠ couldn't use that image (PNG/JPG/WebP ≤15 MB)" banner
+  plus an instant client-side size check. 268 tests (1 new), ruff clean, docs green.
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation

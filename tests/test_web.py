@@ -768,6 +768,42 @@ def test_channel_character_crud_and_image_upload(client):
     assert not os.path.exists(stored_path)                                 # image file cleaned up
 
 
+def test_character_image_upload_feedback(client):
+    """Uploading a reference image gives explicit feedback: a good image → char_img_ok (+ ref_image);
+    an oversized/unreadable one → char_img_fail and the character is still created, without an image."""
+    import io
+
+    from PIL import Image
+
+    from database.db_session import SessionLocal
+    from database.models import Channel
+
+    client.post("/channels/facebook", data={"channel_name": "FB Ch", "page_id": "5", "page_access_token": "t"},
+                follow_redirects=False)
+    db = SessionLocal()
+    cid = db.query(Channel).order_by(Channel.id.desc()).first().id
+    db.close()
+
+    # Good image → success flash.
+    buf = io.BytesIO()
+    Image.new("RGB", (80, 80), (9, 9, 9)).save(buf, "PNG")
+    buf.seek(0)
+    ok = client.post(f"/channels/{cid}/characters", data={"name": "Good"},
+                     files={"image": ("g.png", buf, "image/png")}, follow_redirects=False)
+    assert "flash=char_img_ok" in ok.headers["location"]
+
+    # Oversized / unreadable upload → failure flash, but the character is still created (no image).
+    junk = io.BytesIO(b"\x89PNG" + b"0" * (16 * 1024 * 1024))   # >15 MB, not decodable
+    bad = client.post(f"/channels/{cid}/characters", data={"name": "NoImg"},
+                      files={"image": ("big.png", junk, "image/png")}, follow_redirects=False)
+    assert "flash=char_img_fail" in bad.headers["location"]
+    db = SessionLocal()
+    cast = db.get(Channel, cid).characters_json
+    db.close()
+    noimg = next(c for c in cast if c["name"] == "NoImg")
+    assert noimg["ref_image"] is None and noimg["ref_token"] is None   # created, image rejected
+
+
 def test_public_character_reference_route(client):
     """The PUBLIC (no-auth) reference endpoint Pollinations kontext fetches: serves a token PNG,
     rejects a bad token, 404s on a missing one — and needs no session."""

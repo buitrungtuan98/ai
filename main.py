@@ -566,7 +566,8 @@ def channels_page(request: Request, user: CurrentUser, db: DbDep, status: str = 
          "camp_counts": camp_counts, "chips": chips, "status": status, "q": q, "total_all": total_all,
          "ap": {c.id: (c.autopilot_json or {}) for c in channels},
          "characters": {c.id: _sanitize_characters(c.characters_json) for c in channels},
-         "flash": flash if flash in ("profile", "autopilot", "character") else ""},
+         "flash": flash if flash in ("profile", "autopilot", "character",
+                                     "char_img_ok", "char_img_fail") else ""},
     )
 
 
@@ -702,7 +703,7 @@ def set_channel_profile(channel=Depends(get_owned_channel), db=Depends(get_db),
 _MAX_CHARACTERS = 12  # per channel — plenty for random casting, small enough to keep the UI/quota sane
 
 
-_MAX_CHARACTER_IMAGE_BYTES = 5 * 1024 * 1024  # 5 MB cap on an uploaded reference image
+_MAX_CHARACTER_IMAGE_BYTES = 15 * 1024 * 1024  # 15 MB cap — phone photos are big; we downscale anyway
 
 
 def _sanitize_characters(raw) -> list[dict]:
@@ -745,13 +746,27 @@ def _save_character_image(upload: UploadFile) -> tuple[str, str] | None:
 
     from PIL import Image
 
+    try:  # opportunistic HEIC/HEIF (iPhone photos) support — no-op if pillow-heif isn't installed
+        import pillow_heif
+
+        pillow_heif.register_heif_opener()
+    except Exception:  # noqa: BLE001
+        pass
+
     data = upload.file.read(_MAX_CHARACTER_IMAGE_BYTES + 1)
-    if not data or len(data) > _MAX_CHARACTER_IMAGE_BYTES:
+    if not data:
+        logger.warning("Character image upload was empty (filename=%r)", upload.filename)
+        return None
+    if len(data) > _MAX_CHARACTER_IMAGE_BYTES:
+        logger.warning("Character image too big: %.1f MB > %d MB limit (filename=%r)",
+                       len(data) / 1024 / 1024, _MAX_CHARACTER_IMAGE_BYTES // 1024 // 1024, upload.filename)
         return None
     try:
         Image.open(io.BytesIO(data)).verify()  # reject a non-image / truncated upload before trusting it
         img = Image.open(io.BytesIO(data)).convert("RGB")
     except Exception:  # noqa: BLE001 — any decode failure = not a usable image
+        logger.warning("Character image not a readable image (filename=%r) — needs PNG/JPG/WebP",
+                       upload.filename)
         return None
     img.thumbnail((1024, 1024))  # cap dimensions — a reference sheet needs no more
     token = secrets.token_hex(16)
@@ -771,10 +786,14 @@ def add_channel_character(channel=Depends(get_owned_channel), db=Depends(get_db)
     AI draws a sheet from the description. Fictional characters only — a creative brief, not a real
     person (a real photo is allowed only for yourself / with explicit consent)."""
     cast = _sanitize_characters(channel.characters_json)
+    flash = "character"
     if name.strip() and len(cast) < _MAX_CHARACTERS:
         import uuid
 
-        saved = _save_character_image(image) if (image and image.filename) else None
+        attempted = bool(image and image.filename)
+        saved = _save_character_image(image) if attempted else None
+        if attempted:
+            flash = "char_img_ok" if saved else "char_img_fail"   # tell the operator if the image stuck
         cast.append({
             "id": uuid.uuid4().hex[:8],
             "name": name.strip()[:60],
@@ -786,7 +805,7 @@ def add_channel_character(channel=Depends(get_owned_channel), db=Depends(get_db)
         })
         channel.characters_json = cast
         db.commit()
-    return RedirectResponse("/channels?flash=character", status_code=303)
+    return RedirectResponse(f"/channels?flash={flash}", status_code=303)
 
 
 def _remove_ref_file(path: str | None) -> None:
@@ -804,14 +823,16 @@ def set_channel_character_image(char_id: str, channel=Depends(get_owned_channel)
     old file is removed so a stale token stops resolving."""
     cast = _sanitize_characters(channel.characters_json)
     ch = next((c for c in cast if c["id"] == char_id), None)
+    flash = "character"
     if ch is not None and image and image.filename:
         saved = _save_character_image(image)
+        flash = "char_img_ok" if saved else "char_img_fail"
         if saved:
             _remove_ref_file(ch.get("ref_image"))
             ch["ref_image"], ch["ref_token"] = saved
             channel.characters_json = cast
             db.commit()
-    return RedirectResponse("/channels?flash=character", status_code=303)
+    return RedirectResponse(f"/channels?flash={flash}", status_code=303)
 
 
 @app.get("/channels/{channel_id}/characters/{char_id}/image")
