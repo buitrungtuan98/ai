@@ -1375,6 +1375,23 @@ The product was navigable only by someone who already knew it worked (ADR-068):
   1280px — no page scrolls sideways, the setup card leads, the confirm modal shows its verb and stays
   on screen, the palette lists 11 destinations, and `?flash=` disappears without a reload.
 
+## R7 — Slow-vendor healing: resume, don't restart `DONE`
+The reported failure: 8 scene images at 120s each; the vendor answered 5, slowed past 120s on the
+6th, and the whole render failed — losing the 5 images, the TTS and the script (ADR-069):
+- **The retry waits longer, not the same 120s again.** Image fetches ladder their timeout (base ×2
+  per attempt, per-user knob on Settings, throttle-friendly pauses) inside a per-episode budget that
+  keeps the render safely under its own 45-minute job cap — a naive timeout raise would have traded
+  a clean failure for a SIGKILL mid-encode.
+- **A failed render is a checkpoint now.** The workspace survives failure, stills are named by their
+  prompt hash (a new script can never reuse a stale drawing), and the script itself is persisted on
+  the task — so Retry redraws only the missing scenes and never pays for a second script. Reject and
+  Discard & re-render still reroll for real: they drop the checkpoint on purpose.
+- **The autopilot continues interrupted renders.** Its retry now shares the failure classification
+  with the bell and the episode page (`core/failure.py`) — it resumes vendor timeouts and worker
+  kills, and never burns its cap on a missing key, a spent quota or a safety block. The orphan
+  sweeper leaves recent checkpoints alone (24h) so an hours-later autopilot pass still finds them.
+- Verified: 439 tests (17 new), ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

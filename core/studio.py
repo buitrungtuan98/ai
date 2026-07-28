@@ -36,7 +36,9 @@ _BEAT_DIRECTION = (
     "on-screen captions. Do not draw any text, words, letters, logos or watermark in the image."
 )
 
-GenImage = Callable[..., str]  # ai_engine.generate_image signature (kwargs), injectable for tests
+# ai_engine.generate_image signature (kwargs), injectable for tests. Fakes should accept `**kw`:
+# the seam also carries the slow-vendor controls (`timeout_s`, `deadline` — ADR-069).
+GenImage = Callable[..., str]
 
 
 def pick_character(characters: list[dict] | None, *, seed: int = 0) -> dict | None:
@@ -96,9 +98,25 @@ def scene_prompt(
     return " ".join(parts)
 
 
+def scene_cache_key(
+    character: dict | None, subject: str, *, mood: str | None = None,
+    style_override: str | None = None,
+) -> str:
+    """Content key for one scene's still: a short hash of the exact prompt the drawing would use.
+
+    Checkpoint resume (ADR-069) names each still after this key, so a kept workspace can only ever be
+    reused for the SAME drawing — a re-render with a different script, style or reject-taught prompt
+    hashes differently and redraws instead of silently recycling a stale image."""
+    import hashlib
+
+    prompt = scene_prompt(character, subject, mood=mood, style_override=style_override)
+    return hashlib.sha1(prompt.encode("utf-8")).hexdigest()[:12]
+
+
 def character_sheet(
     character: dict, *, api_key: str, out_path: str,
     model: str | None = None, style_override: str | None = None, gen_image: GenImage | None = None,
+    timeout_s: float | None = None, deadline: float | None = None,
 ) -> str:
     """Draw the character's reference sheet ONCE, caching it at `out_path` (reused as-is if the file
     already exists — the sheet defines the character, so it must not drift between episodes). Returns
@@ -110,6 +128,7 @@ def character_sheet(
     return gen(
         prompt=character_sheet_prompt(character, style_override),
         api_key=api_key, out_path=out_path, model=model,
+        timeout_s=timeout_s, deadline=deadline,
     )
 
 
@@ -118,14 +137,17 @@ def scene_visual(
     mood: str | None = None, style_override: str | None = None,
     reference_paths: list[str] | None = None, reference_url: str | None = None,
     model: str | None = None, gen_image: GenImage | None = None,
+    timeout_s: float | None = None, deadline: float | None = None,
 ) -> str:
     """Draw one scene keyframe starring `character`, conditioned on `reference_paths` (the character
     sheet first, then the previous scene's frame for temporal continuity — used by the Gemini leg) and
     `reference_url` (a public image URL used by Pollinations image-editing models like `kontext`, so
-    the free provider can honour an uploaded reference too). Returns the image path."""
+    the free provider can honour an uploaded reference too). `timeout_s`/`deadline` are the
+    slow-vendor controls (ADR-069), forwarded to the generator. Returns the image path."""
     gen = gen_image or ai_engine.generate_image
     return gen(
         prompt=scene_prompt(character, subject, mood=mood, style_override=style_override),
         api_key=api_key, out_path=out_path,
         reference_paths=reference_paths or [], reference_url=reference_url, model=model,
+        timeout_s=timeout_s, deadline=deadline,
     )

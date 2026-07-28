@@ -85,6 +85,13 @@ class Settings(BaseSettings):
     DEFAULT_BUFFER_SIZE: int = 3
     JOB_TIMEOUT_SECONDS: int = 2700
     ORPHAN_MAX_AGE_MINUTES: int = 60
+    # Studio image fetches (ADR-069). IMAGE_TIMEOUT_SECONDS is the per-attempt HTTP wait (a retry
+    # waits double — a vendor that throttles after N requests needs a LONGER second attempt, not the
+    # same 120s again); the per-user Settings page can override it. The BUDGET caps one episode's
+    # TOTAL image waiting so the whole render can never outgrow JOB_TIMEOUT_SECONDS and get SIGKILLed
+    # mid-encode — when it is spent, the render fails fast and resumes later from its checkpoint.
+    IMAGE_TIMEOUT_SECONDS: int = 120
+    IMAGE_WAIT_BUDGET_SECONDS: int = 1080
     # Watchdog (ADR-057): a render whose progress has not moved for JOB_TIMEOUT + this grace has
     # outlived its own RQ timeout without being killed — proof the worker loop is no longer
     # executing. The grace keeps the watchdog strictly BEHIND RQ's own timeout, so a legitimately

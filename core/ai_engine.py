@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from typing import Literal, TypeVar
 
@@ -991,8 +992,6 @@ def _call_gemini_vision(
 ) -> str:
     """Single point that calls Gemini with images (and optionally one audio track).
     Returns raw response text."""
-    import os
-
     import google.generativeai as genai
     from PIL import Image
 
@@ -1031,6 +1030,7 @@ def _extract_image_bytes(resp) -> bytes | None:
 
 def _call_gemini_image(
     *, api_key: str, model: str, prompt: str, reference_paths: list[str], out_path: str,
+    timeout: float | None = None,
 ) -> str:
     """Single point that calls a Gemini IMAGE model, writing the returned PNG to `out_path`.
 
@@ -1044,7 +1044,8 @@ def _call_gemini_image(
     genai.configure(api_key=api_key)
     gen_model = genai.GenerativeModel(model_name=model)
     parts: list = [prompt, *[Image.open(p) for p in reference_paths]]
-    resp = gen_model.generate_content(parts)
+    resp = gen_model.generate_content(
+        parts, request_options={"timeout": timeout} if timeout else None)
 
     # A safety/recitation block is deterministic — surface it as a non-retryable error.
     for cand in getattr(resp, "candidates", None) or []:
@@ -1055,8 +1056,7 @@ def _call_gemini_image(
     if not data:
         feedback = getattr(resp, "prompt_feedback", None)
         raise GeminiBlockedError(f"Image model returned no image (prompt_feedback={feedback}).")
-    with open(out_path, "wb") as f:
-        f.write(data)
+    _write_image_atomic(out_path, data)
     return out_path
 
 
@@ -1064,13 +1064,46 @@ def _call_gemini_image(
 # editing — everything else (flux, turbo, stable-diffusion) is text-to-image and ignores it.
 _POLLINATIONS_IMAGE_MODELS = {"kontext", "nanobanana", "gptimage", "gptimage-large", "seedream"}
 
+# Slow-vendor healing (ADR-069): each retry doubles the per-attempt wait, capped here; and an
+# attempt is not even started with less than the floor remaining in the episode's image budget —
+# a 4-second window would just burn a vendor call that cannot plausibly finish.
+_IMAGE_TIMEOUT_CAP_S = 600.0
+_MIN_IMAGE_ATTEMPT_S = 15.0
+
+
+def _write_image_atomic(out_path: str, data: bytes) -> None:
+    """Write image bytes via tmp + rename. Checkpoint resume (ADR-069) treats any existing non-empty
+    file as a finished still, so a fetch killed mid-write must never leave a half image behind."""
+    tmp = out_path + ".part"
+    with open(tmp, "wb") as f:
+        f.write(data)
+    os.replace(tmp, out_path)
+
+
+def _attempt_timeout(attempt: int, timeout_s: float | None, deadline: float | None,
+                     last: Exception | None) -> float:
+    """The wait for attempt N of an image fetch: base × 2^N, capped, and never past the episode's
+    image-budget deadline. Raises ImageGenError when the budget can no longer fit an attempt."""
+    t = min(float(timeout_s or 120.0) * (2 ** attempt), _IMAGE_TIMEOUT_CAP_S)
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining < _MIN_IMAGE_ATTEMPT_S:
+            # Wording matters: "timeout" classifies this as transient (core/failure.py) so the
+            # autopilot retries it, and it must NOT contain quota words — the budget being spent is
+            # about a slow vendor, not about the daily allowance.
+            raise ImageGenError(
+                "image wait timeout: this episode's image-fetch budget is spent — the render stops "
+                f"cleanly and resumes from the scenes already drawn. Last provider error: {last}")
+        t = min(t, remaining)
+    return t
+
 
 def generate_image(
     *, prompt: str, api_key: str, out_path: str,
     model: str | None = None, reference_paths: list[str] | None = None,
     reference_url: str | None = None,
     pollinations_token: str | None = None, width: int = 1080, height: int = 1920,
-    max_retries: int = 2,
+    max_retries: int = 2, timeout_s: float | None = None, deadline: float | None = None,
 ) -> str:
     """Draw one image, writing it to `out_path` and returning the path.
 
@@ -1083,7 +1116,13 @@ def generate_image(
     Gemini ignores them. `pollinations_token` (optional) raises Pollinations' free rate limits.
     `reference_url` is a PUBLIC image URL for Pollinations image-editing models (e.g. `kontext`) so the
     free provider can also honour an uploaded character reference; Gemini uses the local
-    `reference_paths` instead and ignores it, and text-only Pollinations models (`flux`) ignore it."""
+    `reference_paths` instead and ignores it, and text-only Pollinations models (`flux`) ignore it.
+
+    Slow-vendor healing (ADR-069): `timeout_s` is the base per-attempt wait — each retry doubles it,
+    because a vendor that throttles after N requests needs a LONGER next attempt, not the same wait
+    again. `deadline` (a `time.monotonic()` instant) caps the episode's total image waiting: when it
+    is reached the call fails fast with a timeout error instead of eating the render job's own
+    timeout, so the render can stop cleanly and resume from its checkpoint."""
     model = model or settings.GEMINI_IMAGE_MODEL
     refs = reference_paths or []
     entries = model_chain(model)
@@ -1096,10 +1135,12 @@ def generate_image(
                     prompt=prompt, model=sub or "flux", out_path=out_path,
                     token=pollinations_token, width=width, height=height,
                     reference_url=reference_url, max_retries=max_retries,
+                    timeout_s=timeout_s, deadline=deadline,
                 )
             return _generate_image_single(
                 prompt=prompt, api_key=api_key, model=entry, out_path=out_path,
                 reference_paths=refs, max_retries=max_retries,
+                timeout_s=timeout_s, deadline=deadline,
             )
         except GeminiBlockedError:
             raise  # a content block is terminal — do not reroute unsafe content to another provider
@@ -1126,6 +1167,7 @@ def generate_image(
             return _generate_pollinations_single(
                 prompt=prompt, model="flux", out_path=out_path, token=pollinations_token,
                 width=width, height=height, max_retries=max_retries,
+                timeout_s=timeout_s, deadline=deadline,
             )
         except (GeminiError, ImageGenError) as exc:
             last = exc
@@ -1144,6 +1186,7 @@ def _pollinations_seed(prompt: str) -> int:
 def _call_pollinations(
     *, model: str, prompt: str, out_path: str, token: str | None,
     width: int, height: int, seed: int, reference_url: str | None = None,
+    timeout: float = 120.0,
 ) -> str:
     """Single point that calls the Pollinations image API (free, keyless). GET the drawn image and
     write it to `out_path`. `safe=true` keeps it brand-safe; `nologo=true` drops the watermark. For an
@@ -1169,7 +1212,7 @@ def _call_pollinations(
     if reference_url and model in _POLLINATIONS_IMAGE_MODELS:
         params["image"] = reference_url   # image-to-image: keep the referenced character
     try:
-        resp = requests.get(url, params=params, headers=headers, timeout=120)
+        resp = requests.get(url, params=params, headers=headers, timeout=timeout)
         if resp.status_code in (401, 402, 403):
             # The new API's deterministic gates — say exactly what to do instead of a bare 500-alike.
             why = {401: "authentication required — save a Pollinations token on Credentials",
@@ -1189,14 +1232,14 @@ def _call_pollinations(
         # A blocked/failed prompt returns an error page, not an image — treat as a provider failure.
         raise ImageGenError(f"Pollinations returned no image (content-type={ctype!r}, "
                             f"{len(resp.content)} bytes)")
-    with open(out_path, "wb") as f:
-        f.write(resp.content)
+    _write_image_atomic(out_path, resp.content)
     return out_path
 
 
 def _generate_pollinations_single(
     *, prompt: str, model: str, out_path: str, token: str | None,
     width: int, height: int, max_retries: int, reference_url: str | None = None,
+    timeout_s: float | None = None, deadline: float | None = None,
 ) -> str:
     """One Pollinations provider's attempt loop: retry transient HTTP failures with backoff, then
     raise ImageGenError so the provider chain can fall over to the next entry."""
@@ -1213,14 +1256,22 @@ def _generate_pollinations_single(
     seed = _pollinations_seed(prompt)
     last: Exception | None = None
     for attempt in range(max_retries):
+        t = _attempt_timeout(attempt, timeout_s, deadline, last)  # doubles per attempt (ADR-069)
         try:
             return _call_pollinations(model=model, prompt=prompt, out_path=out_path, token=token,
-                                      width=width, height=height, seed=seed, reference_url=reference_url)
+                                      width=width, height=height, seed=seed,
+                                      reference_url=reference_url, timeout=t)
         except Exception as exc:  # noqa: BLE001 — transient HTTP errors are retryable
             last = exc
-            logger.warning("Pollinations attempt %d/%d failed: %s", attempt + 1, max_retries, exc)
+            logger.warning("Pollinations attempt %d/%d (%.0fs wait) failed: %s",
+                           attempt + 1, max_retries, t, exc)
             if attempt < max_retries - 1 and _BACKOFF_BASE_SECONDS:
-                time.sleep(_BACKOFF_BASE_SECONDS * (2**attempt))
+                # A vendor slow enough to time out is usually throttling — give it a real breather
+                # (5·base·2^n), but never sleep past the episode's image budget.
+                pause = _BACKOFF_BASE_SECONDS * 5 * (2**attempt)
+                if deadline is not None:
+                    pause = min(pause, max(0.0, deadline - time.monotonic()))
+                time.sleep(pause)
     hint = ""
     if model in _POLLINATIONS_IMAGE_MODELS and reference_url:
         # A kontext 500 with a reference usually means Pollinations couldn't FETCH the image URL
@@ -1235,16 +1286,19 @@ def _generate_pollinations_single(
 def _generate_image_single(
     *, prompt: str, api_key: str, model: str, out_path: str,
     reference_paths: list[str], max_retries: int,
+    timeout_s: float | None = None, deadline: float | None = None,
 ) -> str:
     """One image model's attempt loop: retry with backoff on transient errors; fail FAST (no retry
     burn) on a spent daily quota or a missing model; a content block is not retried."""
     last_error: Exception | None = None
     for attempt in range(max_retries):
         rate_limited = False
+        t = _attempt_timeout(attempt, timeout_s, deadline, last_error) if (
+            timeout_s or deadline) else None
         try:
             return _call_gemini_image(
                 api_key=api_key, model=model, prompt=prompt,
-                reference_paths=reference_paths, out_path=out_path,
+                reference_paths=reference_paths, out_path=out_path, timeout=t,
             )
         except GeminiBlockedError:
             raise  # the content itself was refused — retrying can't help

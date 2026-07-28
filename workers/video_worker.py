@@ -21,7 +21,7 @@ from sqlalchemy import func, select
 
 from core import video_factory
 from core import vibe as vibe_mod
-from core.ai_engine import generate_image, generate_script
+from core.ai_engine import VideoScript, generate_image, generate_script
 from core.config import settings
 from core.video_factory import Branding
 from database.db_session import SessionLocal
@@ -342,6 +342,17 @@ def apply_approve(db, item) -> None:
     enqueue_publish(item.id)
 
 
+def drop_script_checkpoint(task) -> None:
+    """Forget a persisted resume script (ADR-069). Called wherever the operator's intent is a
+    REROLL — reject, discard & re-render — because those exist precisely to get different content;
+    the checkpoint exists to rebuild the same content after an infrastructure failure. The
+    checkpointed stills need no explicit invalidation: they are named by prompt hash, so a fresh
+    script simply never matches them."""
+    rj = dict(task.render_json or {})
+    if rj.pop("script", None) is not None:
+        task.render_json = rj or None
+
+
 def apply_reject(db, item, reason: str = "", *, rerender: bool = False) -> None:
     """Reject a render: delete its files, mark the buffer row rejected + the task FAILED with the
     reason, and feed the reason into the campaign's avoid-list (learning loop). When `rerender`,
@@ -357,6 +368,7 @@ def apply_reject(db, item, reason: str = "", *, rerender: bool = False) -> None:
         task.status = TaskStatus.FAILED
         task.error_message = ("Rejected in review: " + reason) if reason else \
             "Rejected in review. Use Retry to re-render."
+        drop_script_checkpoint(task)  # judged bad — the re-render must write a FRESH script
     if reason:  # the operator's/AI's reason becomes a permanent avoid-note (Loop 1 learning signal)
         campaign = db.get(Campaign, item.campaign_id)
         if campaign is not None:
@@ -509,6 +521,13 @@ def render_task(task_id: int) -> None:
         image_gen = partial(generate_image,
                             pollinations_token=(user.pollinations_token or settings.POLLINATIONS_TOKEN),
                             width=_prof.width, height=_prof.height)
+        # Per-attempt image-vendor wait (ADR-069): the operator's Settings choice wins over the
+        # server default. A retry doubles it; the per-episode total is capped inside produce().
+        try:
+            image_timeout_s = int((user.settings_json or {}).get("image_timeout_s")
+                                  or settings.IMAGE_TIMEOUT_SECONDS)
+        except (TypeError, ValueError):
+            image_timeout_s = settings.IMAGE_TIMEOUT_SECONDS
         # Studio cast: attach each character's PUBLIC reference URL (ADR-055) so a Pollinations
         # image-editing model (kontext) can fetch an uploaded reference over the internet. The Gemini
         # leg uses the local file instead; a non-public base (dev localhost) yields no url → skipped.
@@ -528,34 +547,53 @@ def render_task(task_id: int) -> None:
         learning = campaign.learning_json or {}
         # Voice pace: quote mode adds the vibe's small per-episode jitter to the campaign rate.
         rate_pct = int(cfg.get("rate_pct", 0)) + (vibe["rate_delta"] if vibe else 0)
-        script = generate_script(
-            topic=campaign.topic_name,
-            language=cfg.get("language", "en"),
-            total_episodes=campaign.total_episodes,
-            episode=task.episode_number,
-            api_key=gemini_key,
-            content_style=content_style,
-            vibe=vibe,
-            custom_system_prompt=cfg.get("system_prompt"),
-            persona=cfg.get("persona"),
-            style_examples=cfg.get("style_examples"),
-            # Per-campaign on/off: the text stays saved, but only applied when its flag is on
-            # (default on for pre-flag campaigns — unchanged behaviour).
-            catchphrase_open=(cfg.get("catchphrase_open") if cfg.get("catchphrase_open_on", True) else None),
-            catchphrase_close=(cfg.get("catchphrase_close") if cfg.get("catchphrase_close_on", True) else None),
-            continuity=cfg.get("continuity", "none"),
-            previous_synopses=previous,
-            playbook=learning.get("playbook"),
-            best_examples=learning.get("best_examples"),
-            avoid=learning.get("reject_reasons"),
-            self_critique=cfg.get("self_critique", "on") != "off",
-            duration_min_s=cfg.get("duration_min_s"),
-            duration_max_s=cfg.get("duration_max_s"),
-            rate_pct=rate_pct,
-            script_depth=cfg.get("script_depth", "standard"),
-            video_format=cfg.get("video_format", "short"),
-            model=gemini_model,
-        )
+        # Resume (ADR-069): an interrupted attempt persisted its script below — reuse it, so a Retry
+        # makes the SAME episode (its checkpointed stills still match their prompt hashes) and costs
+        # no second script call. A reject clears this (apply_reject/rerender): judged-bad content
+        # must regenerate with the new avoid-note, not be faithfully rebuilt.
+        script = None
+        saved_script = (task.render_json or {}).get("script")
+        if saved_script:
+            try:
+                script = VideoScript.model_validate(saved_script)
+                logger.info("Task %s: resuming with the script from the interrupted attempt", task.id)
+            except Exception:  # noqa: BLE001 — an unreadable checkpoint just regenerates
+                logger.warning("Task %s: persisted script did not validate — regenerating", task.id)
+        if script is None:
+            script = generate_script(
+                topic=campaign.topic_name,
+                language=cfg.get("language", "en"),
+                total_episodes=campaign.total_episodes,
+                episode=task.episode_number,
+                api_key=gemini_key,
+                content_style=content_style,
+                vibe=vibe,
+                custom_system_prompt=cfg.get("system_prompt"),
+                persona=cfg.get("persona"),
+                style_examples=cfg.get("style_examples"),
+                # Per-campaign on/off: the text stays saved, but only applied when its flag is on
+                # (default on for pre-flag campaigns — unchanged behaviour).
+                catchphrase_open=(cfg.get("catchphrase_open") if cfg.get("catchphrase_open_on", True) else None),
+                catchphrase_close=(cfg.get("catchphrase_close") if cfg.get("catchphrase_close_on", True) else None),
+                continuity=cfg.get("continuity", "none"),
+                previous_synopses=previous,
+                playbook=learning.get("playbook"),
+                best_examples=learning.get("best_examples"),
+                avoid=learning.get("reject_reasons"),
+                self_critique=cfg.get("self_critique", "on") != "off",
+                duration_min_s=cfg.get("duration_min_s"),
+                duration_max_s=cfg.get("duration_max_s"),
+                rate_pct=rate_pct,
+                script_depth=cfg.get("script_depth", "standard"),
+                video_format=cfg.get("video_format", "short"),
+                model=gemini_model,
+            )
+            # Persist the script the moment it exists (ADR-069): if the render dies mid-way, the
+            # retry rebuilds THIS episode instead of paying for a new script — and only a matching
+            # script lets the checkpointed stills be reused. The success path overwrites render_json
+            # wholesale, which is what consumes the checkpoint.
+            task.render_json = {**(task.render_json or {}),
+                                "script": script.model_dump(mode="json")}
         # Episode memory must NEVER be empty after a successful generation — an episode without a
         # synopsis is invisible to every later episode's no-repeat/serial prompt (continuity
         # silently degrades). The schema requires a synopsis; the variant-A title is the fallback.
@@ -609,6 +647,7 @@ def render_task(task_id: int) -> None:
                 image_model=image_model,
                 studio_sheet_dir=os.path.join(settings.MEDIA_ROOT, "studio", "sheets", str(channel.id)),
                 gen_image=image_gen,
+                image_timeout_s=image_timeout_s,
                 title_overlay=cfg.get("title_overlay") == "on",
                 content_style=content_style,
                 signature=cfg.get("signature"),

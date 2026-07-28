@@ -147,7 +147,7 @@ def test_produce_quote_mode_is_castless_centered_and_scribble(tmp_path, monkeypa
 
     gen_chars = []
 
-    def fake_gen(*, prompt, api_key, out_path, model=None, reference_paths=None, reference_url=None):
+    def fake_gen(*, prompt, api_key, out_path, model=None, reference_paths=None, reference_url=None, **_kw):
         gen_chars.append("SAME character" in prompt)   # False for a character-less quote draw
         open(out_path, "w").write("P")
         return out_path

@@ -60,6 +60,18 @@
       {% endcall %}
       <p class="hint">The model chain itself is chosen on the <a href="/credentials">Credentials</a> page.</p>
     </div>
+
+    <div class="card mt">
+      <h3>Rendering</h3>
+      <p class="subtitle">How patient a Studio render is with a slow image provider.</p>
+      {% call ui.field('Image vendor timeout (seconds per attempt)', hint='How long one image request may take before it is retried — the retry automatically waits twice as long, which is what heals a provider that slows down mid-episode. 30–600; blank uses the server default (' ~ settings.IMAGE_TIMEOUT_SECONDS ~ 's).', for_id='set-img-timeout') %}
+      <input name="image_timeout_s" id="set-img-timeout" type="number" min="30" max="600"
+             placeholder="{{ settings.IMAGE_TIMEOUT_SECONDS }}" value="{{ s.get('image_timeout_s') or '' }}">
+      {% endcall %}
+      <p class="hint">Safety net either way: one episode's <b>total</b> image waiting is capped
+        server-side, and an interrupted render keeps the scenes it already drew — a Retry resumes
+        from them instead of starting over.</p>
+    </div>
   </div>
 </div>
 

@@ -36,8 +36,17 @@ class RenderWorkspace:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        shutil.rmtree(self.dir, ignore_errors=True)
-        logger.debug("Cleaned workspace %s", self.dir)
+        # Success cleans as always. A FAILED render keeps its workspace as a checkpoint (ADR-069):
+        # the stills already drawn are the expensive part of a Studio episode, and a retry reuses
+        # them instead of starting over. Kept dirs are not leaks — `sweep_orphans` collects them by
+        # age exactly as it collects crash survivors (the scheduler skips recently-failed tasks so a
+        # checkpoint outlives the autopilot's retry cadence).
+        if exc_type is None:
+            shutil.rmtree(self.dir, ignore_errors=True)
+            logger.debug("Cleaned workspace %s", self.dir)
+        else:
+            logger.info("Keeping workspace %s as a resume checkpoint (%s)",
+                        self.dir, exc_type.__name__)
 
 
 def sweep_orphans(
