@@ -111,6 +111,21 @@ def _draw_poster_title(draw, title, *, width, height, accent, font_path):
         y += line_h
 
 
+def _draw_scribble_cover(draw, word, *, width, height, font_path):
+    """Draw one evocative word centered over the illustration in soft italic — the quote channel's
+    'scribble cover' look. A gentle radial-ish scrim keeps it readable over any art."""
+    usable = width - 2 * MARGIN_PX
+    word = word.upper()
+    font, px = _fit_font([word], usable, round(height * 0.11), round(height * 0.05), font_path)
+    w, h = font.getbbox(word)[2], font.getbbox(word)[3]
+    cx, cy = width // 2, int(height * 0.42)
+    # Soft dark pad behind the word so it reads over bright or busy art, without a hard box.
+    pad_w, pad_h = w // 2 + round(width * 0.06), h // 2 + round(height * 0.02)
+    draw.rectangle([cx - pad_w, cy - pad_h, cx + pad_w, cy + pad_h], fill=(0, 0, 0, 90))
+    draw.text((cx - w // 2, cy - h), word, font=font, fill=(255, 255, 255),
+              stroke_width=max(4, round(px * 0.05)), stroke_fill=(0, 0, 0))
+
+
 def generate_thumbnail(
     video_path: str,
     out_path: str,
@@ -124,6 +139,7 @@ def generate_thumbnail(
     height: int = VIDEO_H,
     poster: bool = False,
     accent_hex: str | None = None,
+    scribble_word: str | None = None,
 ) -> str:
     """Grab a representative frame, darken the lower area, and draw a wrapped bold title. `width`/
     `height` set the thumbnail geometry (default vertical 1080×1920; 1920×1080 for long-form). When
@@ -131,7 +147,9 @@ def generate_thumbnail(
 
     `poster=True` draws the reference-channel billboard instead: a big UPPERCASE two-tone title (line 1
     white, line 2 `accent_hex`, heavy black outline) at the TOP over a dark scrim, character/frame
-    visible below — the same title treatment burned into the video, so the thumbnail matches."""
+    visible below — the same title treatment burned into the video, so the thumbnail matches.
+    `scribble_word` (ADR-056) draws ONE evocative word, centered in soft italic over the illustration —
+    the aesthetic quote channel's cover look (ENEMY / CALM / AFRAID …)."""
     frame_png = out_path + ".frame.png"
     _select_frame(video_path, frame_png, at_fraction, duration)
 
@@ -140,7 +158,9 @@ def generate_thumbnail(
             img = raw.convert("RGB").resize((width, height))
         draw = ImageDraw.Draw(img, "RGBA")
 
-        if poster:
+        if scribble_word and scribble_word.strip():
+            _draw_scribble_cover(draw, scribble_word.strip(), width=width, height=height, font_path=font_path)
+        elif poster:
             _draw_poster_title(draw, title, width=width, height=height,
                                accent=_accent_rgb(accent_hex), font_path=font_path)
         else:

@@ -1042,6 +1042,35 @@ photo), and it's the only way an external image API can read a file that otherwi
 box. The random-token-as-filename keeps the public surface minimal (one image per token, no listing,
 no traversal) and needs no new auth-exempt machinery — a dependency-free route is already public.
 
+### ADR-056 — "Quote" content style + per-episode Vibe Engine
+**Decision:** a third way to build a campaign (alongside stock stories and Studio character explainers):
+`content_style` = `story` (default) | `quote`. Quote mode makes the aesthetic "whisper-quote" video —
+one short poem per video shown line-by-line over an AI-drawn mood illustration, with a one-word
+"scribble cover". The pieces: (1) a pure **Vibe Engine** (`core/vibe.py`) re-rolls each episode's
+recipe — mood, whether a one-off anonymous character appears (never a fixed cast) or pure scenery,
+setting, music mood, and a small voice-pace jitter — seeded per (campaign, episode) so a re-render is
+identical but every video differs; the ART STYLE is NOT rolled (it's the campaign's `visual_style`,
+constant = the channel identity). (2) `ai_engine.build_quote_prompt` writes a 5-8 line poem (one line
+per scene) with a per-line illustration brief in the rolled mood + a `cover_word` (new optional
+`VideoScript` field). (3) The render rides the Studio path but **character-less** (no cast required —
+`studio.scene_visual` accepts `character=None`), drawing each line from its brief + the fixed style,
+with the previous frame chained for style continuity. (4) A new caption style `quote` shows the whole
+line ONCE, centered mid-screen in soft italic with a fade (not karaoke); a `signature` draws the
+operator's own channel mark lower-centre on every frame + the thumbnail; the thumbnail is the scribble
+cover (the cover word); a `vintage` colour grade (muted + vignette + grain) suits it. The worker rolls
+the vibe (forcing Studio visuals for quote), jitters the voice, and routes Auto music through the
+vibe's mood. The campaign form gets a Content-style selector, art-style presets (incl. a lofi look),
+and a signature field; picking Quote auto-tunes them.
+**Why:** the operator pointed at a real quote channel and wanted this genre AND wanted every video to
+feel unique. This genre needs NO character consistency — the identity is the mood + a constant art
+style — so it works perfectly on the free text-only Pollinations flux (no kontext/reference
+dependency), sidestepping the whole reference-image saga. Reusing the Studio render path (draw →
+Ken-Burns → caption → stitch) and the existing script/metadata/music machinery keeps it a new *style*
+plugged into the pipeline, not a parallel renderer (SOLID/DRY). The Vibe Engine is a pure seeded
+picker so uniqueness is deterministic and free (no extra AI calls — the script model writes the poem
+in the rolled vibe). AI Propose is intentionally NOT extended for quote: the Vibe Engine already is
+the per-episode creative designer, so a quote campaign only needs a topic, an art style and a schedule.
+
 ### ADR-050 — One "Episodes" surface + kill the lateral navigation loop
 **Decision:** `/episodes`, `/assets` (Review) and `/tasks` (render log) are three *layouts of one
 thing* — the episode pipeline. They previously cross-linked with scattered "↗" buttons and no

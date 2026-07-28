@@ -1086,6 +1086,30 @@ flux draw didn't match). Added the reference-capable models. See ADR-055.
   which also disproved the Cloudflare-blocking theory). `nologo` dropped (legacy-only; watermarks are
   tier-based now). Verify Test uses the same endpoint. 272 tests, ruff clean, docs green.
 
+## "Quote" content style + Vibe Engine (Batch Q) `DONE`
+A third campaign style alongside stock stories and Studio explainers: the aesthetic "whisper-quote"
+video — one short poem per video, shown line-by-line over an AI-drawn mood illustration, with a
+one-word scribble cover. See ADR-056.
+- **Q1 Vibe Engine** `DONE`: `core/vibe.py` re-rolls each episode (mood / one-off-character-or-scenery
+  / setting / music-mood / voice-pace), seeded per (campaign, episode) — every video unique, art style
+  constant.
+- **Q2 Quote script** `DONE`: `build_quote_prompt` — a 5-8 line poem, one line per scene, each with an
+  illustration brief in the rolled mood + a `cover_word`.
+- **Q3 Character-less Studio** `DONE`: quote renders via the Studio path with NO cast; `scene_visual`
+  accepts `character=None`; consistency = the fixed art style + previous-frame chaining.
+- **Q4 Centered captions + signature** `DONE`: `style="quote"` (whole line centered, faded italic, not
+  karaoke) + an optional custom `signature` mark lower-centre on every frame + thumbnail.
+- **Q5 The look** `DONE`: `vintage` colour grade (muted + vignette + grain) + art-style presets on the
+  form (incl. a lofi-retro-anime look).
+- **Q6 Scribble cover** `DONE`: thumbnail = the cover word centered over the illustration.
+- **Q7 Form** `DONE`: Content-style selector; picking Quote auto-tunes (Studio visuals + starter art
+  style + reveals the signature field). AI Propose intentionally unchanged (the Vibe Engine is the
+  per-episode designer).
+- Verified: 280 tests passing (8 new — vibe determinism/ratio, quote prompt+routing, quote captions +
+  signature, scribble cover, vintage grade, castless produce orchestration) + 1 ffmpeg-gated
+  caption-burn test, 13 skipped, ruff clean, docs guard green; scribble cover + quote form checked in
+  a browser.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

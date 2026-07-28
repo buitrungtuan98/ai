@@ -70,20 +70,24 @@ def character_sheet_prompt(character: dict, style_override: str | None = None) -
 
 
 def scene_prompt(
-    character: dict, subject: str, *, mood: str | None = None, style_override: str | None = None,
+    character: dict | None, subject: str, *, mood: str | None = None, style_override: str | None = None,
 ) -> str:
-    """Prompt for one scene keyframe: the SAME character (backed by the reference image) acting out
-    `subject`, in the resolved art style, following the beat direction. `subject` should be a short
-    visual description (the scene's English visual keywords work well); `mood` an optional context
-    snippet from the narration."""
-    style = _style_for(character, style_override)
-    name = (character.get("name") or "the character").strip()
-    desc = (character.get("description") or "").strip()
-    parts = [
-        f"Draw {name}" + (f" ({desc})" if desc else "")
-        + " — the SAME character shown in the reference image — in this scene.",
-        f"Keep the character's face, colors and proportions identical to the reference. Art style: {style}.",
-    ]
+    """Prompt for one scene keyframe. With a `character`, the SAME character (backed by the reference
+    image) acts out `subject` in the resolved art style. With NO character (`None`, the quote content
+    style — ADR-056), it's a pure atmosphere/scene drawing in the campaign's art style. `subject`
+    should be a short visual description (the scene's English visual keywords work well); `mood` an
+    optional context snippet from the narration."""
+    style = _style_for(character or {}, style_override)
+    parts: list[str] = []
+    if character:
+        name = (character.get("name") or "the character").strip()
+        desc = (character.get("description") or "").strip()
+        parts.append(f"Draw {name}" + (f" ({desc})" if desc else "")
+                     + " — the SAME character shown in the reference image — in this scene.")
+        parts.append(f"Keep the character's face, colors and proportions identical to the reference. "
+                     f"Art style: {style}.")
+    else:
+        parts.append(f"Draw a single evocative illustration in this consistent art style: {style}.")
     if subject.strip():
         parts.append(f"Scene: {subject.strip()}.")
     if mood and mood.strip():
@@ -110,7 +114,7 @@ def character_sheet(
 
 
 def scene_visual(
-    *, character: dict, subject: str, api_key: str, out_path: str,
+    *, character: dict | None, subject: str, api_key: str, out_path: str,
     mood: str | None = None, style_override: str | None = None,
     reference_paths: list[str] | None = None, reference_url: str | None = None,
     model: str | None = None, gen_image: GenImage | None = None,

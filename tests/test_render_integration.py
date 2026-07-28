@@ -88,6 +88,26 @@ def test_billboard_headline_burns_on_real_ffmpeg(tmp_path):
     assert meta["width"] == 1080 and meta["height"] == 1920
 
 
+def test_quote_captions_and_signature_burn(tmp_path):
+    """The centered quote caption + lower-centre signature must burn cleanly on real libass."""
+    from core import media
+    from core.captions import build_ass
+    from core.ffmpeg_runner import run_ffmpeg
+    from core.tts import WordTiming
+    from core.video_factory import build_scene_args
+
+    d = str(tmp_path)
+    audio, clip = _make_inputs(d)
+    dur = media.probe_duration(audio)
+    ass = os.path.join(d, "q.ass")
+    build_ass([WordTiming("So", 0.0, 1.0), WordTiming("when", 1.0, dur)], ass, clip_duration=dur,
+              style="quote", signature="@Whisprs-style")
+    scene = os.path.join(d, "quote.mp4")
+    run_ffmpeg(build_scene_args([clip], audio, ass, scene, dur, None))
+    assert os.path.exists(scene)
+    assert media.probe_video_meta(scene)["width"] == 1080
+
+
 def test_studio_still_to_clip_and_scene(tmp_path):
     """Studio Mode's still→clip→scene path on real ffmpeg: a drawn PNG is looped into a proper video
     clip, which then feeds the unchanged build_scene_args (motion + captions) exactly like a Pexels
