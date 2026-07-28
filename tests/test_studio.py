@@ -273,10 +273,11 @@ def test_call_pollinations_builds_request_and_writes(tmp_path, monkeypatch):
     res = ai_engine._call_pollinations(model="flux", prompt="a hero jumping", out_path=out,
                                        token="tok", width=1080, height=1920, seed=42)
     assert res == out and open(out, "rb").read() == b"IMGDATA"
-    assert "image.pollinations.ai/prompt/" in captured["url"] and "a%20hero%20jumping" in captured["url"]
+    # gen.pollinations.ai/image is the current API — the legacy /prompt endpoint 500s for kontext.
+    assert "gen.pollinations.ai/image/" in captured["url"] and "a%20hero%20jumping" in captured["url"]
     p = captured["params"]
     assert p["model"] == "flux" and p["width"] == 1080 and p["height"] == 1920 and p["seed"] == 42
-    assert p["safe"] == "true" and p["nologo"] == "true"
+    assert p["safe"] == "true"
     # Auth rides in the Authorization header (documented backend auth), NEVER as a query param —
     # a `token` param is ignored by the API (anonymous tier) and would leak the secret into URLs.
     assert captured["headers"]["Authorization"] == "Bearer tok"

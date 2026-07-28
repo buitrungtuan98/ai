@@ -69,11 +69,12 @@ def verify_pollinations(token: str | None = None) -> tuple[bool, str]:
     try:
         import requests
 
-        params: dict = {"model": "flux", "width": 256, "height": 256, "nologo": "true", "safe": "true"}
+        params: dict = {"model": "flux", "width": 256, "height": 256, "safe": "true"}
         # Backend auth is the Authorization: Bearer header (a `token` query param is not documented
         # and gets ignored — the request would silently test the anonymous tier instead of the key).
+        # gen.pollinations.ai/image is the current API endpoint (same one the render path calls).
         headers = {"Authorization": f"Bearer {token}"} if token else {}
-        resp = requests.get("https://image.pollinations.ai/prompt/a%20tiny%20test%20icon",
+        resp = requests.get("https://gen.pollinations.ai/image/a%20tiny%20test%20icon",
                             params=params, headers=headers, timeout=90)
         ctype = resp.headers.get("content-type", "")
         if resp.status_code == 200 and ctype.startswith("image/") and resp.content:

@@ -1101,9 +1101,12 @@ def _call_pollinations(
 
     # Keep the prompt short: it rides in the GET path, and an over-long/garbled prompt is a common
     # cause of Pollinations 500s (especially for kontext). 700 chars is plenty for an image brief.
-    url = "https://image.pollinations.ai/prompt/" + urllib.parse.quote(prompt[:700], safe="")
+    # Endpoint: gen.pollinations.ai/image is the CURRENT documented API. The legacy
+    # image.pollinations.ai/prompt endpoint 500s for kontext even with valid Bearer auth — verified
+    # by the operator: the same token + reference image succeed on gen.pollinations.ai (200, jpeg).
+    url = "https://gen.pollinations.ai/image/" + urllib.parse.quote(prompt[:700], safe="")
     params: dict = {"model": model or "flux", "width": width, "height": height,
-                    "seed": seed, "nologo": "true", "safe": "true"}
+                    "seed": seed, "safe": "true"}  # nologo is legacy-only; watermarks are tier-based now
     # Backend auth per the Pollinations API docs is the Authorization: Bearer HEADER — a `token`
     # query param is NOT documented and gets ignored, leaving the request on the anonymous tier
     # (which gated models like kontext reject). Header auth also keeps the secret out of every URL,

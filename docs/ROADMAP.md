@@ -1080,6 +1080,11 @@ flux draw didn't match). Added the reference-capable models. See ADR-055.
   `_call_pollinations` + `verify_pollinations` to send the Bearer header (secret never rides in a URL
   now); the new API's deterministic gates (401 auth / 402 pollen balance / 403 model access) raise
   actionable messages instead of a bare failure. 272 tests (1 new), ruff clean, docs green.
+- Endpoint: switched to `gen.pollinations.ai/image/{prompt}` — the current documented API. The legacy
+  `image.pollinations.ai/prompt` endpoint 500s for kontext even with valid Bearer auth; the operator
+  PROVED the same token + reference URL succeed on gen.pollinations.ai (200, their character redrawn —
+  which also disproved the Cloudflare-blocking theory). `nologo` dropped (legacy-only; watermarks are
+  tier-based now). Verify Test uses the same endpoint. 272 tests, ruff clean, docs green.
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
