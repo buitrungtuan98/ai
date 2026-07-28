@@ -75,7 +75,8 @@ def test_a_wedged_worker_reads_differently_from_a_dead_one(session, user, monkey
 
 def test_a_failed_episode_names_its_channel_and_campaign_and_the_last_error_line(
         session, user, channel, monkeypatch):
-    """The operator's format: [Channel] > [Campaign] > what went wrong > an action."""
+    """The operator's format: [Channel] > [Campaign] > what went wrong > an action. An unrecognised
+    error falls back to the traceback's LAST line — the actual error, not the "Traceback" header."""
     import main
     from database.models import Task
     from database.types import TaskStatus
@@ -85,7 +86,7 @@ def test_a_failed_episode_names_its_channel_and_campaign_and_the_last_error_line
     camp = _campaign(session, user, channel, topic="Fact Ơi Là Fact")
     t = Task(campaign_id=camp.id, user_id=user.id, episode_number=7, status=TaskStatus.FAILED,
              finished_at=datetime.utcnow(),
-             error_message="Traceback (most recent call last):\n  File x\nRuntimeError: quota exhausted")
+             error_message="Traceback (most recent call last):\n  File x\nWeirdError: unknowable")
     session.add(t)
     session.commit()
     session.refresh(t)
@@ -93,9 +94,31 @@ def test_a_failed_episode_names_its_channel_and_campaign_and_the_last_error_line
     row = [r for r in main._alerts(session, user) if r["key"] == f"task-failed:{t.id}"][0]
     assert row["level"] == "red"
     assert row["channel"] == "Test Ch" and row["campaign"] == "Fact Ơi Là Fact"
-    assert "Ep 7 failed" in row["text"] and "RuntimeError: quota exhausted" in row["text"]
+    assert "Ep 7 failed" in row["text"] and "WeirdError: unknowable" in row["text"]
+    assert "Traceback" not in row["text"]
     assert row["href"] == f"/episodes/{t.id}" and row["action"] == "Open"
     assert row["at"] is not None
+
+
+def test_a_recognised_failure_reports_its_cause_not_the_stack_line(session, user, channel, monkeypatch):
+    """A stack line is unreadable AND misleading about the fix: "429 ResourceExhausted" tells the
+    operator nothing about retrying later. The bell says what the episode page says (ADR-068)."""
+    import main
+    from database.models import Task
+    from database.types import TaskStatus
+    from workers import task_queue
+
+    monkeypatch.setattr(task_queue, "worker_alive", lambda: True)
+    camp = _campaign(session, user, channel)
+    t = Task(campaign_id=camp.id, user_id=user.id, episode_number=7, status=TaskStatus.FAILED,
+             finished_at=datetime.utcnow(),
+             error_message="google.api_core.exceptions.ResourceExhausted: 429 quota exceeded")
+    session.add(t)
+    session.commit()
+    session.refresh(t)
+
+    row = [r for r in main._alerts(session, user) if r["key"] == f"task-failed:{t.id}"][0]
+    assert row["text"] == "Ep 7 failed — A free-tier quota ran out"
 
 
 def test_a_failure_with_no_recorded_message_says_so(session, user, channel, monkeypatch):

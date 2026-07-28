@@ -1,33 +1,53 @@
 {% extends "base.html" %}
 {% import "macros.html" as ui %}
-{% block title %}Calendar · AI Video Factory{% endblock %}
+{% block title %}Publishing · AI Video Factory{% endblock %}
+{# THE one answer to "what publishes when" (ADR-067): the same episodes as a week grid or as an
+   actionable list. The list view absorbed the Operations publish-queue tab — two pages answered this
+   question and their ready counts disagreed after a reschedule. #}
 {% block crumbs %}
-{{ ui.breadcrumb([{'label': 'Campaigns', 'href': '/campaigns' ~ ('?channel=' ~ scope_cid if scope_cid else '')}, {'label': 'Calendar'}]) }}
+{{ ui.breadcrumb([{'label': 'Campaigns', 'href': '/campaigns' ~ ('?channel=' ~ scope_cid if scope_cid else '')}, {'label': 'Publishing'}]) }}
 {% endblock %}
 {% block content %}
-{% call ui.page_head('Content Calendar', 'Posting slots per week. Each row is computed in its own campaign timezone; header dates use the server timezone.') %}
-  {% set cq = ('&channel=' ~ scope_cid) if scope_cid else '' %}
-  <a class="btn ghost sm" href="/campaigns{{ '?channel=' ~ scope_cid if scope_cid else '' }}" title="Back to the campaigns list">▤ List</a>
-  <div class="week-nav">
-    <a class="btn ghost sm" href="/calendar?week={{ week - 1 }}{{ cq }}">‹ Prev</a>
-    <span class="meta nowrap">{{ week_label }}</span>
-    {% if week != 0 %}<a class="btn ghost sm" href="/calendar{{ '?channel=' ~ scope_cid if scope_cid else '' }}">Today</a>{% endif %}
-    <a class="btn ghost sm" href="/calendar?week={{ week + 1 }}{{ cq }}">Next ›</a>
+{% set cq = ('&channel=' ~ scope_cid) if scope_cid else '' %}
+{% call ui.page_head('Publishing', 'When each rendered episode goes out. Times are shown in each campaign’s own timezone.') %}
+  <div class="hub-tabs seg">
+    <a class="hub-tab {{ 'active' if view == 'grid' }}" href="/calendar?week={{ week }}{{ cq }}">▧ Week grid</a>
+    <a class="hub-tab {{ 'active' if view == 'list' }}" href="/calendar?view=list{{ cq }}">☰ List &amp; actions</a>
   </div>
 {% endcall %}
 
-{% if scope_channel %}
-{{ ui.scope_note('Calendar for channel', scope_channel.channel_name, '/calendar') }}
+{% set _flash = {
+  'rescheduled': ('success', 'Publish time updated — this episode goes out at the time you set, and the campaign’s slots are unchanged.'),
+  'resched_cleared': ('info', 'Custom time removed — this episode rejoins the campaign’s normal posting slots.'),
+  'resched_bad': ('danger', 'That date and time could not be read — nothing was changed.'),
+  'publish': ('success', 'Publish queued — it uploads as soon as the worker is free.'),
+  'missing': ('danger', 'That episode’s video file is no longer on disk — re-render it before publishing.'),
+} %}
+{% if flash in _flash %}
+{% call ui.banner(_flash[flash][0]) %}{{ _flash[flash][1] }}{% endcall %}
 {% endif %}
 
+{% if scope_channel %}
+{{ ui.scope_note('Publishing for channel', scope_channel.channel_name, '/calendar') }}
+{% endif %}
+
+{# ── Week grid ─────────────────────────────────────────────────────────────── #}
+{% if view == 'grid' %}
+<div class="week-nav mt-sm">
+  <a class="btn ghost sm" href="/calendar?week={{ week - 1 }}{{ cq }}">‹ Prev</a>
+  <span class="meta nowrap">{{ week_label }}</span>
+  {% if week != 0 %}<a class="btn ghost sm" href="/calendar{{ '?channel=' ~ scope_cid if scope_cid else '' }}">Today</a>{% endif %}
+  <a class="btn ghost sm" href="/calendar?week={{ week + 1 }}{{ cq }}">Next ›</a>
+</div>
+
 {% if slotted %}
-<div class="card">
+<div class="card mt-sm">
   <div class="table-wrap">
     <table class="cal-table">
       <thead>
         <tr>
           <th>Campaign</th>
-          <th class="col-runway">Runway</th>
+          <th class="col-runway">Ready</th>
           {% for h in day_headers %}<th class="cell{{ ' today' if h.today }}">{{ h.label }}</th>{% endfor %}
         </tr>
       </thead>
@@ -36,25 +56,25 @@
         <tr>
           <td class="nowrap">
             <b><a href="/campaigns/{{ row.campaign.id }}">{{ row.campaign.topic_name }}</a></b><br>
-            <span class="hint">{% if row.channel %}{{ row.channel.channel_name }} · {% endif %}{{ '▬ Long' if row.fmt == 'long' else '▮ Short' }} · Ep {{ row.campaign.current_episode }}/{{ row.campaign.total_episodes }}</span>
+            <span class="hint">{% if row.channel %}{{ row.channel.channel_name }} · {% endif %}{{ '▬ Long' if row.fmt == 'long' else '▮ Short' }} · {{ row.campaign.current_episode }}/{{ row.campaign.total_episodes }} published</span>
           </td>
           <td>
             {% set rw = 'none' if row.ready == 0 else ('low' if row.ready <= 1 else 'ok') %}
             <span class="runway {{ rw }}"><span class="dot2 {{ 'bad' if rw == 'none' else 'ok' }}"></span>{{ row.ready }} ready</span>
-            {% if row.ready == 0 %}<br><a class="hint" href="/campaigns/{{ row.campaign.id }}/episodes" style="color:var(--st-failed)">⚠ buffer empty →</a>{% endif %}
+            {% if row.own_time %}<br><span class="hint">incl. {{ row.own_time }} at your own time</span>{% endif %}
+            {% if row.ready == 0 %}<br><a class="hint text-bad" href="/episodes?status=queued">⚠ buffer empty →</a>{% endif %}
           </td>
           {% for day in row.cells %}
           <td class="cell{{ ' gate' if day.gate }}{{ ' today' if day_headers[loop.index0].today }}">
-            {% if day.gate %}<span class="hint">—</span>
-            {% else %}
-              {% for cell in day.slots %}
-              <div class="slot {{ cell.state }}">
-                {% if cell.state == 'filled' %}● {{ cell.t }} <span class="cal-ep">Ep {{ cell.ep }}</span>
-                {% elif cell.state == 'missed' %}○ {{ cell.t }}
-                {% else %}{{ cell.t }}{% endif %}
-              </div>
-              {% endfor %}
-            {% endif %}
+            {% if day.gate and not day.slots %}<span class="hint">—</span>{% endif %}
+            {% for cell in day.slots %}
+            <div class="slot {{ cell.state }}">
+              {% if cell.state == 'filled' %}● {{ cell.t }} <span class="cal-ep">Ep {{ cell.ep }}</span>
+              {% elif cell.state == 'own' %}✏ {{ cell.t }} <span class="cal-ep">Ep {{ cell.ep }}</span>
+              {% elif cell.state == 'missed' %}○ {{ cell.t }}
+              {% else %}{{ cell.t }}{% endif %}
+            </div>
+            {% endfor %}
           </td>
           {% endfor %}
         </tr>
@@ -64,9 +84,11 @@
   </div>
   <p class="hint mt-sm">
     <b class="slot-key filled">●</b> will publish (the next buffered episode) ·
+    <b class="slot-key own">✏</b> a time you set — it ignores the slots ·
     <b class="slot-key missed">○</b> slot with an empty buffer — <b>will be missed</b> ·
-    <b>—</b> weekday gate. The current day's column is highlighted; past slots are dimmed. Upcoming
-    episode numbers assume the buffer doesn't change — the <b>Runway</b> column shows how many are buffered.
+    <b>—</b> weekday gate. The current day's column is highlighted; past slots are dimmed. Projections assume
+    the buffer doesn't change — <a href="/calendar?view=list{{ cq }}">the list view</a> shows exact
+    times and lets you change them.
   </p>
 </div>
 {% endif %}
@@ -83,5 +105,83 @@
 
 {% if not slotted and not unslotted %}
 {% call ui.empty('▧', 'Nothing scheduled yet', 'Active campaigns with posting slots appear here as a 7-day runway. Create a campaign to get started.', '/campaigns/new', 'Create a campaign') %}{% endcall %}
+{% endif %}
+{% endif %}
+
+{# ── List & actions (was the Operations → Publish queue tab) ───────────────── #}
+{% if view == 'list' %}
+{% if publish_rows %}
+{% set _pstate = {'override': ('SCHEDULED', '✏ Your time'), 'slot': ('SCHEDULED', '🔵 Slot'),
+                  'review': ('AWAITING_REVIEW', '👁 Needs review'), 'now': ('PENDING_QUEUE', '⏳ Next tick')} %}
+<div class="card">
+  <div class="table-wrap">
+    <table class="stack-table ops-table">
+      <thead><tr><th>Episode</th><th>Channel</th><th>Publishes</th><th>State</th><th></th></tr></thead>
+      <tbody>
+        {% for r in publish_rows %}
+        <tr>
+          <td data-label="Episode"><b>Ep {{ r.item.episode_number }}</b>
+            <div class="meta">{{ r.campaign.topic_name if r.campaign else '—' }}</div>
+            {% if r.missing %}<div class="err">Video file is no longer on disk — re-render before publishing.</div>{% endif %}</td>
+          <td data-label="Channel">{{ r.channel.channel_name if r.channel else '—' }}
+            {% if r.channel %}<div class="meta"><span class="platform {{ r.channel.platform.value }}">{{ r.channel.platform.value }}</span></div>{% endif %}</td>
+          <td data-label="Publishes">
+            {% if r.when_label %}<b>{{ r.when_label }}</b><div class="meta">{{ r.tz }}</div>
+            {% elif r.state == 'review' %}<span class="meta">After you approve it</span>
+            {% else %}<span class="meta">At the next tick</span>{% endif %}</td>
+          <td data-label="State">{{ ui.pill(_pstate[r.state][0], _pstate[r.state][1]) }}</td>
+          <td data-label="">
+            <div class="row-actions">
+              {% if r.state == 'review' %}
+              <a class="btn ghost sm" href="/assets">Review →</a>
+              {% else %}
+              {# Publishing to a real channel cannot be undone, so it asks — the same guard /assets
+                 has always had. This form used to be a bare POST beside Reschedule (ADR-067). #}
+              <form method="post" action="/assets/{{ r.item.id }}/publish-now"
+                    data-confirm="Publish Ep {{ r.item.episode_number }}{% if r.campaign %} — {{ r.campaign.topic_name }}{% endif %} right now, skipping its schedule? This uploads to {{ r.channel.channel_name if r.channel else 'the channel' }} and can't be undone." data-confirm-verb="Publish now">
+                <input type="hidden" name="return_to" value="/calendar?view=list">
+                <button class="btn sm" type="submit" {{ 'disabled' if r.missing }}>⚡ Now</button></form>
+              <details class="resched">
+                <summary class="btn ghost sm">✏ Reschedule</summary>
+                <div class="resched-form">
+                  <form method="post" action="/operations/buffer/{{ r.item.id }}/reschedule" class="row-actions">
+                    <input type="datetime-local" name="publish_at" value="{{ r.input_value }}"
+                           aria-label="Publish date and time ({{ r.tz }})">
+                    <button class="btn sm" type="submit">Save</button>
+                  </form>
+                  {% if r.state == 'override' %}
+                  {# Its own form: a submit button sharing the input's name would send publish_at twice. #}
+                  <form method="post" action="/operations/buffer/{{ r.item.id }}/reschedule">
+                    <input type="hidden" name="publish_at" value="">
+                    <button class="btn ghost sm" type="submit"
+                            title="Return this episode to the campaign's posting slots">Clear custom time</button></form>
+                  {% endif %}
+                  <p class="hint">Times are in <b>{{ r.tz }}</b> — the same clock this campaign's
+                    posting slots use. Only this episode moves; the campaign keeps its schedule.</p>
+                </div>
+              </details>
+              {% endif %}
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+<p class="hint">Slot times are a projection: ready episodes fill the campaign's upcoming slots
+  lowest-number-first, which is the rule the scheduler actually follows. Give an episode its own time
+  and it leaves that queue — it publishes only at the time you set, and shows as ✏ on the
+  <a href="/calendar{{ '?channel=' ~ scope_cid if scope_cid else '' }}">week grid</a>.</p>
+{% else %}
+{% call ui.empty('🚀', 'Nothing waiting to publish',
+   'Rendered episodes appear here with the time they will go out. An empty list means the buffer is
+    empty — check what is queued to render.') %}
+  <div class="row-actions center">
+    <a class="btn ghost sm" href="/episodes?status=queued">Queued episodes</a>
+    <a class="btn ghost sm" href="/operations">Operations</a>
+  </div>
+{% endcall %}
+{% endif %}
 {% endif %}
 {% endblock %}

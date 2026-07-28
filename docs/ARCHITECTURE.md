@@ -1288,3 +1288,142 @@ did nothing — so both report `None` and the UI says the curve appears tomorrow
 followers but no lifetime page-view total comparable to YouTube's, so `views` stays `None` rather than
 substituting a similar-sounding metric. The chart is hand-rolled from numeric server values (no chart
 library, XSS-safe by construction), consistent with the no-CDN rule.
+
+### ADR-064 — One attention count, one stage vocabulary, and CANCELLED as a first-class state
+**Decision:** three related unifications, all driven by a persona-based UX audit. (1) `_attention_count`
+= failed + awaiting-review + open proposals is computed **once** server-side and served on both
+`/api/summary` and `/api/alerts`; the hamburger, the Dashboard rail item, the bell badge and the triage
+pill all render that one number, even though the bell's *panel* still groups backlogs into single rows.
+(2) One word per stage: `Queued · Writing · Rendering · Review · Scheduled · Published · Failed ·
+Cancelled`, applied to `app.js`'s label map so the polled table and the server-rendered chips agree.
+(3) `TaskStatus.CANCELLED` — an operator dropping a queued render gets its own neutral-grey state,
+excluded from the failure KPI and the alert feed, skipped by autopilot's auto-retry, and treated as a
+finished outcome by hydration, while staying retryable. Alongside: `apply_approve` now releases the
+buffer row to `ready` and marks the Task `SCHEDULED`.
+**Why:** four simulated users (a first-time owner, a phone operator, a power operator, a strategist)
+independently reported the same root problem: *the app states the same fact in many places with
+different numbers and different words*, which teaches the operator to trust none of them. Concretely,
+four badges showed 4 / 5 / 3 / 2 for one situation, because each had invented its own counting rule —
+the bell counted its grouped rows, the hamburger counted failed+review, the triage card counted its own
+list which is capped at 8 per kind. One server-side rule is the only fix that cannot drift. The
+vocabulary split was the same disease in words: "Pending Queue" vs "Queued", "Completed" vs
+"Published", "Asset Pool" vs "Review" — synonyms for stages that already had names, so an episode read
+differently depending on the page. On CANCELLED: reusing FAILED made a deliberate choice look like a
+fault (the vitals card jumped to "25% failed" after one cancel), raised a red alert about it, and — the
+worst part — autopilot's retry sweep, which skips rejects and quota errors but not failures, would
+queue the episode straight back; the operator's action silently did not stick. Finally, `apply_approve`
+left the buffer row `awaiting_review` until the upload completed, so one episode was simultaneously
+"approved" and "still waiting for review" across surfaces, the review counter did not move, and the
+still-live Approve button invited a double submit; moving it to `ready` + `SCHEDULED` also stops
+approved uploads from being counted as queued *renders*.
+
+### ADR-065 — One episode list: retire the /tasks page, derive the Review stage from the buffer
+**Decision:** `/episodes` is the single list of episodes. The `/tasks` **page** is retired to a 301
+into `/episodes?status=rendering`; `/api/tasks` stays as the data source and gains `live=1`
+(working stages only). Every stage chip now filters that one list **in place** — none navigates away.
+`_episodes_table.html` marks rows in a working stage with `data-live-task`, and a much smaller
+`app.js` moves their stage pill and progress with `textContent`/class changes, so "the live render
+log" is a filter rather than a destination. The **Review stage is derived from the buffer**
+(`_review_episode_keys`), review membership overrides the task status, and every other stage excludes
+those episodes — one episode, exactly one stage. Watching video stays a separate job, so the `/assets`
+workbench remains, offered by a link on the Review filter instead of a chip that teleports. Both
+episode surfaces order by `updated_at desc`, and the mobile row is a dense two-line block.
+**Why:** three of four simulated operators independently lost their place in the same way: the chip
+row looked like one control but two of its chips silently changed page, layout and vocabulary
+(`/tasks` titled "Render log", `<title>` "Task Logs", nav highlighting "Episodes"), and the page they
+landed on had a different search box, a different pager and different status words for the same
+episodes. Two tables over one object is the duplication; the chips were only how you noticed. The
+Review count was worse than duplication — it was *wrong*: the chip read "Review (0)" while two videos
+sat waiting, because it counted `Task.status` while the review queue itself is the buffer, and a Retry
+had moved one task on while its buffer row still said `awaiting_review`. Deriving the stage from the
+buffer makes the chip equal the attention badge by construction (same source, ADR-064) and removes the
+possibility of an episode appearing as both "Queued" and "Review", which testers hit on three separate
+surfaces. Retiring the page also deleted a whole parallel implementation — a second search grammar, a
+second pager, dead Time/Result columns, and progress bars that showed 0% on published episodes.
+Keeping `/api/tasks` intact means every existing test of pagination, search and scope still applies to
+the code that still exists.
+
+### ADR-066 — The dashboard answers four questions, in four blocks
+**Decision:** the dashboard is **health strip → triage → running now → one Factory card → activity**,
+and nothing else. The six stat tiles are deleted; "Factory scorecard" and "Factory vitals" merge into
+one **Factory** card; CPU and memory move into the health strip; buffer runway leads with the number of
+campaigns at **zero** rather than an average; the green all-clear renders only when the machine is
+healthy *and* nothing needs a human; the activity feed collapses runs of identical consecutive events;
+and the sidebar scope switcher is **disabled** on this page, because the Dashboard is deliberately
+factory-wide. Mobile went from 5.0 phone screens to 2.9.
+**Why:** the phone operator's first finding was that eight widgets competed to answer one question, so
+"is anything broken?" took four screens of scrolling and four disagreeing numbers. Each deletion has a
+specific reason rather than a taste argument. The six tiles restated numbers already present in the
+triage card, the health strip or the card below. The two analytics cards used the *same* layout and
+split one question down the wrong seam — total views (content performance) sat in the machine-health
+card while the failure rate sat away from the failure count — so nobody could say which card answered
+what. CPU/RAM belong beside Disk and Queue: they are all "can the box cope?". The runway average was
+actively misleading, not merely vague: it reported "≈1.0 day" while two campaigns directly below it
+showed "buffer empty — next slot will be missed", so the aggregate averaged away the emergency it
+existed to surface. The all-clear card contradicting a red banner one row above it is the cheapest way
+to teach an operator that the UI cannot be trusted. And the scope switcher was the clearest lie on the
+page: selecting a channel updated the URL and changed nothing, while every number kept showing the
+whole factory — disabling it with a note is honest, whereas half-scoping some sections and not others
+would reproduce the inconsistency this whole refactor is removing. Per-channel remains a real view: it
+is what `/channels`, and scoped Campaigns and Episodes, are for.
+
+### ADR-067 — One scheduling surface, and one copy of the slot-assignment rule
+**Decision:** `/calendar` becomes **Publishing**, with a `Week grid | List & actions` toggle. The list
+view is the former Operations publish-queue tab (`/operations?tab=publish` 301s there), so Operations
+is purely the machine (render queue + worker). `_calendar_row_cells` no longer re-implements the
+scheduler's slot assignment: it consumes the shared `_upcoming_slots`. Episodes with an operator-set
+`publish_at` are drawn on the grid as ✏ chips at their own time and counted in the Ready column, and
+`⚡ Now` gained the same confirm dialog `/assets` always had.
+**Why:** two pages answered "what publishes when" and gave different answers. The calendar owned the
+forward week view but had no actions and — worse — **hid** every episode an operator had rescheduled,
+while showing "will be missed" on days that actually had publishes; the Operations tab owned exact
+times and actions but no forward view. A tester following the buffer-empty drill had to visit three
+pages and still got two different ready counts (calendar 2, hub 4), because the calendar counted only
+slot-bound episodes. The root cause was structural, not cosmetic: the assignment rule ("ready
+episodes fill upcoming slots, lowest number first") existed twice — once in `_upcoming_slots`, used by
+the dashboard chip and the publish list, and once as a private day-walk with `pool.pop(0)` inside the
+calendar. Two copies of a business rule is a bug with a delay on it, and this one had already fired.
+Collapsing to one surface fixes the disagreement by construction; deleting the second copy of the rule
+is what makes it stay fixed. The confirm on `⚡ Now` closes the other half of the audit's finding here:
+the single most irreversible action in the product (publish publicly, immediately) was a bare POST
+sitting beside Reschedule on a dense row, while the identical action on `/assets` asked first.
+
+### ADR-068 — Onboarding survival: nothing may be impossible, unexplained, or a dead end
+**Decision:** five classes of first-hour failure are closed at their source.
+1. **The setup checklist leads the dashboard** (`_setup_state`) until a channel, keys and a campaign all
+   exist, and `All clear` waits for it. Its three steps exist in exactly one place — the activity
+   card's copy is gone. (`setup.api_keys`, not `setup.keys`: `setup.keys` in Jinja resolves to the
+   dict's own `.keys` method, which is truthy, so the step rendered as done on an empty account.)
+2. **No button leads somewhere impossible.** `/oauth/google/start` with no configured Google client
+   redirects to `/channels?flash=no_google_client` and explains what the *server* is missing, instead
+   of redirecting to Google with `client_id=None`. Facebook Page details are verified against the Graph
+   API before they are stored (`services.verification.check_facebook_page`, three-state: verified /
+   definitely rejected / could-not-tell — only a definite rejection blocks the save, so a network
+   hiccup never locks an operator out of their own Page). Each Credentials row links to the page that
+   issues that free key, and says what breaks without it; an active campaign missing a required key is
+   a red alert (`_credential_alerts`), with Pexels required only for campaigns that use stock footage.
+3. **A failure names its cause and its fix** (`_diagnose_failure` over `_FAILURE_PATTERNS`) — quota,
+   rejected key, full disk, ffmpeg, network, wedged worker, safety filter — and links somewhere the
+   operator can act. The same wording is used on the episode page, in the dashboard triage row and in
+   the bell, and the raw text stays available, folded. An unrecognised error gets no guess.
+4. **The first campaign defaults to Review-first** (an explicit Settings choice always wins), and
+   irreversible actions confirm with a **verb** (`data-confirm-verb`) naming the campaign or episode.
+5. **Flashes are one-shot** (`ui.initFlash` strips `?flash=`), a browser 404/403/500 renders
+   `error.html` **with the navigation intact** (API callers still get JSON), the AI buttons report
+   failures inline with a link to Credentials rather than in a lost `alert()`, ⌘K lists destinations
+   as well as content and folds Vietnamese diacritics on both sides (`main._fold` / `ui.fold`, `đ`
+   mapped by hand — NFD leaves it), `ep 3` finds episode 3, and every phone control is ≥44px.
+
+**Why:** the product was navigable only by someone who already knew it worked. A first-run account was
+greeted with "All clear — nothing needs you right now" — literally true and completely wrong — with the
+three steps that would fix it below a Factory card full of dashes. The first button a new operator
+presses, "+ YouTube (OAuth)", handed them Google's "Error 400: invalid_request" with nothing to say the
+fault was our unset `.env`. Facebook accepted a made-up Page id and token, showed "● Active", counted
+as a connected channel, and revealed the lie weeks later when a publish failed. A campaign could be
+started with no API keys at all: three episodes queued, every one doomed, dashboard still green. And
+when a render did fail, the page printed a stack trace and offered one Retry button — the wrong move
+for a spent quota or a full disk, and unreadable either way. Each of these is a place where the system
+knew the answer and did not say it. Diagnosis is a fixed pattern table rather than an AI call because
+it must work when the AI is exactly what is broken, and it returns nothing rather than guessing: a
+confident wrong cause is worse than a stack trace. The verb on the confirm button matters because
+"Confirm" was the word for both delete-a-campaign and publish-now, which trains the reflex to click it.

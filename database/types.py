@@ -60,6 +60,10 @@ class TaskStatus(str, enum.Enum):
     PUBLISHING = "PUBLISHING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+    # An operator dropped this episode from the queue on purpose. Distinct from FAILED so a
+    # deliberate choice never inflates the failure rate, never raises an alert, and is never
+    # auto-retried out from under the operator (ADR-064).
+    CANCELLED = "CANCELLED"
 
 
 class BufferStatus(str, enum.Enum):

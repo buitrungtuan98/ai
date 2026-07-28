@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}{{ code }} · AI Video Factory{% endblock %}
+{# A browser that lands on a dead URL used to get Starlette's bare `{"detail":"Not found"}` — no nav,
+   no way back, and indistinguishable from the app being broken (ADR-068). API callers still get JSON;
+   only requests that asked for HTML come here, and they arrive with the whole rail intact. #}
+{% block content %}
+<div class="empty err-page">
+  <span class="empty-ico">{{ '🔍' if code == 404 else ('🔒' if code in [401, 403] else '⚠') }}</span>
+  <h3>{{ title }}</h3>
+  <p>{{ body }}</p>
+  {% if detail and detail != title %}<p class="meta">{{ detail }}</p>{% endif %}
+  <div class="row-actions center mt">
+    <a class="btn" href="/">Dashboard</a>
+    <a class="btn ghost" href="/episodes">Episodes</a>
+    <a class="btn ghost" href="/campaigns">Campaigns</a>
+  </div>
+</div>
+{% endblock %}

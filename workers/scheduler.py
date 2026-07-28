@@ -560,6 +560,8 @@ def autopilot_retry_channel(db, channel) -> int:
     rejects (their decision stands), quota exhaustion (wait for the reset — don't burn it), and tasks
     already retried to the cap."""
     retried = 0
+    # CANCELLED is deliberately absent: an operator who dropped an episode from the queue must not
+    # find it back a few minutes later (ADR-064). Only genuine failures are auto-retried.
     for t in db.scalars(
             select(Task).join(Campaign, Task.campaign_id == Campaign.id)
             .where(Campaign.channel_id == channel.id, Task.status == TaskStatus.FAILED)).all():

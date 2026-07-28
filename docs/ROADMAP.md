@@ -1179,8 +1179,7 @@ the operator asked for (ADR-059):
 - Times are read and shown in the CAMPAIGN's timezone (the clock its slots already use) and stored
   as naive UTC — interpreting a `datetime-local` value as UTC would have shifted every reschedule by
   the operator's offset.
-- Deferred: drawing overridden episodes on the week-planner calendar (they correctly leave the slot
-  grid now; placing them at their own time needs a non-slot-aligned cell).
+- Deferred → DONE in R4 (ADR-067): overridden episodes are drawn on the week grid as ✏ chips.
 - Verified: 325 tests (13 new), ruff clean, docs guard green; all four row states (slot / your time /
   needs review / file missing) plus the open reschedule panel checked in a real browser at 1280px
   and 375px.
@@ -1258,6 +1257,123 @@ The top-down view the per-campaign pages cannot give (ADR-062), as one dashboard
   views stays None instead of substituting a similar-sounding metric.
 - Verified: 362 tests (12 new), ruff clean, docs guard green; the chart checked in a real browser at
   1280px and 375px against 14 seeded days of uneven publishing.
+
+## UX consolidation R1 — one truth for counts, names and stages `DONE`
+A five-persona UX audit (first-time owner, phone operator, power operator, strategist, plus a
+structural code audit) found one root problem behind most complaints: **the same fact is stated in
+many places with different numbers and different words.** R1 fixes the foundation (ADR-064):
+- **One attention count**: `_attention_count` (failed + awaiting review + open proposals) computed
+  once server-side, served on `/api/summary` and `/api/alerts`, rendered by the hamburger, rail badge,
+  bell and triage pill. Previously four badges showed 4 / 5 / 3 / 2 for one situation.
+- **One stage vocabulary** — Queued · Writing · Rendering · Review · Scheduled · Published · Failed ·
+  Cancelled — applied to `app.js`'s labels too, retiring the synonyms ("Pending Queue", "Completed",
+  "Audio Synced") that made one episode read differently per page.
+- **`TaskStatus.CANCELLED`**: an operator's cancel is no longer a FAILED. It is neutral-grey, out of
+  the failure KPI and the alert feed, skipped by autopilot's auto-retry (which previously queued the
+  cancelled episode straight back), a finished outcome for hydration, and still retryable.
+- **Approve releases the episode at once**: `apply_approve` sets the buffer row `ready` and the Task
+  `SCHEDULED`, so it leaves the review queue immediately (it used to read as approved AND awaiting
+  review simultaneously, invite a double submit, and count as a queued *render*).
+- **Honest counters**: "Episode 0 / 30" → "0 of 30 published".
+- **Dead weight removed**: `ui.js` writes to `#hv-buffer` / `#banner-failed` / `#banner-review` (no
+  such elements), tasks.html's second content-flow breadcrumb (ADR-061 says once), and the "re-render
+  from Task Logs → Retry" advice that pointed at a button that is never offered for a rejected item.
+- Verified: 376 tests (13 new), ruff clean, docs guard green.
+
+## UX consolidation R2 — one episode list `DONE`
+Three of four simulated operators lost their place the same way: the stage-chip row looked like one
+control, but two chips silently changed page, layout and vocabulary. Two tables over one object was
+the duplication; the chips were how you noticed (ADR-065):
+- The `/tasks` **page** is retired → 301 into `/episodes?status=rendering`. `/api/tasks` stays (every
+  pagination/search/scope test still applies) and gains `live=1` for working stages only.
+- Every stage chip filters `/episodes` in place. Rows in a working stage carry `data-live-task`, and a
+  much smaller `app.js` moves their pill + progress in place — the live render log is a filter now.
+  Gone with the page: a second search grammar, a second pager, dead Time/Result columns, and progress
+  bars showing 0% on published episodes.
+- **The Review chip was wrong, not just duplicated**: it read "Review (0)" while two videos waited,
+  because it counted `Task.status` while the review queue IS the buffer and a Retry had moved one task
+  on. The stage is now buffer-derived (`_review_episode_keys`), so it equals the attention badge by
+  construction, and review membership overrides the task status — an episode can no longer be both
+  "Queued" and "Review" (testers hit that on three surfaces).
+- The `/assets` review workbench stays (watching video is a different job) but is now *offered* by a
+  link on the Review filter instead of being where a chip dumps you.
+- One ordering (`updated_at` desc) for both episode surfaces, so actionable work is never buried under
+  hundreds of published rows — the campaign hub tab did exactly that.
+- Dense 2-line mobile rows: 38 episodes went from ~8.9 phone screens to ~3.5.
+- Fixed a latent CSS bug found while verifying: `.banner` was `display:flex`, so every inline child of
+  a sentence became its own narrow column — unreadable at 375px, on every banner in the app.
+- Verified: 382 tests (5 new), ruff clean, docs guard green; chips, live row movement, the redirect and
+  both breakpoints checked in a real browser.
+
+## UX consolidation R3 — an honest, short dashboard `DONE`
+Eight widgets competed to answer "is anything broken?", so the answer took four phone screens and came
+back as four disagreeing numbers. The dashboard is now four blocks (ADR-066): health strip → triage →
+running now → one Factory card → activity. **5.0 phone screens → 2.9.**
+- **Deleted the six stat tiles** — every number was already in the triage card, the health strip or the
+  card below.
+- **Merged "Factory scorecard" + "Factory vitals" into one Factory card.** They shared a layout and
+  split one question down the wrong seam (total views sat in the machine-health card; the failure rate
+  sat away from the failure count). Windows are now named: "Retention · last 7 days", "across N
+  measured episodes — analytics lag ~2 days".
+- **CPU + RAM moved into the health strip**, beside Disk and Queue — they answer the same question.
+- **Runway leads with the worst case**: "2 at zero — those slots will be missed" instead of "≈1.0 day",
+  which averaged away the very emergency shown in the panel directly below it.
+- **All-clear can no longer sit beside a red banner** (a green "everything is fine" under "factory is
+  degraded" teaches the operator to distrust every signal).
+- **Activity collapses runs**: "6 episodes published (Ep 519–524)" instead of six identical lines.
+- **The scope switcher is visibly disabled here.** Selecting a channel changed the URL and nothing
+  else while every number still showed the whole factory. Per-channel lives on Channels and on scoped
+  Campaigns/Episodes; half-scoping this page would recreate the inconsistency being removed.
+- Verified: 387 tests (4 new), ruff clean, docs guard green; measured in a real browser at 375px/1280px.
+
+## UX consolidation R4 — one scheduling surface `DONE`
+Two pages answered "what publishes when" and gave different answers (ADR-067):
+- `/calendar` is now **Publishing**, with a `Week grid | List & actions` toggle. The list view IS the
+  former Operations publish tab (`?tab=publish` 301s there), so Operations is purely the machine.
+- **Deleted the codebase's only duplicated business rule.** "Ready episodes fill upcoming slots,
+  lowest number first" existed twice — in `_upcoming_slots` (dashboard chip, publish list) and again as
+  a private day-walk with `pool.pop(0)` inside the calendar. It had already drifted: after a reschedule
+  the calendar said "2 ready" while the hub said 4.
+- **Rescheduled episodes appear again.** They used to vanish from the one page whose job is showing
+  when things publish, and the grid drew "will be missed" on days that actually had a publish. They now
+  render as ✏ chips at their own time and count toward Ready ("incl. 2 at your own time").
+- **⚡ Now asks first.** Publishing publicly and immediately — the most irreversible action in the
+  product — was a bare POST beside Reschedule, while the same action on /assets always confirmed.
+- Verified: 391 tests (4 new), ruff clean, docs guard green; grid ✏ chips, the toggle, the 301 and the
+  agreeing ready counts all checked in a real browser.
+
+## UX consolidation R5 — surviving the first hour `DONE`
+The product was navigable only by someone who already knew it worked (ADR-068):
+- **The dashboard no longer greets a fresh install with "All clear — nothing needs you right now."**
+  The three setup steps lead the page until a channel, keys and a campaign exist — and they now live in
+  exactly one place (the activity card's duplicate copy is gone). Found and fixed a real bug doing it:
+  `setup.keys` in Jinja resolves to the dict's own `.keys` method, so step 2 rendered as ✓ done on an
+  account with no keys at all.
+- **No button leads somewhere impossible.** "+ YouTube (OAuth)" with no configured Google client used
+  to hand the operator Google's "Error 400: invalid_request"; it now explains what the server is
+  missing. A Facebook Page is verified against the Graph API *before* it is stored — a made-up token
+  used to save as "● Active" and reveal the lie weeks later, when a publish failed. Only a definite
+  rejection blocks the save, so a network hiccup never locks an operator out of their own Page.
+- **Missing keys are named before they cost a render.** A campaign could be started with no keys at
+  all: three episodes queued, every one doomed, dashboard green. Now a red alert, with Pexels demanded
+  only from campaigns that actually use stock footage. Every Credentials row links to the page that
+  issues that free key and says what breaks without it; the two model-chain cards fold away (and the
+  Test button no longer overwrites the explanation next to it).
+- **A failure says what to do about it.** A stack trace with one Retry button is the wrong advice for a
+  spent quota, a rejected key or a full disk. Seven recognised causes now carry a fix and a link, worded
+  identically on the episode page, in triage and in the bell — with the raw text folded underneath, and
+  no guess when nothing matches.
+- **The first campaign starts in Review mode** (an explicit Settings choice still wins), and every
+  irreversible action confirms with a verb — "Delete campaign", "Publish now" — naming the campaign or
+  episode. One generic "Confirm" for both delete-a-campaign and publish-now trains the reflex to click.
+- Flashes are one-shot (a reload used to re-show a success for an action nobody took), a browser 404 is
+  a styled page that keeps the navigation instead of `{"detail":"Not found"}`, the AI buttons report
+  errors inline with a link to Credentials instead of in a lost `alert()`, ⌘K jumps to pages as well as
+  content and folds Vietnamese diacritics both ways ("lich dang" → Publishing, "ep 3" → Ep 3), and
+  every phone control is ≥44px.
+- Verified: 422 tests (31 new), ruff clean, docs guard green; checked in a real browser at 375px and
+  1280px — no page scrolls sideways, the setup card leads, the confirm modal shows its verb and stays
+  on screen, the palette lists 11 destinations, and `?flash=` disappears without a reload.
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation

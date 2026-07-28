@@ -17,6 +17,22 @@
 {% call ui.banner('success') %}✓ <b>Reference image saved.</b> Its thumbnail shows on the character below (📌).{% endcall %}
 {% elif flash == 'char_img_fail' %}
 {% call ui.banner('failed') %}⚠ <b>That image couldn’t be used.</b> The character was saved, but the picture must be a <b>PNG, JPG or WebP under 15&nbsp;MB</b> (iPhone HEIC isn’t supported — in Photos, share/export as JPG first). Use <b>Add image</b> on the character to try again.{% endcall %}
+{% elif flash == 'fb_added' %}
+{% call ui.banner('success') %}✓ <b>Page connected and verified.</b> Facebook accepted the token, so this Page can publish. Create a campaign on it to start making videos.{% endcall %}
+{% elif flash == 'fb_rejected' %}
+{# The save was refused, so nothing was stored — say that plainly and quote Facebook's own reason. #}
+{% call ui.banner('failed') %}⚠ <b>Facebook refused those details, so the Page was not connected.</b>
+  {% if flash_reason %}Facebook said: “{{ flash_reason }}”{% endif %}
+  Check the <b>Page ID</b> and that the token is a <b>permanent Page Access Token</b> for that same
+  Page (a short-lived User token expires within hours). Then
+  <a href="#fb-form">try again</a>.{% endcall %}
+{% elif flash == 'no_google_client' %}
+{# The operator did nothing wrong — the box itself has no Google OAuth client configured yet. Google
+   would have answered this click with a bare "Error 400: invalid_request" (ADR-068). #}
+{% call ui.banner('failed') %}⚠ <b>YouTube connect isn’t set up on this server yet.</b>
+  Connecting a YouTube channel needs a Google OAuth client, which lives in the server’s
+  <code>.env</code> as <code>GOOGLE_CLIENT_ID</code> and <code>GOOGLE_CLIENT_SECRET</code> — add
+  them and restart, or connect a <b>Facebook Page</b> below in the meantime.{% endcall %}
 {% endif %}
 
 {% if total_all %}
@@ -34,7 +50,7 @@
     </div>
     <div class="flex between mt-sm">
       {% if c.status.value == 'active' %}{{ ui.pill('active', 'Active') }}{% else %}{{ ui.pill('failed', 'Expired token') }}{% endif %}
-      <form method="post" action="/channels/{{ c.id }}/delete" data-confirm="Remove “{{ c.channel_name }}”? This also deletes its campaigns and rendered videos — it can't be undone." data-confirm-type="{{ c.channel_name }}">
+      <form method="post" action="/channels/{{ c.id }}/delete" data-confirm="Remove “{{ c.channel_name }}”? This also deletes its campaigns and rendered videos — it can't be undone." data-confirm-type="{{ c.channel_name }}" data-confirm-verb="Remove channel">
         <button class="btn danger sm" type="submit">Remove</button>
       </form>
     </div>
@@ -195,7 +211,7 @@
                 <button class="btn ghost sm" type="submit">{{ 'Replace image' if ch.ref_image else 'Add image' }}</button>
               </form>
             </div>
-            <form method="post" action="/channels/{{ c.id }}/characters/{{ ch.id }}/delete" data-confirm="Remove “{{ ch.name }}” from the cast?">
+            <form method="post" action="/channels/{{ c.id }}/characters/{{ ch.id }}/delete" data-confirm="Remove “{{ ch.name }}” from the cast?" data-confirm-verb="Remove character">
               <button class="btn danger sm" type="submit">Remove</button>
             </form>
           </li>

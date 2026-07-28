@@ -9,10 +9,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from datetime import datetime
+from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.exception_handlers import http_exception_handler
@@ -27,7 +29,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
-from sqlalchemy import String, cast, func, or_, select
+from sqlalchemy import String, cast, false, func, or_, select
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -183,15 +185,36 @@ LOGIN_SCOPES = [  # Google SSO login (identity only — no YouTube access)
 ]
 
 
+_ERROR_COPY = {
+    404: ("Nothing here", "That page or episode doesn’t exist — it may have been deleted, or the "
+                          "link may be from an older version of the app."),
+    403: ("Not yours", "That belongs to another account."),
+    400: ("That request didn’t work", "Something in the request was wrong — go back and try again."),
+    500: ("Something broke on our side", "The error was logged. Try again; if it keeps happening, "
+                                         "check the worker and the server log."),
+}
+
+
 @app.exception_handler(StarletteHTTPException)
 async def _auth_aware_http_exception(request: Request, exc: StarletteHTTPException):
-    """Browsers navigating unauthenticated get sent to /login; API callers keep the raw 401."""
-    if (
-        exc.status_code == 401
-        and settings.MULTI_TENANT_MODE
-        and "text/html" in (request.headers.get("accept") or "")
-    ):
+    """Browsers navigating unauthenticated get sent to /login; API callers keep the raw JSON.
+
+    A browser that asked for HTML also gets an HTML error page with the navigation intact (ADR-068) —
+    a bare `{"detail":"Not found"}` gave a dead end with no way back and read as "the app is broken"."""
+    wants_html = "text/html" in (request.headers.get("accept") or "")
+    if exc.status_code == 401 and settings.MULTI_TENANT_MODE and wants_html:
         return RedirectResponse("/login", status_code=303)
+    if wants_html and exc.status_code >= 400:
+        title, body = _ERROR_COPY.get(
+            exc.status_code, ("Something went wrong", "That request could not be completed."))
+        try:
+            return templates.TemplateResponse(
+                request, "error.html",
+                {"request": request, "code": exc.status_code, "title": title, "body": body,
+                 "detail": str(exc.detail or ""), "nav": ""},
+                status_code=exc.status_code)
+        except Exception:  # noqa: BLE001 — an error page that errors must still answer the request
+            logger.warning("Error page render failed for %s", exc.status_code, exc_info=True)
     return await http_exception_handler(request, exc)
 
 
@@ -333,8 +356,40 @@ def _task_counts(db, user_id: int) -> dict:
         "published": by_status.get(TaskStatus.COMPLETED, 0),
         "working": sum(by_status.get(s, 0) for s in _WORKING_STATUSES),
         "awaiting_review": awaiting,
+        # CANCELLED is excluded on purpose — an operator's own decision is not a failure (ADR-064).
         "failed": by_status.get(TaskStatus.FAILED, 0),
+        "cancelled": by_status.get(TaskStatus.CANCELLED, 0),
     }
+
+
+def _attention_count(db, user_id: int, counts: dict | None = None) -> int:
+    """THE number of things asking for a human, used by every badge in the app (ADR-064).
+
+    One rule, computed once: failed episodes + episodes awaiting review + open autopilot proposals.
+    Before this, the hamburger counted failed+review, the sidebar something else, the bell its own
+    (grouped) row count and the triage card its own capped list — four numbers for one question,
+    visible simultaneously, which taught the operator to trust none of them."""
+    counts = counts if counts is not None else _task_counts(db, user_id)
+    return (counts["failed"] + counts["awaiting_review"]
+            + _autopilot_proposed_count(db, user_id))
+
+
+def _setup_state(user, channels, campaigns) -> dict:
+    """How far through first-run setup this account is (ADR-068).
+
+    The dashboard used to open on "All clear — nothing needs you right now" for an account with no
+    channel, no keys and no campaign: literally true (no work is failing) and completely wrong as the
+    first thing a new operator reads. The three steps that make the factory able to work are hoisted
+    to the top of the page until they are done, and "All clear" waits its turn."""
+    # `api_keys`, not `keys`: in Jinja `setup.keys` resolves to the dict's own `.keys` method, which
+    # is truthy — the checklist showed step 2 as done on an account with no keys at all.
+    have_keys = bool((user.gemini_api_key or settings.GEMINI_API_KEY)
+                     and (user.pexels_api_key or settings.PEXELS_API_KEY))
+    state = {"channels": bool(channels), "api_keys": have_keys, "campaigns": bool(campaigns)}
+    state["done"] = all(state.values())
+    # The step to point at: the first one not done.
+    state["next"] = next((k for k in ("channels", "api_keys", "campaigns") if not state[k]), "")
+    return state
 
 
 def _autopilot_proposed_count(db, user_id: int) -> int:
@@ -359,6 +414,51 @@ def _buffer_counts(db, user_id: int) -> dict:
         elif status == BufferStatus.awaiting_review:
             d["awaiting_review"] += n
     return out
+
+
+def _campaigns_with_empty_buffer(db, user_id: int) -> int:
+    """Active auto-publish campaigns with posting slots and NOTHING rendered — each one is a slot
+    that will be missed. The dashboard leads with this instead of an average that averages it away."""
+    ready_by_camp = dict(db.execute(
+        select(BufferPoolItem.campaign_id, func.count())
+        .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
+        .where(Campaign.user_id == user_id, BufferPoolItem.status == BufferStatus.ready)
+        .group_by(BufferPoolItem.campaign_id)).all())
+    n = 0
+    for c in db.scalars(select(Campaign).where(
+            Campaign.user_id == user_id, Campaign.status == CampaignStatus.active)).all():
+        cfg = c.config_json or {}
+        if cfg.get("auto_publish", True) and (cfg.get("posting_slots") or []) \
+                and not ready_by_camp.get(c.id):
+            n += 1
+    return n
+
+
+def _activity_feed(tasks, camp_by_id, chan_by_id) -> list[dict]:
+    """Collapse runs of identical consecutive events into one row (ADR-066).
+
+    A burst of published episodes produced ten near-identical lines — "Published — <same campaign> ·
+    Ep 51x · 50m ago" over and over — which is where the dashboard's last two phone screens went. One
+    row per run ("6 episodes published") says the same thing and leaves room for what changed."""
+    feed: list[dict] = []
+    for task in tasks:
+        campaign = camp_by_id.get(task.campaign_id)
+        last = feed[-1] if feed else None
+        if (last is not None and last["status"] == task.status.value
+                and last["campaign_id"] == task.campaign_id):
+            last["episodes"].append(task.episode_number)
+            last["count"] += 1
+            continue
+        feed.append({
+            "status": task.status.value, "campaign_id": task.campaign_id,
+            "topic": campaign.topic_name if campaign else f"C{task.campaign_id}",
+            "channel": (chan_by_id.get(campaign.channel_id).channel_name
+                        if campaign and campaign.channel_id in chan_by_id else None),
+            "episodes": [task.episode_number], "count": 1,
+            "at": task.updated_at, "task_id": task.id,
+            "published_url": task.published_url,
+        })
+    return feed
 
 
 def _scorecard(db, user_id: int) -> dict:
@@ -396,6 +496,9 @@ def _scorecard(db, user_id: int) -> dict:
         "throughput": thr, "throughput_days": [d.strftime("%a") for d in days],
         "throughput_max": max(thr) if thr else 0, "published_7d": sum(thr),
         "ready": ready, "runway_days": round(ready / demand, 1) if demand else None,
+        # The AVERAGE hid emergencies: "≈1.0 day of runway" read as fine while two campaigns had an
+        # empty buffer and were about to miss tonight's slots. Report the worst case too (ADR-066).
+        "empty_campaigns": _campaigns_with_empty_buffer(db, user_id),
         "retention_this": round(sum(ret_this) / len(ret_this), 1) if ret_this else None,
         "retention_prev": round(sum(ret_prev) / len(ret_prev), 1) if ret_prev else None,
     }
@@ -606,6 +709,10 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
     # "Running now" panel: one row per active campaign (what each is doing + when it posts next).
     active_campaigns = [c for c in campaigns if c.status == CampaignStatus.active]
     autopilot_proposed = _autopilot_proposed_count(db, user.id)
+    counts = _task_counts(db, user.id)
+    setup = _setup_state(user, channels, campaigns)
+    # One failure reads the same in triage, in the bell and on the episode page (ADR-068).
+    fail_causes = {t.id: _diagnose_failure(t.error_message) for t in attention_failed}
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -613,7 +720,8 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
             "request": request, "user": user, "channels": channels, "campaigns": campaigns,
             "tasks": tasks, "nav": "dashboard",
             "health": _system_health(db, user),
-            "counts": _task_counts(db, user.id),
+            "counts": counts,
+            "attention": _attention_count(db, user.id, counts),
             "attention_failed": attention_failed, "attention_review": attention_review,
             "review_ids": review_ids,
             "scorecard": _scorecard(db, user.id), "next_publish": _next_publish(db, user.id),
@@ -623,6 +731,8 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
             "ops": _campaign_ops(db, user.id, active_campaigns),
             "camp_by_id": {c.id: c for c in campaigns},
             "chan_by_id": {c.id: c for c in channels},
+            "feed": _activity_feed(tasks, {c.id: c for c in campaigns}, {c.id: c for c in channels}),
+            "setup": setup, "fail_causes": fail_causes,
         },
     )
 
@@ -633,7 +743,7 @@ _CHANNEL_STATUS_FILTERS = ("active", "expired")
 
 @app.get("/channels", response_class=HTMLResponse)
 def channels_page(request: Request, user: CurrentUser, db: DbDep, status: str = "", q: str = "",
-                  flash: str = ""):
+                  flash: str = "", flash_reason: str = ""):
     status_counts = {s.value: n for s, n in db.execute(
         select(Channel.status, func.count())
         .where(Channel.user_id == user.id).group_by(Channel.status)).all()}
@@ -667,8 +777,12 @@ def channels_page(request: Request, user: CurrentUser, db: DbDep, status: str = 
          # Growth series per channel (ADR-063): does publishing this much actually move subs/views?
          "growth": {c.id: analytics_service.channel_growth(db, c.id) for c in channels},
          "characters": {c.id: _sanitize_characters(c.characters_json) for c in channels},
-         "flash": flash if flash in ("profile", "autopilot", "character",
-                                     "char_img_ok", "char_img_fail") else ""},
+         "flash": flash if flash in ("profile", "autopilot", "character", "char_img_ok",
+                                     "char_img_fail", "no_google_client", "fb_added",
+                                     "fb_rejected") else "",
+         # Facebook's own words for why it refused. Truncated and escaped by Jinja on the way out;
+         # never contains the token (see services/verification.check_facebook_page).
+         "flash_reason": flash_reason[:200]},
     )
 
 
@@ -681,6 +795,20 @@ def add_facebook_channel(
     page_access_token: str = Form(...),
     avatar_url: str = Form(""),
 ):
+    # Verify before trusting (ADR-068). A made-up Page id and token used to save as "● Active" and
+    # count as a connected channel; the lie only surfaced weeks later when a publish failed. One cheap
+    # Graph call decides — and a network hiccup must not block a real operator, so only a definite
+    # rejection stops the save.
+    verdict = None
+    try:
+        from services import verification
+
+        verdict = verification.check_facebook_page(page_id, page_access_token)
+    except Exception:  # noqa: BLE001 — verification is a guard, never a gate on our own bugs
+        logger.warning("Facebook page verification raised", exc_info=True)
+    if verdict is not None and verdict[0] is False:
+        return RedirectResponse(
+            "/channels?flash=fb_rejected&flash_reason=" + quote(verdict[1][:200]), status_code=303)
     creds = json.dumps({"page_id": page_id, "page_access_token": page_access_token})
     channel = Channel(
         user_id=user.id, platform=Platform.facebook, channel_name=channel_name,
@@ -688,7 +816,7 @@ def add_facebook_channel(
     )
     db.add(channel)
     db.commit()
-    return RedirectResponse("/channels", status_code=303)
+    return RedirectResponse("/channels?flash=fb_added", status_code=303)
 
 
 @app.post("/channels/{channel_id}/delete")
@@ -951,7 +1079,6 @@ def public_character_reference(token: str):
     fetch a character's uploaded reference over the internet (ADR-055). The token is a 32-hex random
     slug = the file name, so there's no DB lookup and no enumeration; the regex bars path traversal.
     This is the one intentional public exposure of a reference image (the operator opted in)."""
-    import re
 
     if not re.fullmatch(r"[a-f0-9]{8,64}", token):
         raise HTTPException(404, "Not found")
@@ -1004,6 +1131,13 @@ def set_channel_autopilot(channel=Depends(get_owned_channel), db=Depends(get_db)
 # ── Google OAuth2 web flow (connect a YouTube channel) ───────────────────────
 @app.get("/oauth/google/start")
 def google_oauth_start(request: Request, user: CurrentUser):
+    """Begin the YouTube connect flow — or explain what is missing (ADR-068).
+
+    Without a configured Google client this used to redirect to accounts.google.com with
+    `client_id=None`, so a first-time operator's very first click landed on Google's "Error 400:
+    invalid_request" page with nothing to tell them the app itself needed setting up first."""
+    if not (settings.GOOGLE_CLIENT_ID and settings.GOOGLE_CLIENT_SECRET):
+        return RedirectResponse("/channels?flash=no_google_client", status_code=303)
     flow = _google_flow(YOUTUBE_SCOPES, "/oauth/google/callback")
     auth_url, state = flow.authorization_url(access_type="offline", include_granted_scopes="true", prompt="consent")
     request.session["oauth_state"] = state
@@ -1131,6 +1265,15 @@ def campaign_new_form(request: Request, user: CurrentUser, db: DbDep,
     else:  # a fresh form starts from the user's saved new-campaign defaults (Settings page)
         ctx["cfg"] = _new_campaign_defaults(user)
         ctx["default_episodes"] = (user.settings_json or {}).get("total_episodes") or 10
+        # The very first campaign defaults to Review-first (ADR-068). Auto-publish is the right
+        # steady state, but as a *first* experience it uploads to a real channel before the operator
+        # has ever seen what this factory produces. An explicit Settings choice always wins.
+        if not (user.settings_json or {}).get("publish_mode"):
+            first = db.scalar(select(func.count()).select_from(Campaign)
+                              .where(Campaign.user_id == user.id)) == 0
+            if first:
+                ctx["cfg"] = {**ctx["cfg"], "auto_publish": False}
+                ctx["first_campaign"] = True
     if sel_channel is None and channel is not None:  # follow the scoped channel if the user owns it
         ch = db.get(Channel, channel)
         if ch is not None and ch.user_id == user.id:
@@ -1439,7 +1582,6 @@ def _campaigns_redirect(channel_id) -> RedirectResponse:
 def _campaign_return(return_to: str) -> str | None:
     """Safe internal campaign-hub path (`/campaigns/<digits>` or `/campaigns/<digits>/<tab>`) if
     `return_to` is one, else None — lets a hub action land back on the hub instead of the list."""
-    import re
 
     return return_to if re.fullmatch(r"/campaigns/\d+(?:/[a-z]+)?", return_to or "") else None
 
@@ -1662,7 +1804,6 @@ def save_settings(user: CurrentUser, db: DbDep, language: str = Form(""),
                   ai_daily_budget: str = Form("")):
     """Save the whole preferences form (a blank field clears that default — the form always submits
     every field). Values are whitelisted/validated exactly like the campaign form does."""
-    import re
 
     s: dict = {}
     if language in _SETTINGS_LANGS:
@@ -1852,7 +1993,7 @@ def _safe_return(return_to: str) -> str | None:
     ep = _episode_return(return_to)
     if ep is not None:
         return ep
-    if (return_to or "").split("?", 1)[0] == "/operations":
+    if (return_to or "").split("?", 1)[0] in ("/operations", "/calendar"):
         return return_to
     return None
 
@@ -1949,9 +2090,55 @@ _STAGE_STATUSES: dict[str, tuple[str, ...]] = {
     "scheduled": ("SCHEDULED",),
     "published": ("PUBLISHING", "COMPLETED"),
     "failed": ("FAILED",),
+    "cancelled": ("CANCELLED",),
 }
 _STATUS_TO_STAGE = {st: stage for stage, sts in _STAGE_STATUSES.items() for st in sts}
 _EPISODES_LIST_PER_PAGE = 25
+
+
+def _review_episode_keys(db, user_id: int, *, campaign: int | None = None,
+                         channel: int | None = None) -> set[tuple[int, int]]:
+    """(campaign_id, episode_number) for every episode whose rendered video is waiting for approval.
+
+    The BUFFER is the review queue — the same source the attention badge already used — so deriving
+    the Review stage from it makes the chip and the badge agree by construction (ADR-065). Reading it
+    from `Task.status` instead is what produced the audit's worst finding: the chip said "Review (0)"
+    while two videos sat waiting, because a Retry had moved one task on while its buffer row stayed
+    `awaiting_review`. A task status can drift from the queue; the queue cannot drift from itself."""
+    stmt = (select(BufferPoolItem.campaign_id, BufferPoolItem.episode_number)
+            .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
+            .where(Campaign.user_id == user_id,
+                   BufferPoolItem.status == BufferStatus.awaiting_review))
+    if campaign:
+        stmt = stmt.where(BufferPoolItem.campaign_id == campaign)
+    elif channel:
+        stmt = stmt.where(Campaign.channel_id == channel)
+    return {(cid, ep) for cid, ep in db.execute(stmt).all()}
+
+
+def _apply_stage_filter(stmt, stage: str, review_keys: set[tuple[int, int]]):
+    """Restrict an episode query to ONE stage, with Review taken from the buffer.
+
+    Review membership WINS over the task status, and every other stage excludes those episodes — so
+    an episode belongs to exactly one stage and can never be listed as both "Queued" and "Review"
+    (the audit found one episode reading as three different stages across surfaces)."""
+    from sqlalchemy import tuple_
+
+    key = tuple_(Task.campaign_id, Task.episode_number)
+    if stage == "review":
+        return stmt.where(key.in_(review_keys)) if review_keys else stmt.where(false())
+    stmt = stmt.where(Task.status.in_([TaskStatus(st) for st in _STAGE_STATUSES[stage]]))
+    return stmt.where(key.notin_(review_keys)) if review_keys else stmt
+
+
+def _stage_counts_from(raw: dict, review_keys: set, review_by_stage: dict) -> dict:
+    """Fold raw {status: n} into stage counts, with Review buffer-derived and its episodes removed
+    from the stage their task status would otherwise put them in (so the totals still add up)."""
+    counts = {stage: sum(raw.get(st, 0) for st in sts) for stage, sts in _STAGE_STATUSES.items()}
+    for stage, n in review_by_stage.items():
+        counts[stage] = max(0, counts.get(stage, 0) - n)
+    counts["review"] = len(review_keys)
+    return counts
 
 
 def _episode_stage_counts(db, user, *, campaign: int | None = None,
@@ -1967,7 +2154,20 @@ def _episode_stage_counts(db, user, *, campaign: int | None = None,
         conds.append(Task.campaign_id.in_(camp_ids or [-1]))
     raw = {s.value: n for s, n in db.execute(
         select(Task.status, func.count()).where(*conds).group_by(Task.status)).all()}
-    counts = {stage: sum(raw.get(st, 0) for st in sts) for stage, sts in _STAGE_STATUSES.items()}
+    review_keys = _review_episode_keys(db, user.id, campaign=campaign, channel=channel)
+    # Which stage each review episode WOULD have landed in, so removing them keeps the totals honest.
+    review_by_stage: dict[str, int] = {}
+    if review_keys:
+        from sqlalchemy import tuple_
+
+        for status, n in db.execute(
+                select(Task.status, func.count()).where(
+                    *conds, tuple_(Task.campaign_id, Task.episode_number).in_(review_keys))
+                .group_by(Task.status)).all():
+            stage = _STATUS_TO_STAGE.get(status.value)
+            if stage and stage != "review":
+                review_by_stage[stage] = review_by_stage.get(stage, 0) + n
+    counts = _stage_counts_from(raw, review_keys, review_by_stage)
     counts["all"] = sum(raw.values())
     return counts
 
@@ -1991,25 +2191,38 @@ def _episode_list_ctx(db, user, *, campaign: int | None = None, channel: int | N
     # Per-stage counts over the scope (search-independent, like the other chip bars).
     raw_counts = {s.value: n for s, n in db.execute(
         joined(select(Task.status, func.count()), scope_conds).group_by(Task.status)).all()}
-    stage_counts = {stage: sum(raw_counts.get(st, 0) for st in sts)
-                    for stage, sts in _STAGE_STATUSES.items()}
+    review_keys = _review_episode_keys(db, user.id, campaign=campaign, channel=channel)
+    review_by_stage: dict[str, int] = {}
+    if review_keys:
+        from sqlalchemy import tuple_
+
+        for st_val, n in db.execute(joined(
+                select(Task.status, func.count()),
+                scope_conds + [tuple_(Task.campaign_id, Task.episode_number).in_(review_keys)])
+                .group_by(Task.status)).all():
+            st_stage = _STATUS_TO_STAGE.get(st_val.value)
+            if st_stage and st_stage != "review":
+                review_by_stage[st_stage] = review_by_stage.get(st_stage, 0) + n
+    stage_counts = _stage_counts_from(raw_counts, review_keys, review_by_stage)
     total_all = sum(raw_counts.values())
 
     stage = status if status in _STAGE_STATUSES else ""
     q = q.strip()
     item_conds = list(scope_conds)
-    if stage:
-        item_conds.append(Task.status.in_([TaskStatus(st) for st in _STAGE_STATUSES[stage]]))
     if q:
         item_conds.append(or_(Campaign.topic_name.ilike(f"%{q}%"),
                               Task.synopsis.ilike(f"%{q}%"),
                               cast(Task.episode_number, String).ilike(f"%{q}%"),
                               cast(Task.status, String).ilike(f"%{q}%")))
-    total = db.scalar(joined(select(func.count()), item_conds)) or 0
+    def staged(stmt):
+        stmt = joined(stmt, item_conds)
+        return _apply_stage_filter(stmt, stage, review_keys) if stage else stmt
+
+    total = db.scalar(staged(select(func.count()))) or 0
     pages = max(1, -(-total // _EPISODES_LIST_PER_PAGE))
     page = min(max(page, 1), pages)
-    episodes = db.scalars(joined(select(Task), item_conds)
-                          .order_by(Task.id.desc())
+    episodes = db.scalars(staged(select(Task))
+                          .order_by(Task.updated_at.desc(), Task.id.desc())
                           .limit(_EPISODES_LIST_PER_PAGE)
                           .offset((page - 1) * _EPISODES_LIST_PER_PAGE)).all()
 
@@ -2030,6 +2243,7 @@ def episodes_list(request: Request, user: CurrentUser, db: DbDep,
     merges what used to be split between Task Logs (render) and Asset Pool (review). Row → the
     Episode detail page. Server-rendered + stage tabs + search + scope + pagination (one grammar)."""
     ctx = _episode_list_ctx(db, user, campaign=campaign, channel=channel, status=status, q=q, page=page)
+    ctx["worker_ok"] = task_queue.worker_alive()  # the render-log warning follows the filter (ADR-065)
     scope_hidden = {"campaign": campaign} if campaign else ({"channel": channel} if channel else {})
     scope_qs = _query_string(**scope_hidden, status=ctx["status"], q=ctx["q"])
     return templates.TemplateResponse(
@@ -2070,6 +2284,7 @@ def episode_view(request: Request, user: CurrentUser, db: DbDep, task_id: int,
         buffer and buffer.status in (BufferStatus.ready, BufferStatus.awaiting_review)
         and buffer.video_path and os.path.exists(buffer.video_path))
     stage_index = _STAGE_INDEX.get(task.status.value)
+    diagnosis = _diagnose_failure(task.error_message) if task.status == TaskStatus.FAILED else None
     # Retention drop-off markers: attribute the measured curve to the scene that lost viewers.
     curve = (task.stats_json or {}).get("retention_curve")
     scenes = (task.render_json or {}).get("scenes")
@@ -2081,10 +2296,62 @@ def episode_view(request: Request, user: CurrentUser, db: DbDep, task_id: int,
          "channel": channel, "buffer": buffer, "previewable": previewable,
          "stages": _EPISODE_STAGES, "stage_index": stage_index,
          "retention_curve": curve, "retention_drops": retention_drops,
-         "failed": task.status == TaskStatus.FAILED,
+         "failed": task.status == TaskStatus.FAILED, "diagnosis": diagnosis,
+         "cancelled": task.status == TaskStatus.CANCELLED,
          "flash": flash if flash in ("publish", "rerender", "rejected", "missing") else "",
          "flash_reason": flash_reason[:200]},
     )
+
+
+# The failure modes this box actually produces, each matched on words that appear in the recorded
+# error and each ending somewhere the operator can act (ADR-068). Order matters: the first match wins.
+_FAILURE_PATTERNS: tuple[tuple[tuple[str, ...], str, str, str, str], ...] = (
+    (("api key", "api_key", "invalid key", "unauthorized", "401", "403 forbidden"),
+     "A provider rejected the key",
+     "The AI or footage provider refused the credentials this render used. Check the key is present "
+     "and still valid, then retry.", "/credentials", "Check credentials"),
+    (("quota", "429", "rate limit", "resource_exhausted", "exceeded"),
+     "A free-tier quota ran out",
+     "The daily or per-minute allowance for the AI model is spent. It resets on its own — retry "
+     "later, or put a bigger-quota model first in the model chain.", "/credentials", "Model chain"),
+    (("no space", "disk", "enospc"),
+     "The box ran out of disk",
+     "Rendering needs working space. Old renders are cleaned automatically, but a stuck job can fill "
+     "the disk — check the disk reading and free space, then retry.", "/operations", "Operations"),
+    (("ffmpeg", "codec", "invalid data", "moov atom"),
+     "ffmpeg could not build the video",
+     "One of the source clips or the audio track was unusable. A retry usually picks different "
+     "footage and succeeds; if it repeats, try a different visual source on the campaign.",
+     "", ""),
+    (("timed out", "timeout", "connection", "network", "temporarily unavailable", "502", "503"),
+     "A provider was unreachable",
+     "This is almost always transient — the render reached out and got nothing back. Retry it.",
+     "", ""),
+    (("stalled", "wedged", "worker"),
+     "The worker stopped making progress",
+     "The render was abandoned because it stopped reporting progress. The worker recovers itself; "
+     "check it is running, then retry this episode.", "/operations", "Worker status"),
+    (("safety", "blocked", "policy", "profanity"),
+     "The safety filter blocked the content",
+     "The generated script tripped the brand-safety filter. Retrying re-writes it; if it keeps "
+     "happening, soften the campaign's topic or persona.", "", ""),
+)
+
+
+def _diagnose_failure(message: str | None) -> dict | None:
+    """Turn a recorded render error into a cause, a fix and somewhere to go (ADR-068).
+
+    A failed episode used to show the raw exception text and a single Retry button: true, unreadable,
+    and a dead end when retrying was not the answer (a spent quota, a missing key, a full disk).
+    Returns None when nothing matches — better no guess than a confident wrong one, and the raw
+    message is always shown either way."""
+    if not message:
+        return None
+    low = message.lower()
+    for words, cause, fix, href, action in _FAILURE_PATTERNS:
+        if any(w in low for w in words):
+            return {"cause": cause, "fix": fix, "href": href, "action": action}
+    return None
 
 
 # ── Performance & learning (self-improvement transparency) ──────────────────
@@ -2176,13 +2443,20 @@ def reset_learning(db: DbDep, campaign=Depends(get_owned_campaign)):
 
 
 # ── Content calendar ─────────────────────────────────────────────────────────
-def _calendar_row_cells(campaign: Campaign, ready_eps: list[int], week: int = 0,
-                        days: int = 7) -> list[dict] | None:
-    """Richer calendar cells for the week planner: per day, per slot, what will HAPPEN — not just
-    the time. Assigns the campaign's ready buffer episodes (lowest-numbered first, the scheduler's
-    real rule) to upcoming slots in chronological order; slots past that are 'missed' (buffer will be
-    empty). Past slots render for reference. Returns per-day {gate, slots:[{t,state,ep}]} or None
-    (non-slotted). The episode projection assumes the buffer doesn't change — honest caveat in the UI."""
+def _calendar_row_cells(campaign: Campaign, ready_eps: list[int], overrides=None,
+                        week: int = 0, days: int = 7) -> list[dict] | None:
+    """Week-planner cells: per day, per slot, what will HAPPEN — not just the time.
+
+    The slot→episode assignment comes from the SHARED `_upcoming_slots` (ADR-067). This function used
+    to re-implement it with its own day-walk and `pool.pop(0)`, which made it the only duplicated
+    business rule in the codebase — and it had already drifted: the calendar's ready count disagreed
+    with the campaign hub's after a reschedule.
+
+    `overrides` are (local datetime, episode) pairs for episodes an operator moved to their own time.
+    They no longer compete for a slot, so they are drawn in their own day cell marked `own` instead of
+    silently vanishing from the only page whose job is "what publishes when".
+    Returns per-day {gate, slots:[{t,state,ep}]} or None (non-slotted).
+    """
     from datetime import timedelta
 
     from workers.scheduler import WEEKDAY_KEYS, local_now
@@ -2191,17 +2465,28 @@ def _calendar_row_cells(campaign: Campaign, ready_eps: list[int], week: int = 0,
     slots = sorted(cfg.get("posting_slots") or [])
     if not slots or not cfg.get("auto_publish", True):
         return None
+    # ONE definition of "which episode lands in which slot": the next N free slots, lowest-numbered
+    # episode first — exactly what the scheduler does and what the publish list shows.
+    assigned = dict(zip(_upcoming_slots(campaign, len(ready_eps)), ready_eps))
+    own_by_slot: dict = {}
+    for when, ep in (overrides or []):
+        own_by_slot.setdefault(when.replace(second=0, microsecond=0), ep)
+
     allowed = cfg.get("posting_days") or []
     now_l = local_now(cfg.get("timezone"))
     start = now_l + timedelta(days=week * 7)
-    pool = list(ready_eps)  # lowest episode number first (mutated as slots consume it)
     rows: list[dict] = []
     for d in range(days):
         day = start + timedelta(days=d)
-        if allowed and WEEKDAY_KEYS[day.weekday()] not in allowed:
-            rows.append({"gate": True, "slots": []})
-            continue
         cells = []
+        # An operator-set time ignores the weekday gate (it outranks the schedule — ADR-059), so its
+        # chip is drawn even on a gated day.
+        for when, ep in sorted(own_by_slot.items()):
+            if when.date() == day.date():
+                cells.append({"t": when.strftime("%H:%M"), "state": "own", "ep": ep})
+        if allowed and WEEKDAY_KEYS[day.weekday()] not in allowed:
+            rows.append({"gate": True, "slots": cells})
+            continue
         for s in slots:
             try:
                 hh, mm = (int(x) for x in s.split(":"))
@@ -2210,17 +2495,20 @@ def _calendar_row_cells(campaign: Campaign, ready_eps: list[int], week: int = 0,
             slot_dt = day.replace(hour=hh, minute=mm, second=0, microsecond=0)
             if slot_dt < now_l:
                 cells.append({"t": s, "state": "past", "ep": None})
-            elif pool:
-                cells.append({"t": s, "state": "filled", "ep": pool.pop(0)})
+            elif slot_dt in assigned:
+                cells.append({"t": s, "state": "filled", "ep": assigned[slot_dt]})
             else:
                 cells.append({"t": s, "state": "missed", "ep": None})
+        cells.sort(key=lambda c: c["t"])
         rows.append({"gate": False, "slots": cells})
     return rows
 
 
 @app.get("/calendar", response_class=HTMLResponse)
 def calendar_page(request: Request, user: CurrentUser, db: DbDep, week: int = 0,
-                  channel: int | None = None):
+                  channel: int | None = None, view: str = "grid", flash: str = ""):
+    """The one answer to "what publishes when" (ADR-067): a week grid, or the same episodes as an
+    actionable list (`?view=list`, which absorbed the Operations publish-queue tab)."""
     from datetime import timedelta
 
     from workers.scheduler import local_now
@@ -2242,10 +2530,28 @@ def calendar_page(request: Request, user: CurrentUser, db: DbDep, week: int = 0,
                    BufferPoolItem.publish_at.is_(None))
             .order_by(BufferPoolItem.episode_number)).all():
         ready_by_camp.setdefault(cid, []).append(epn)
+    # Episodes an operator moved to their own time: they no longer compete for a slot, but they ARE
+    # still going out, so the grid draws them and the runway counts them (ADR-067).
+    override_by_camp: dict[int, list] = {}
+    for cid, epn, at in db.execute(
+            select(BufferPoolItem.campaign_id, BufferPoolItem.episode_number,
+                   BufferPoolItem.publish_at)
+            .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
+            .where(Campaign.user_id == user.id, BufferPoolItem.status == BufferStatus.ready,
+                   BufferPoolItem.publish_at.isnot(None))
+            .order_by(BufferPoolItem.publish_at)).all():
+        campaign_obj = next((c for c in campaigns if c.id == cid), None)
+        if campaign_obj is not None:
+            override_by_camp.setdefault(cid, []).append((_to_campaign_tz(at, campaign_obj), epn))
     slotted, unslotted = [], []
     for c in campaigns:
-        cells = _calendar_row_cells(c, ready_by_camp.get(c.id, []), week=week)
-        entry = {"campaign": c, "ready": len(ready_by_camp.get(c.id, [])),
+        overrides = override_by_camp.get(c.id, [])
+        cells = _calendar_row_cells(c, ready_by_camp.get(c.id, []), overrides, week=week)
+        entry = {"campaign": c,
+                 # Everything rendered and waiting — slot-bound AND own-time. Counting only the
+                 # slot-bound ones made the calendar disagree with the hub after a reschedule.
+                 "ready": len(ready_by_camp.get(c.id, [])) + len(overrides),
+                 "own_time": len(overrides),
                  "channel": chan_by_id.get(c.channel_id),
                  "fmt": (c.config_json or {}).get("video_format", "short"),
                  "tz": (c.config_json or {}).get("timezone") or settings.TIMEZONE,
@@ -2266,41 +2572,41 @@ def calendar_page(request: Request, user: CurrentUser, db: DbDep, week: int = 0,
         {"request": request, "user": user, "nav": "calendar", "slotted": slotted,
          "unslotted": unslotted, "day_headers": day_headers,
          "week": week, "week_label": label, "scope_cid": channel,
+         "view": "list" if view == "list" else "grid", "flash": flash,
+         # Same rows the Operations publish tab used to show — one implementation, one place.
+         "publish_rows": _ops_publish_rows(db, user.id) if view == "list" else None,
          "scope_channel": db.get(Channel, channel) if channel else None},
     )
 
 
 # ── Real-Time Task Logs ──────────────────────────────────────────────────────
-@app.get("/tasks", response_class=HTMLResponse)
-def tasks_page(request: Request, user: CurrentUser, db: DbDep,
-               campaign: int | None = None, channel: int | None = None):
-    scope = None
-    if campaign:  # drill-down scope from a campaign
-        scope = db.get(Campaign, campaign)
-        if scope is not None and scope.user_id != user.id:
-            scope = None
-    scope_channel = None
-    if channel:  # scope the live feed to one channel (its api/tasks poll is filtered server-side)
-        scope_channel = db.get(Channel, channel)
-        if scope_channel is not None and scope_channel.user_id != user.id:
-            scope_channel = None
-    return templates.TemplateResponse(
-        request, "tasks.html",
-        {"request": request, "user": user, "nav": "tasks",
-         "scope_campaign": scope, "scope_channel": scope_channel,
-         "worker_ok": task_queue.worker_alive(),  # F3: surface a dead worker unmistakably
-         "stage_counts": _episode_stage_counts(db, user, campaign=campaign, channel=channel)})
+@app.get("/tasks")
+def tasks_redirect(campaign: int | None = None, channel: int | None = None):
+    """Gone: the render log is now the Rendering filter of the one episode list (ADR-065).
+
+    It used to be a second table over the same episodes — its own layout, its own search grammar and
+    its own status words ("Pending Queue" where the rest of the app said "Queued") — reached from
+    chips that looked like filters. A permanent redirect keeps every old link and bookmark working.
+    `/api/tasks` is unchanged: it is still the data source, now for the live rows inside that list."""
+    scope = _query_string(status="rendering", campaign=campaign, channel=channel)
+    return RedirectResponse("/episodes?" + scope, status_code=301)
 
 
 _TASKS_PER_PAGE = 25
 
 
 @app.get("/api/tasks")
-def api_tasks(user: CurrentUser, db: DbDep,
-              page: int = 1, q: str = "", campaign: int | None = None, channel: int | None = None):
+def api_tasks(user: CurrentUser, db: DbDep, page: int = 1, q: str = "",
+              campaign: int | None = None, channel: int | None = None, live: bool = False):
     # Full task history, newest first, paginated — page 1 carries the live/active jobs. Scope
     # (?campaign / ?channel) and search (?q) run in SQL so they span ALL history, not just the page.
+    #
+    # `live=1` narrows to episodes still in a working stage (ADR-065). The episode table polls that:
+    # a rendering episode can sit behind hundreds of published ones, so paging the history to find it
+    # was both wasteful and unreliable.
     base = select(Task).where(Task.user_id == user.id)
+    if live:
+        base = base.where(Task.status.in_(_WORKING_STATUSES))
     if campaign:
         base = base.where(Task.campaign_id == campaign)
     if channel:  # scope by the episode's campaign's channel
@@ -2356,7 +2662,7 @@ def api_tasks(user: CurrentUser, db: DbDep,
             "status": t.status.value, "progress": round(live or t.progress_pct, 1),
             "error": t.error_message, "published_url": t.published_url,
             "duration_s": duration_s, "retry_count": t.retry_count,
-            "can_retry": t.status == TaskStatus.FAILED,
+            "can_retry": t.status in (TaskStatus.FAILED, TaskStatus.CANCELLED),
             "updated_at": t.updated_at.isoformat() if t.updated_at else None,
         })
     return {"tasks": out, "page": page, "pages": pages, "total": total}
@@ -2371,35 +2677,72 @@ def api_summary(user: CurrentUser, db: DbDep):
     active = db.scalar(
         select(func.count()).select_from(Campaign).where(
             Campaign.user_id == user.id, Campaign.status == CampaignStatus.active)) or 0
-    return {"health": _system_health(db, user), "counts": _task_counts(db, user.id),
+    counts = _task_counts(db, user.id)
+    return {"health": _system_health(db, user), "counts": counts,
             "channels": channels, "active_campaigns": active,
-            "autopilot_proposed": _autopilot_proposed_count(db, user.id)}
+            "autopilot_proposed": _autopilot_proposed_count(db, user.id),
+            # Every badge renders THIS number — see `_attention_count` (ADR-064).
+            "attention": _attention_count(db, user.id, counts)}
+
+
+def _fold(s: str) -> str:
+    """Lowercase and strip Vietnamese diacritics for accent-insensitive matching (ADR-068).
+
+    Titles here are routinely Vietnamese ("Lịch sử Việt Nam") and are routinely *typed* without
+    diacritics, because that is how people type on a phone. A plain `ilike` matched neither direction,
+    so the palette looked broken on exactly the content this box was built for. `đ` has no combining
+    form, so it is mapped by hand."""
+    import unicodedata
+
+    flat = unicodedata.normalize("NFD", (s or "").lower().replace("đ", "d"))
+    return "".join(c for c in flat if not unicodedata.combining(c))
+
+
+# "ep 3", "Ep.3", "episode 3", "tập 3" — how an operator actually refers to an episode. The bare
+# number was the only thing that used to work.
+_EP_QUERY = re.compile(r"^(?:ep|eps|episode|tap)\s*[.#·:-]?\s*(\d{1,6})$")
 
 
 @app.get("/api/search")
 def api_search(user: CurrentUser, db: DbDep, q: str = ""):
     """One read-only search across the whole workspace (channels, campaigns, episodes) for the ⌘K
-    palette — so 'find that thing' is one box, not 'which page do I search on?'. Tenant-scoped."""
+    palette — so 'find that thing' is one box, not 'which page do I search on?'. Tenant-scoped.
+
+    Names are matched accent-insensitively (`_fold`) in Python rather than by SQL `ilike`: SQLite has
+    no unaccent, and a solo box has tens of channels/campaigns, not thousands. Episodes stay in SQL —
+    that table does grow — and are reachable by number ("ep 3") or by synopsis text."""
     q = q.strip()
     if len(q) < 2:
         return {"results": []}
+    needle = _fold(q)
     like = f"%{q}%"
     results: list[dict] = []
-    for c in db.scalars(select(Channel).where(
-            Channel.user_id == user.id, Channel.channel_name.ilike(like)).limit(5)):
-        results.append({"type": "Channel", "label": c.channel_name,
-                        "sub": c.platform.value, "href": f"/campaigns?channel={c.id}"})
-    for c in db.scalars(select(Campaign).where(
-            Campaign.user_id == user.id, Campaign.topic_name.ilike(like))
-            .order_by(Campaign.id.desc()).limit(6)):
-        results.append({"type": "Campaign", "label": c.topic_name,
-                        "sub": c.status.value, "href": f"/campaigns/{c.id}"})
-    camp_names = {c.id: c.topic_name for c in db.scalars(
-        select(Campaign).where(Campaign.user_id == user.id))}
-    for t in db.scalars(select(Task).where(
-            Task.user_id == user.id,
-            or_(Task.synopsis.ilike(like), cast(Task.episode_number, String).ilike(like)))
-            .order_by(Task.id.desc()).limit(8)):
+    for c in db.scalars(select(Channel).where(Channel.user_id == user.id)):
+        if needle in _fold(c.channel_name):
+            results.append({"type": "Channel", "label": c.channel_name,
+                            "sub": c.platform.value, "href": f"/campaigns?channel={c.id}"})
+        if len(results) >= 5:
+            break
+    campaigns = list(db.scalars(select(Campaign).where(Campaign.user_id == user.id)
+                                .order_by(Campaign.id.desc())))
+    camp_names = {c.id: c.topic_name for c in campaigns}
+    hits = 0
+    for c in campaigns:
+        if needle in _fold(c.topic_name):
+            results.append({"type": "Campaign", "label": c.topic_name,
+                            "sub": c.status.value, "href": f"/campaigns/{c.id}"})
+            hits += 1
+            if hits >= 6:
+                break
+    ep_match = _EP_QUERY.match(needle)
+    ep_no = int(ep_match.group(1)) if ep_match else None
+    where = [Task.synopsis.ilike(like)]
+    if ep_no is not None:
+        where.append(Task.episode_number == ep_no)
+    else:
+        where.append(cast(Task.episode_number, String).ilike(like))
+    for t in db.scalars(select(Task).where(Task.user_id == user.id, or_(*where))
+                        .order_by(Task.id.desc()).limit(8)):
         topic = camp_names.get(t.campaign_id, f"C{t.campaign_id}")
         label = f"Ep {t.episode_number} · {topic}"
         results.append({"type": "Episode", "label": label,
@@ -2417,8 +2760,9 @@ def retry_task(task_id: int, user: CurrentUser, db: DbDep, return_to: str = Form
     task = db.get(Task, task_id)
     if task is None or task.user_id != user.id:
         raise HTTPException(404, "Task not found")
-    if task.status != TaskStatus.FAILED:
-        raise HTTPException(400, "Only failed tasks can be retried")
+    # CANCELLED is retryable too: cancelling is a pause the operator can undo (ADR-064).
+    if task.status not in (TaskStatus.FAILED, TaskStatus.CANCELLED):
+        raise HTTPException(400, "Only failed or cancelled episodes can be retried")
     task.error_message = None
     task.retry_count += 1
     task.progress_pct = 0
@@ -2447,7 +2791,7 @@ def retry_task(task_id: int, user: CurrentUser, db: DbDep, return_to: str = Form
 # operator intervene from the browser instead of SSHing into the box (ADR-058). Everything here
 # reads live queue/worker state, so every lookup fails soft: a dead Redis renders an empty,
 # explained page rather than a 500.
-_OPS_TABS = ("queue", "worker", "publish")
+_OPS_TABS = ("queue", "worker")
 
 
 def _ops_job_rows(db, user_id: int) -> tuple[list[dict], int]:
@@ -2580,14 +2924,22 @@ def _ops_publish_rows(db, user_id: int) -> list[dict]:
 @app.get("/operations", response_class=HTMLResponse)
 def operations_page(request: Request, user: CurrentUser, db: DbDep, tab: str = "queue",
                     flash: str = ""):
+    # The publish queue moved to the Calendar's list view (ADR-067): two pages answered "what
+    # publishes when" and disagreed. Old links keep working.
+    if tab == "publish":
+        return RedirectResponse("/calendar?view=list", status_code=301)
     tab = tab if tab in _OPS_TABS else "queue"
     ctx = {"request": request, "user": user, "nav": "operations", "tab": tab, "flash": flash,
            "worker": _ops_worker_card(db, user.id)}
     if tab == "queue":
         ctx["job_rows"], ctx["publish_queued"] = _ops_job_rows(db, user.id)
-    elif tab == "publish":
-        ctx["publish_rows"] = _ops_publish_rows(db, user.id)
     return templates.TemplateResponse(request, "operations.html", ctx)
+
+
+def _calendar_redirect(flash: str = "") -> RedirectResponse:
+    """Publish-time actions land back on the one scheduling surface (ADR-067)."""
+    return RedirectResponse("/calendar?view=list" + (f"&flash={flash}" if flash else ""),
+                            status_code=303)
 
 
 def _ops_redirect(tab: str, flash: str = "") -> RedirectResponse:
@@ -2619,12 +2971,13 @@ def ops_move_job_front(job_id: str, user: CurrentUser, db: DbDep):
 
 @app.post("/operations/jobs/{job_id}/cancel")
 def ops_cancel_job(job_id: str, user: CurrentUser, db: DbDep):
-    """Drop a queued render. The Task is marked FAILED (not deleted) so it stays visible and the
-    normal Retry button can put it back — cancelling is a pause, not a delete."""
+    """Drop a queued render. The Task becomes CANCELLED — not deleted, and deliberately NOT failed
+    (ADR-064): a choice the operator made must not inflate the failure rate, raise an alert, or be
+    auto-retried behind their back. Retry still works whenever they want it back."""
     task = _owned_queued_task(db, user.id, job_id)
     if not task_queue.cancel_job(job_id):
         return _ops_redirect("queue", "gone")
-    task.status = TaskStatus.FAILED
+    task.status = TaskStatus.CANCELLED
     task.finished_at = datetime.utcnow()
     task.error_message = "Cancelled from the Operations page before it started. Use Retry to queue it again."
     task_queue.clear_progress(task.id)
@@ -2670,18 +3023,18 @@ def ops_reschedule(db: DbDep, item=Depends(get_owned_buffer_item), publish_at: s
     if not raw:
         item.publish_at = None
         db.commit()
-        return _ops_redirect("publish", "resched_cleared")
+        return _calendar_redirect("resched_cleared")
     try:
         naive_local = datetime.fromisoformat(raw)
     except ValueError:
-        return _ops_redirect("publish", "resched_bad")
+        return _calendar_redirect("resched_bad")
     from zoneinfo import ZoneInfo
 
     campaign = db.get(Campaign, item.campaign_id)
     item.publish_at = (naive_local.replace(tzinfo=_campaign_tz(campaign))
                        .astimezone(ZoneInfo("UTC")).replace(tzinfo=None))
     db.commit()
-    return _ops_redirect("publish", "rescheduled")
+    return _calendar_redirect("rescheduled")
 
 
 # ── Cross-channel alert feed (the header bell) ────────────────────────────────
@@ -2734,6 +3087,37 @@ def _infra_alerts(db, user) -> list[dict]:
     return out
 
 
+def _credential_alerts(db, user) -> list[dict]:
+    """An ACTIVE campaign whose required API keys are missing (ADR-068).
+
+    Nothing said this before: a first-time operator could create and start a campaign with no keys at
+    all, watch it queue three episodes, and read "All clear" on the dashboard while every render was
+    doomed. The keys are checked per campaign because the requirement differs — Studio/quote campaigns
+    draw their visuals and need no Pexels key, stock-footage campaigns do."""
+    active = db.scalars(select(Campaign).where(
+        Campaign.user_id == user.id, Campaign.status == CampaignStatus.active)).all()
+    if not active:
+        return []
+    has_gemini = bool(user.gemini_api_key or settings.GEMINI_API_KEY)
+    has_pexels = bool(user.pexels_api_key or settings.PEXELS_API_KEY)
+    needs_pexels = [c for c in active
+                    if (c.config_json or {}).get("visual_source") != "studio"
+                    and (c.config_json or {}).get("content_style") != "quote"]
+    out = []
+    if not has_gemini:
+        out.append(_alert("red", "missing-gemini",
+                          f"No Gemini API key — every render for your {len(active)} active "
+                          f"campaign{'s' if len(active) != 1 else ''} will fail. It is free to get.",
+                          href="/credentials", action="Add key"))
+    if needs_pexels and not has_pexels:
+        out.append(_alert("red", "missing-pexels",
+                          f"No Pexels API key — {len(needs_pexels)} active campaign"
+                          f"{'s' if len(needs_pexels) != 1 else ''} use stock footage and cannot "
+                          "render without it. It is free to get.",
+                          href="/credentials", action="Add key"))
+    return out
+
+
 def _work_alerts(db, user) -> list[dict]:
     """Things that need a human: failed episodes, a campaign the breaker stopped, review, proposals."""
     campaigns = {c.id: c for c in db.scalars(
@@ -2752,11 +3136,13 @@ def _work_alerts(db, user) -> list[dict]:
             .limit(_ALERT_FAILED_LIMIT)).all():
         campaign = campaigns.get(task.campaign_id)
         chan, camp = names(campaign)
-        # The stack trace's LAST line is the actual error; the rest is noise in a one-line alert.
-        # A task can legitimately carry no message (an old row, a cleared retry) — say so rather than
-        # rendering "Ep 7 failed — failed".
+        # Prefer the plain-language cause the episode page shows, so one failure reads the same
+        # everywhere. Falling back to the stack trace's LAST line: that is the actual error, the rest
+        # is noise in a one-line alert. A task can legitimately carry no message (an old row, a
+        # cleared retry) — say so rather than rendering "Ep 7 failed — failed".
         lines = (task.error_message or "").strip().splitlines()
-        reason = lines[-1][:120] if lines else "no error recorded"
+        diag = _diagnose_failure(task.error_message)
+        reason = diag["cause"] if diag else (lines[-1][:120] if lines else "no error recorded")
         out.append(_alert("red", f"task-failed:{task.id}", f"Ep {task.episode_number} failed — {reason}",
                           channel=chan, campaign=camp, href=f"/episodes/{task.id}", action="Open",
                           at=task.finished_at or task.updated_at))
@@ -2837,7 +3223,8 @@ def _alerts(db, user) -> list[dict]:
     """The whole feed, most urgent first. Fail-soft per source: one broken query must not empty the
     bell, because an empty bell reads as "everything is fine"."""
     rows: list[dict] = []
-    for source in (_infra_alerts, _work_alerts, _schedule_alerts, _success_alerts):
+    for source in (_infra_alerts, _credential_alerts, _work_alerts, _schedule_alerts,
+                   _success_alerts):
         try:
             rows += source(db, user)
         except Exception:  # noqa: BLE001
@@ -2852,6 +3239,10 @@ def api_alerts(user: CurrentUser, db: DbDep):
     disagree with the list length."""
     rows = _alerts(db, user)
     return {"alerts": rows,
+            # The badge number is the SHARED attention count, not this feed's row count: the panel
+            # groups backlogs into one row, so counting rows produced a number that disagreed with
+            # every other badge for the same facts (ADR-064).
+            "attention": _attention_count(db, user.id),
             "actionable": sum(1 for a in rows if a["level"] in ("red", "amber")),
             "worst": ("red" if any(a["level"] == "red" for a in rows)
                       else "amber" if any(a["level"] == "amber" for a in rows) else "")}

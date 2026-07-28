@@ -276,7 +276,10 @@ details.disclosure > summary > .sum { flex: 1; min-width: 0; display: flex; flex
   border: 1px solid transparent; white-space: nowrap; }
 .pill::before { content: ""; width: 6px; height: 6px; border-radius: var(--radius-round);
   background: currentColor; flex-shrink: 0; }
-.pill.pending, .pill.PENDING_QUEUE, .pill.expired { background: var(--st-pending-bg); color: var(--st-pending); border-color: var(--st-pending-bd); }
+/* CANCELLED reads neutral-grey like "pending", NOT red: an operator's own decision is not a fault
+   (ADR-064), and colouring it red is what made the failure rate look like a crisis. */
+.pill.pending, .pill.PENDING_QUEUE, .pill.expired,
+.pill.cancelled, .pill.CANCELLED { background: var(--st-pending-bg); color: var(--st-pending); border-color: var(--st-pending-bd); }
 .pill.active, .pill.RENDERING, .pill.AI_GENERATION, .pill.PUBLISHING, .pill.AUDIO_SYNCED { background: var(--st-working-bg); color: var(--st-working); border-color: var(--st-working-bd); }
 .pill.completed, .pill.COMPLETED { background: var(--st-success-bg); color: var(--st-success); border-color: var(--st-success-bd); }
 .pill.failed, .pill.FAILED { background: var(--st-failed-bg); color: var(--st-failed); border-color: var(--st-failed-bd); }
@@ -290,6 +293,8 @@ details.disclosure > summary > .sum { flex: 1; min-width: 0; display: flex; flex
   border: 1px solid var(--border); border-radius: var(--radius); padding: var(--sp-2) var(--sp-3);
   margin-bottom: var(--sp-5); font-size: var(--fs-sm); color: var(--muted); box-shadow: var(--shadow-1); }
 .health.degraded { border-color: var(--st-failed-bd); background: var(--st-failed-bg); }
+/* Sits tight under the strip it explains (was an inline style on the element). */
+.degraded-note { margin: calc(-1 * var(--sp-3)) 0 var(--sp-4); }
 .hitem { display: inline-flex; align-items: center; gap: 7px; padding: 6px 10px;
   border-radius: var(--radius-sm); }
 .health b { color: var(--text); }
@@ -306,9 +311,12 @@ details.disclosure > summary > .sum { flex: 1; min-width: 0; display: flex; flex
 .meter.warn > span { background: var(--st-review); }
 .meter.crit > span { background: var(--st-failed); }
 
+/* Banners are PROSE. As a flex container every inline child (<b>, a link, a bare text node) became
+   its own flex item, so a sentence rendered as narrow side-by-side columns — invisible on a wide
+   screen, unreadable at 375px. `display: block` lets the sentence simply wrap. */
 .banner { border-radius: var(--radius); padding: var(--sp-3) var(--sp-4); margin-bottom: var(--sp-4);
-  font-size: var(--fs-sm); border: 1px solid var(--border); background: var(--surface); display: flex;
-  align-items: flex-start; gap: var(--sp-2); box-shadow: var(--shadow-1); }
+  font-size: var(--fs-sm); border: 1px solid var(--border); background: var(--surface); display: block;
+  box-shadow: var(--shadow-1); line-height: 1.5; }
 .banner a { font-weight: var(--fw-semibold); margin-left: 4px; }
 .banner.danger { background: var(--st-failed-bg); border-color: var(--st-failed-bd); color: var(--st-failed); }
 .banner.info { background: var(--st-review-bg); border-color: var(--st-review-bd); color: var(--st-review); }
@@ -405,6 +413,16 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
   display: inline-flex; align-items: center; justify-content: center; font-size: var(--fs-xs);
   background: var(--surface-2); color: var(--muted); border: 1px solid var(--border); }
 .steps .tick.done { background: var(--st-success-bg); color: var(--st-success); border-color: var(--st-success-bd); }
+/* The same checklist as a first-run card: full width, one explanation per step, and a CTA on the
+   step you are actually on (the empty-state variant above stays narrow and centred). */
+.err-page { padding: var(--sp-10) var(--sp-4); }
+.setup { border-color: var(--primary-weak); }
+.setup .steps { max-width: none; margin: 0; }
+.setup .steps li { align-items: flex-start; gap: var(--sp-3); padding: var(--sp-3) 0;
+  border-top: 1px solid var(--border); }
+.setup .steps li:first-child { border-top: 0; }
+.setup .steps .tick { margin-top: 1px; }
+.setup .steps .meta { margin-top: 2px; }
 .skeleton { background: linear-gradient(90deg, var(--surface-2) 25%, var(--surface-3) 37%, var(--surface-2) 63%);
   background-size: 400% 100%; animation: sk 1.4s ease infinite; border-radius: var(--radius-sm); }
 .sk-line { height: 14px; margin: var(--sp-2) 0; }
@@ -423,6 +441,10 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 .text-bad { color: var(--st-failed); }
 .row-actions.center { justify-content: center; }
 .mono { font-family: var(--font-mono); }
+/* Raw error text: monospace, but it must wrap — a long provider URL or stack line would otherwise
+   stretch the card and scroll the whole page sideways on a phone. */
+.mono-wrap { font-family: var(--font-mono); font-size: var(--fs-xs); overflow-wrap: anywhere;
+  white-space: pre-wrap; }
 .nowrap { white-space: nowrap; }
 
 /* ── 17. Auth (login page + sidebar session chip) ──────────────────────────── */
@@ -616,8 +638,13 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
   background: var(--surface); color: var(--st-success); border: 1px solid var(--st-success-bd);
   display: inline-flex; align-items: center; justify-content: center; font-weight: var(--fw-bold); }
 
-/* Factory scorecard (dashboard trajectory) */
+/* Factory card cells (dashboard). Two columns even on a phone: six one-per-row cells were the
+   biggest remaining block of dashboard scrolling, and these numbers are short enough to pair up. */
 .scorecard { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--sp-5); }
+@media (max-width: 480px) {
+  .scorecard { grid-template-columns: 1fr 1fr; gap: var(--sp-4) var(--sp-3); }
+  .sc-cell .n { font-size: var(--fs-lg); }
+}
 .sc-cell .l { color: var(--muted); font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .4px; }
 .sc-cell .n { font-size: var(--fs-xl); font-weight: var(--fw-bold); margin-top: 4px; }
 .sc-cell .n.muted { color: var(--muted); }
@@ -706,7 +733,7 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 
 /* Pagination controls */
 .pager { display: flex; align-items: center; justify-content: center; gap: var(--sp-4); margin-top: var(--sp-6); }
-.pager:empty { display: none; }  /* the JS-driven Task Logs pager renders empty on a single page */
+.pager:empty { display: none; }  /* a single-page pager renders empty */
 .pager-off { opacity: .4; pointer-events: none; }
 
 /* Search box */
@@ -735,6 +762,27 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
     text-transform: uppercase; letter-spacing: .4px; font-weight: var(--fw-semibold); flex-shrink: 0; }
   .stack-table tbody td:empty { display: none; }
   .stack-table .progress { min-width: 100px; }
+
+  /* The episode list is the one long list in the app, so it gets a denser mobile row than the
+     generic label-per-field stacking: two lines instead of six (ADR-065). 38 episodes went from
+     ~8.9 phone screens of scrolling to about a third of that — morning triage is meant to be
+     seeing, not scrolling. */
+  .ep-table thead { display: none; }
+  .ep-table tbody tr { display: grid; grid-template-columns: 1fr auto; gap: 2px var(--sp-3);
+    align-items: center; margin: 0; padding: var(--sp-2) 0; background: none;
+    border: none; border-bottom: 1px solid var(--border); border-radius: 0; }
+  .ep-table tbody td { display: block; border: none; padding: 0; }
+  .ep-table tbody td::before { display: none; }          /* the values speak for themselves here */
+  .ep-table tbody td[data-label="Episode"] { grid-column: 1; grid-row: 1; }
+  .ep-table tbody td[data-label="Episode"] a { display: inline-block; padding: 5px 0; }
+  .ep-table tbody td[data-label="Stage"] { grid-column: 2; grid-row: 1; text-align: right; }
+  .ep-table tbody td[data-label="Campaign"] { grid-column: 1; grid-row: 2; font-size: var(--fs-xs);
+    color: var(--muted); }
+  .ep-table tbody td[data-label="Updated"] { grid-column: 2; grid-row: 2; text-align: right; }
+  /* The episode title in column 1 is already the link — a second "Open →" button is dead weight. */
+  .ep-table tbody td:last-child { display: none; }
+  .ep-table tbody td[data-label="Episode"] .meta,
+  .ep-table tbody td[data-label="Campaign"] .meta { display: inline; }
 }
 
 @media (max-width: 900px) {
@@ -803,11 +851,19 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
   .tabbar .ico { font-size: 18px; }
   .tabbar .nav-badge { position: absolute; top: 8px; left: 55%; margin: 0; }
 
-  /* Bigger tap targets */
-  .btn { min-height: 44px; }
-  .btn.sm { min-height: 40px; }
+  /* Bigger tap targets. Buttons, inputs and tab strips get the full 44px: row actions ("↻ Retry",
+     "⚡ Now", "Approve") are all `.btn.sm` and sat at 40px, and the tab strips were nearer 30px.
+     Filter chips stop at 40px on purpose — eight of them wrap to three rows, and the extra 4px each
+     would cost a chunk of the first screen on the list pages for a control that is already easy to
+     hit horizontally. */
+  .btn, .btn.sm { min-height: 44px; }
   input, select, textarea { min-height: 44px; font-size: var(--fs-md); }
-  input[type="checkbox"], input[type="radio"], input[type="range"] { min-height: 0; }
+  input[type="checkbox"], input[type="radio"] { min-height: 0; width: 20px; height: 20px; }
+  input[type="range"] { min-height: 0; }
+  .icon-btn, .nav-toggle { width: 44px; height: 44px; }
+  .chip, .chip.sm { min-height: 40px; display: inline-flex; align-items: center; }
+  .tab-btn, .hub-tab { min-height: 44px; display: inline-flex; align-items: center; }
+  .steps .tick { width: 26px; height: 26px; }
 
   .savebar { border-radius: var(--radius) var(--radius) 0 0; margin-left: calc(-1 * var(--main-pad));
     margin-right: calc(-1 * var(--main-pad));
@@ -820,3 +876,20 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
 }
+
+/* Scope switcher, disabled on the whole-factory Dashboard (ADR-066) — visibly inert beats silently
+   doing nothing, which is what selecting a channel there used to do. */
+.scope-switcher:disabled { opacity: .55; cursor: not-allowed; }
+.scope-off-note { margin: var(--sp-1) var(--sp-1) 0; font-size: 11px; color: var(--text-subtle);
+  line-height: 1.35; }
+
+/* An operator-set publish time on the week grid (ADR-067) — distinct from a scheduled slot, because
+   it ignores the slots entirely. Rescheduled episodes used to vanish from this grid completely. */
+.slot.own { color: var(--st-review); font-weight: var(--fw-medium); }
+.slot-key.own { color: var(--st-review); }
+/* Grid/List segmented control in the page head. */
+.hub-tabs.seg { border-bottom: none; margin-bottom: 0; }
+
+/* The Ready column carries a count plus a note ("incl. N at your own time"), so give it room —
+   it was wrapping to four lines. */
+.cal-table .col-runway, .cal-table td:nth-child(2) { min-width: 108px; }

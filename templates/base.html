@@ -45,11 +45,17 @@
     <aside class="sidebar" id="sidebar">
       <div class="brand"><span class="dot"></span> AI Video Factory</div>
       {% if _channels %}
-      <select class="scope-switcher" id="scope-switcher" aria-label="Filter everything to one channel"
-              title="Scope the dashboard and lists to one channel">
+      {# The Dashboard is deliberately factory-wide (its cards say "every channel"), so the switcher
+         is disabled there rather than pretending to filter it — selecting a channel used to change
+         nothing on this page while every number still showed the whole factory (ADR-066). #}
+      {% set _scope_off = nav == 'dashboard' %}
+      <select class="scope-switcher" id="scope-switcher" {{ 'disabled' if _scope_off }}
+              aria-label="Filter the lists to one channel"
+              title="{{ 'The Dashboard always shows the whole factory — open Campaigns or Episodes to scope to one channel' if _scope_off else 'Scope the lists to one channel' }}">
         <option value="">🌐 All channels</option>
         {% for c in _channels %}<option value="{{ c.id }}" {{ 'selected' if scope_cid == c.id|string }}>{{ c.name }}</option>{% endfor %}
       </select>
+      {% if _scope_off %}<p class="scope-off-note">Whole factory · scope Campaigns or Episodes for one channel</p>{% endif %}
       {% endif %}
       {# Six primary destinations. Lenses on the same objects live INSIDE their owner: the render
          log + Review queue are facets of Episodes; the Calendar is a view of Campaigns — so the

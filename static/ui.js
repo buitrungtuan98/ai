@@ -39,8 +39,10 @@
 
   // ── Accessible confirm dialog (replaces native confirm()) ─────────────────
   // Pass `typeToMatch` to require the user to type an exact string (e.g. a channel name)
-  // before Confirm enables — used for the most destructive, cascading actions.
-  function confirmDialog(message, typeToMatch) {
+  // before Confirm enables — used for the most destructive, cascading actions. `verb` labels the
+  // action button with what it does ("Publish", "Delete") instead of a generic "Confirm": the button
+  // is what gets read and clicked, so it should be the thing that says what is about to happen.
+  function confirmDialog(message, typeToMatch, verb) {
     var modal = document.getElementById("modal");
     var msgEl = document.getElementById("modal-msg");
     var okBtn = document.getElementById("modal-ok");
@@ -49,6 +51,7 @@
     if (!modal || !okBtn) return Promise.resolve(window.confirm(message));   // graceful fallback
     var needType = !!typeToMatch;
     msgEl.textContent = message || "Are you sure?";
+    okBtn.textContent = verb || "Confirm";
     if (input) {
       input.hidden = !needType;
       input.value = "";
@@ -83,15 +86,17 @@
     });
   }
 
-  // Any <form data-confirm="…"> (optionally data-confirm-type="…") is gated by the styled dialog.
+  // Any <form data-confirm="…"> (optionally data-confirm-type="…", data-confirm-verb="…") is gated
+  // by the styled dialog.
   function initConfirmForms() {
     document.querySelectorAll("form[data-confirm]").forEach(function (form) {
       form.addEventListener("submit", function (e) {
         if (form.dataset.confirmed === "1") return;
         e.preventDefault();
-        confirmDialog(form.dataset.confirm, form.dataset.confirmType).then(function (ok) {
-          if (ok) { form.dataset.confirmed = "1"; form.submit(); }
-        });
+        confirmDialog(form.dataset.confirm, form.dataset.confirmType, form.dataset.confirmVerb)
+          .then(function (ok) {
+            if (ok) { form.dataset.confirmed = "1"; form.submit(); }
+          });
       });
     });
   }
@@ -182,7 +187,6 @@
     if (rd) rd.className = "dot2 " + (h.redis ? "ok" : "bad");
     if (rl) rl.textContent = h.redis ? "connected" : "down";
     setText("hv-queue", h.queue_depth == null ? "—" : h.queue_depth);
-    setText("hv-buffer", h.buffer_ready);
     setText("hv-disk", h.disk_pct == null ? "—" : h.disk_pct + "%");
   }
   function flashLive() {
@@ -197,17 +201,16 @@
     setBadge("failed", c.failed || 0);
     setBadge("awaiting_review", c.awaiting_review || 0);
     setBadge("autopilot_proposed", d.autopilot_proposed || 0);
-    setBadge("attn", (c.failed || 0) + (c.awaiting_review || 0));
+    // ONE attention number, computed server-side, rendered by every badge that answers "what needs
+    // me" — hamburger, Dashboard rail item, bell and the triage card (ADR-064).
+    setBadge("attn", d.attention || 0);
+    setText("triage-count", d.attention || 0);
     setLive("channels", d.channels);
     setLive("active_campaigns", d.active_campaigns);
     setLive("published", c.published);
     setLive("working", c.working);
     setLive("awaiting_review", c.awaiting_review);
     setLive("failed", c.failed);
-    var bf = document.getElementById("banner-failed");
-    if (bf) bf.hidden = !(c.failed > 0);
-    var br = document.getElementById("banner-review");
-    if (br) br.hidden = !(c.awaiting_review > 0);
     if (d.health) { updateHealth(d.health); setWorkerBadge(d.health); }
     flashLive();
   }
@@ -236,7 +239,9 @@
     var summary = document.getElementById("bell-summary");
     if (!list || !count) return;
     var rows = (data && data.alerts) || [];
-    var n = (data && data.actionable) || 0;
+    // `attention` is the shared count (ADR-064). The panel may GROUP rows ("2 episodes waiting"), so
+    // its row count is not the number to badge — that disagreement is exactly what confused people.
+    var n = (data && data.attention) || 0;
     count.textContent = n > 99 ? "99+" : n;
     count.hidden = n === 0;
     count.className = "bell-count" + (data && data.worst === "amber" ? " amber" : "");
@@ -355,7 +360,7 @@
   // resetting page). The choice is remembered in localStorage so it survives visits to unscoped
   // pages (Dashboard/Channels/Credentials) — on load the remembered channel is reflected in the
   // dropdown and carried onto the scope-aware nav links. An explicit ?channel in the URL always wins.
-  var SCOPED_PATHS = ["/episodes", "/campaigns", "/assets", "/tasks", "/calendar"];
+  var SCOPED_PATHS = ["/episodes", "/campaigns", "/assets", "/calendar"];
   var SCOPE_KEY = "scopeChannel";
 
   function initScopeSwitcher() {
@@ -398,6 +403,55 @@
     }
   }
 
+  // ── One-shot flashes ──────────────────────────────────────────────────────
+  // A flash describes something that just happened ("Publish queued"), so it must not survive a
+  // reload, a Back, or a shared link — those re-displayed a stale success for an action nobody took.
+  // The banner is already rendered server-side; this only rewrites the address bar (no reload).
+  function initFlash() {
+    try {
+      var u = new URL(window.location.href);
+      if (!u.searchParams.has("flash")) return;
+      u.searchParams.delete("flash");
+      u.searchParams.delete("flash_reason");
+      var qs = u.searchParams.toString();
+      window.history.replaceState(null, "", u.pathname + (qs ? "?" + qs : "") + u.hash);
+    } catch (e) { /* no History API — the banner simply repeats on reload */ }
+  }
+
+  // Every destination the palette can jump to, with the words an operator might actually type
+  // (including the Vietnamese ones). Local, so pages answer instantly and keep working even when the
+  // search request fails — and it means ⌘K is a way to *navigate*, not only to find content.
+  var CMD_PAGES = [
+    { label: "Dashboard", href: "/", sub: "overview & triage", keys: "home tong quan bang dieu khien" },
+    { label: "Campaigns", href: "/campaigns", sub: "build & schedule", keys: "chien dich series" },
+    { label: "New campaign", href: "/campaigns/new", sub: "create", keys: "them tao moi chien dich add create" },
+    { label: "Episodes", href: "/episodes", sub: "every video", keys: "tap video render log tasks" },
+    { label: "Review queue", href: "/episodes?status=awaiting_review", sub: "approve videos", keys: "duyet xet approve assets pool" },
+    { label: "Publishing", href: "/calendar", sub: "when each episode goes out", keys: "calendar lich dang schedule" },
+    { label: "Channels", href: "/channels", sub: "YouTube & Facebook", keys: "kenh youtube facebook connect" },
+    { label: "Autopilot", href: "/autopilot", sub: "AI channel manager", keys: "tu dong proposals" },
+    { label: "Operations", href: "/operations", sub: "worker, queue & recovery", keys: "worker queue restart van hanh" },
+    { label: "Credentials", href: "/credentials", sub: "API keys", keys: "keys api gemini pexels khoa" },
+    { label: "Settings", href: "/settings", sub: "defaults & AI budget", keys: "cai dat preferences" }
+  ];
+
+  // Same folding as the server (main.py `_fold`): lowercase, drop Vietnamese diacritics, đ → d — so
+  // "lich dang" finds "Lịch đăng" and "chien dich" finds "Chiến dịch".
+  function fold(s) {
+    return (s || "").toLowerCase().replace(/đ/g, "d")
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  }
+
+  function matchPages(q) {
+    var needle = fold(q);
+    if (!needle) return [];
+    return CMD_PAGES.filter(function (p) {
+      return fold(p.label).indexOf(needle) >= 0 || p.keys.indexOf(needle) >= 0;
+    }).slice(0, 5).map(function (p) {
+      return { type: "Go to", label: p.label, sub: p.sub, href: p.href };
+    });
+  }
+
   // Global search palette (⌘K / Ctrl-K, or "/"): one box across channels/campaigns/episodes.
   function initCmdK() {
     var backdrop = document.getElementById("cmdk");
@@ -409,9 +463,14 @@
     function open() {
       backdrop.hidden = false;
       input.value = "";
-      list.innerHTML = "";
-      items = [];
       sel = -1;
+      // Opening with an empty box lists where you can go, so the palette teaches the app instead of
+      // showing "Type to search…" and leaving the operator to guess what it indexes.
+      render(CMD_PAGES.map(function (p) {
+        return { type: "Go to", label: p.label, sub: p.sub, href: p.href };
+      }));
+      sel = -1;
+      highlight();
       input.focus();
     }
     function close() { backdrop.hidden = true; }
@@ -454,14 +513,17 @@
         list.appendChild(li);
       });
     }
+    // Destinations are matched locally and shown first (instant, and still there if the request
+    // fails); content matches from the server are appended.
     function search() {
       var q = input.value.trim();
-      if (q.length < 2) { render([]); return; }
+      var pages = matchPages(q);
+      if (q.length < 2) { render(pages); return; }
       var mine = ++seq;
       fetch("/api/search?q=" + encodeURIComponent(q), { headers: { "Accept": "application/json" } })
         .then(function (r) { return r.json(); })
-        .then(function (d) { if (mine === seq) render(d.results || []); })
-        .catch(function () { /* transient */ });
+        .then(function (d) { if (mine === seq) render(pages.concat(d.results || [])); })
+        .catch(function () { if (mine === seq) render(pages); });
     }
 
     document.getElementById("cmdk-open") &&
@@ -483,6 +545,7 @@
 
   function init() {
     initTheme();
+    initFlash();
     initNav();
     initScopeSwitcher();
     initCmdK();

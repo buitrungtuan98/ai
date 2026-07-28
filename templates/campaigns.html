@@ -31,7 +31,7 @@
     <p class="meta"><a href="/campaigns?channel={{ c.channel_id }}">{{ channels[c.channel_id].channel_name if c.channel_id in channels else '—' }}</a></p>
     {{ ui.sched_facts(c.config_json) }}
     <div class="flex between mt-sm">
-      <span class="meta">Episode {{ c.current_episode }} / {{ c.total_episodes }}</span>
+      <span class="meta">{{ c.current_episode }} of {{ c.total_episodes }} published</span>
       <span class="meta mono">{{ pct }}%</span>
     </div>
     {{ ui.progress(pct, 'done' if c.status.value == 'completed' else ('work' if c.status.value == 'active' else '')) }}
@@ -49,7 +49,7 @@
         <input type="hidden" name="scope_channel" value="{{ sc }}">
         <button class="btn ghost sm" type="submit">▶ Start</button></form>
       {% endif %}
-      <form method="post" action="/campaigns/{{ c.id }}/delete" data-confirm="Delete “{{ c.topic_name }}” and all its episodes? This can't be undone.">
+      <form method="post" action="/campaigns/{{ c.id }}/delete" data-confirm="Delete “{{ c.topic_name }}” and all its episodes? This can't be undone." data-confirm-verb="Delete campaign">
         <input type="hidden" name="scope_channel" value="{{ sc }}">
         <button class="btn danger sm" type="submit">Delete</button>
       </form>

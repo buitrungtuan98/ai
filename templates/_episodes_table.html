@@ -1,27 +1,36 @@
 {% import "macros.html" as ui %}
-{# Episode list table — shared by the global /episodes list and the campaign-hub Episodes tab.
+{# THE episode table — the one list of episodes in the app (ADR-065), shared by the global /episodes
+   view and the campaign-hub Episodes tab. It replaced a second, differently-shaped table at /tasks.
+   Rows in a working stage carry `data-live-task`, so `ui.js` can move their stage pill and progress
+   bar in place: the live render log is now a filter of this list, not a separate page.
    Context: episodes, camp_by_id, chan_by_id, status_to_stage, status, q, page, pages, total.
    Params (set before include): table_action (base URL for pager, default '/episodes'),
    show_campaign (show the Campaign column, default true), scope_hidden (extra pager params, default {}). #}
 {% set table_action = table_action if table_action is defined else '/episodes' %}
 {% set show_campaign = show_campaign if show_campaign is defined else true %}
 {% set scope_hidden = scope_hidden if scope_hidden is defined else {} %}
+{% set _live = ('PENDING_QUEUE', 'AI_GENERATION', 'AUDIO_SYNCED', 'RENDERING', 'PUBLISHING') %}
 <div class="card">
   <div class="table-wrap">
-    <table class="stack-table">
+    <table class="stack-table ep-table">
       <thead><tr><th>Episode</th>{% if show_campaign %}<th>Campaign</th>{% endif %}<th>Stage</th><th>Updated</th><th></th></tr></thead>
-      <tbody>
+      <tbody id="episode-rows">
         {% for t in episodes %}
         {% set camp = camp_by_id.get(t.campaign_id) %}
         {% set ch = chan_by_id.get(camp.channel_id) if camp else none %}
         {% set stage = status_to_stage.get(t.status.value, t.status.value) %}
-        <tr>
+        <tr {% if t.status.value in _live %}data-live-task="{{ t.id }}"{% endif %}>
           <td data-label="Episode"><a href="/episodes/{{ t.id }}"><b>Ep {{ t.episode_number }}</b></a>
             {% if t.synopsis %}<div class="meta">{{ t.synopsis[:70] }}</div>{% endif %}</td>
           {% if show_campaign %}<td data-label="Campaign">{{ camp.topic_name if camp else 'C' ~ t.campaign_id }}
             {% if ch %}<div class="meta">{{ ch.channel_name }}</div>{% endif %}</td>{% endif %}
-          <td data-label="Stage">{{ ui.pill(t.status.value, stage.replace('_',' ')|title) }}
-            {% if t.status.value in ('AI_GENERATION','AUDIO_SYNCED','RENDERING') and t.progress_pct %}<span class="meta">{{ t.progress_pct }}%</span>{% endif %}</td>
+          <td data-label="Stage">
+            <span data-live="pill">{{ ui.pill(t.status.value, stage.replace('_',' ')|title) }}</span>
+            {# The bar only appears for stages that actually have progress — a 0% bar on a published
+               episode was pure noise on the page this replaces. #}
+            <span data-live="progress">{% if t.status.value in ('AI_GENERATION','AUDIO_SYNCED','RENDERING') %}
+              <span class="meta ep-pct">{{ t.progress_pct }}%</span>{% endif %}</span>
+            {% if t.retry_count %}<span class="meta">· retry {{ t.retry_count }}</span>{% endif %}</td>
           <td data-label="Updated" class="meta"><span {% if t.updated_at %}data-reltime="{{ t.updated_at.isoformat() }}Z"{% endif %}>{{ t.updated_at.strftime('%Y-%m-%d %H:%M') if t.updated_at else '—' }}</span></td>
           <td data-label=""><a class="btn ghost sm" href="/episodes/{{ t.id }}">Open →</a></td>
         </tr>
