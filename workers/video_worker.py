@@ -528,8 +528,10 @@ def render_task(task_id: int) -> None:
             custom_system_prompt=cfg.get("system_prompt"),
             persona=cfg.get("persona"),
             style_examples=cfg.get("style_examples"),
-            catchphrase_open=cfg.get("catchphrase_open"),
-            catchphrase_close=cfg.get("catchphrase_close"),
+            # Per-campaign on/off: the text stays saved, but only applied when its flag is on
+            # (default on for pre-flag campaigns — unchanged behaviour).
+            catchphrase_open=(cfg.get("catchphrase_open") if cfg.get("catchphrase_open_on", True) else None),
+            catchphrase_close=(cfg.get("catchphrase_close") if cfg.get("catchphrase_close_on", True) else None),
             continuity=cfg.get("continuity", "none"),
             previous_synopses=previous,
             playbook=learning.get("playbook"),
