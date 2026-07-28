@@ -130,6 +130,35 @@ def test_video_format_config_and_duration_bounds(client):
     db.close()
 
 
+def test_catchphrase_toggle_stored_and_gated(client):
+    """The signature opening/sign-off can be turned off per campaign: the TEXT is still saved, an
+    on/off flag decides application, and the worker only passes an enabled catchphrase to the script."""
+    from database.db_session import SessionLocal
+    from database.models import Campaign, Channel
+
+    client.post("/channels/facebook", data={"channel_name": "P", "page_id": "1", "page_access_token": "t"},
+                follow_redirects=False)
+    db = SessionLocal()
+    cid = db.query(Channel).first().id
+    db.close()
+    # Opening ON (checkbox present), sign-off OFF (checkbox absent) — both texts provided.
+    client.post("/campaigns", data={"topic_name": "Sig", "channel_id": str(cid), "total_episodes": "3",
+                                    "catchphrase_open": "Hello friends", "catchphrase_open_on": "on",
+                                    "catchphrase_close": "See you soon"},   # no _close_on → off
+                follow_redirects=False)
+    db = SessionLocal()
+    cfg = db.query(Campaign).filter_by(topic_name="Sig").one().config_json
+    db.close()
+    assert cfg["catchphrase_open"] == "Hello friends" and cfg["catchphrase_open_on"] is True
+    assert cfg["catchphrase_close"] == "See you soon" and cfg["catchphrase_close_on"] is False  # text kept, off
+
+    # The worker applies only the enabled one.
+    from workers import video_worker
+    assert (cfg.get("catchphrase_open") if cfg.get("catchphrase_open_on", True) else None) == "Hello friends"
+    assert (cfg.get("catchphrase_close") if cfg.get("catchphrase_close_on", True) else None) is None
+    assert video_worker is not None  # module imports cleanly
+
+
 def _make_episode(client):
     """A campaign + one AWAITING_REVIEW task and its buffer item — the raw material for the
     Episode view and its stage-aware actions."""

@@ -1055,6 +1055,8 @@ def preview_script(
     style_examples: str = Form(""),
     catchphrase_open: str = Form(""),
     catchphrase_close: str = Form(""),
+    catchphrase_open_on: bool = Form(False),
+    catchphrase_close_on: bool = Form(False),
     rate_pct: int = Form(0),
     duration_min_s: str = Form(""),
     duration_max_s: str = Form(""),
@@ -1078,8 +1080,8 @@ def preview_script(
             custom_system_prompt=system_prompt.strip() or None,
             persona=persona.strip() or None,
             style_examples=style_examples.strip() or None,
-            catchphrase_open=catchphrase_open.strip() or None,
-            catchphrase_close=catchphrase_close.strip() or None,
+            catchphrase_open=(catchphrase_open.strip() or None) if catchphrase_open_on else None,
+            catchphrase_close=(catchphrase_close.strip() or None) if catchphrase_close_on else None,
             self_critique=False,  # preview stays cheap: 1 call (2 if the length fix fires)
             duration_min_s=lo if lo and hi else None,
             duration_max_s=hi if lo and hi else None,
@@ -1145,6 +1147,7 @@ def _build_campaign_config(
     watermark_path: str, tint_color: str, tint_opacity: float, mirror: bool,
     persona: str, style_examples: str, catchphrase_open: str, catchphrase_close: str,
     continuity: str, timezone: str,
+    catchphrase_open_on: bool = True, catchphrase_close_on: bool = True,
     motion: str = "on", caption_theme: str = "highlight", self_critique: str = "on",
     script_depth: str = "standard", video_format: str = "short",
     visual_source: str = "stock", visual_style: str = "", title_overlay: str = "off",
@@ -1175,8 +1178,12 @@ def _build_campaign_config(
         # Persona / humanization + series memory (ADR-011)
         "persona": persona or None,
         "style_examples": style_examples or None,
+        # The text is always stored; a per-campaign on/off flag decides whether it's applied — so the
+        # operator can pause a catchphrase without losing it (default on = existing behaviour).
         "catchphrase_open": catchphrase_open or None,
+        "catchphrase_open_on": bool(catchphrase_open_on),
         "catchphrase_close": catchphrase_close or None,
+        "catchphrase_close_on": bool(catchphrase_close_on),
         "continuity": continuity if continuity in ("none", "no_repeat", "serial") else "none",
         # Validate like the profile: a bad zone is dropped to None (server default) rather than
         # silently stored and then misinterpreted as UTC by the scheduler.
@@ -1269,6 +1276,8 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
     style_examples: str = Form(""),
     catchphrase_open: str = Form(""),
     catchphrase_close: str = Form(""),
+    catchphrase_open_on: bool = Form(False),
+    catchphrase_close_on: bool = Form(False),
     continuity: str = Form("none"),
     timezone: str = Form(""),
     motion: str = Form("on"),
@@ -1304,6 +1313,7 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
             tint_color=tint_color, tint_opacity=tint_opacity, mirror=mirror,
             persona=persona, style_examples=style_examples, catchphrase_open=catchphrase_open,
             catchphrase_close=catchphrase_close, continuity=continuity, timezone=timezone,
+            catchphrase_open_on=catchphrase_open_on, catchphrase_close_on=catchphrase_close_on,
             motion=motion, caption_theme=caption_theme, self_critique=self_critique,
             script_depth=script_depth, video_format=video_format,
             visual_source=visual_source, visual_style=visual_style, title_overlay=title_overlay,

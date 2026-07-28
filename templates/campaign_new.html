@@ -177,10 +177,15 @@
         <textarea name="persona" placeholder="Ví dụ: 'Chú Ba' — người miền Tây kể chuyện đêm khuya, giọng thân mật, hay dùng 'nha', 'dữ thần', thỉnh thoảng chọc cười một câu rồi nghiêm lại…">{{ cfg.get('persona') or '' }}</textarea></div>
       <div class="form-row"><label>Style examples — paste 2–3 short samples of the voice you want (your own writing works best)</label>
         <textarea name="style_examples" placeholder="Paste real captions/scripts whose rhythm and vocabulary the AI should imitate…">{{ cfg.get('style_examples') or '' }}</textarea></div>
-      <div class="form-row"><label>Signature opening (fans recognise it)</label>
-        <input name="catchphrase_open" placeholder="Khuya rồi đó… tắt đèn chưa?" value="{{ cfg.get('catchphrase_open') or '' }}"></div>
-      <div class="form-row"><label>Signature sign-off</label>
-        <input name="catchphrase_close" placeholder="Ngủ ngon nha… nếu ngủ được." value="{{ cfg.get('catchphrase_close') or '' }}"></div>
+      <div class="form-row">
+        <label class="check-row"><input type="checkbox" name="catchphrase_open_on" {{ 'checked' if cfg.get('catchphrase_open_on', true) }}> Use signature opening (fans recognise it)</label>
+        <input name="catchphrase_open" placeholder="Khuya rồi đó… tắt đèn chưa?" value="{{ cfg.get('catchphrase_open') or '' }}">
+        <p class="hint">Untick to keep the text saved but stop adding it to this campaign's videos.</p>
+      </div>
+      <div class="form-row">
+        <label class="check-row"><input type="checkbox" name="catchphrase_close_on" {{ 'checked' if cfg.get('catchphrase_close_on', true) }}> Use signature sign-off</label>
+        <input name="catchphrase_close" placeholder="Ngủ ngon nha… nếu ngủ được." value="{{ cfg.get('catchphrase_close') or '' }}">
+      </div>
     </div>
   </div>
 
@@ -500,6 +505,10 @@
           ["topic_name", "language", "system_prompt", "persona", "style_examples",
            "catchphrase_open", "catchphrase_close", "rate_pct", "duration_min_s", "duration_max_s"]
             .forEach(n => { const el = form.elements[n]; if (el) body.set(n, el.value || ""); });
+          // Checkboxes send their CHECKED state (an absent field means off, server-side).
+          ["catchphrase_open_on", "catchphrase_close_on"].forEach(n => {
+            const el = form.elements[n]; if (el && el.checked) body.set(n, "on");
+          });
           const r = await fetch("/campaigns/preview-script", { method: "POST", body });
           const p = await r.json();
           if (!r.ok) throw new Error(p.error || "Preview failed");

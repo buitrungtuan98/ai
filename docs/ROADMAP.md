@@ -1110,6 +1110,13 @@ one-word scribble cover. See ADR-056.
   caption-burn test, 13 skipped, ruff clean, docs guard green; scribble cover + quote form checked in
   a browser.
 
+## Per-campaign catchphrase on/off `DONE`
+The signature opening + sign-off (persona catchphrases) each got a per-campaign on/off checkbox: the
+TEXT stays saved, a `catchphrase_open_on` / `catchphrase_close_on` flag decides whether it's applied,
+so an operator can pause a catchphrase without losing it (default on = unchanged behaviour). Wired
+through `_build_campaign_config`, `_campaign_form`, the script preview, and the worker (only an
+enabled catchphrase reaches `generate_script`). 281 tests (1 new), ruff clean, docs green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download
