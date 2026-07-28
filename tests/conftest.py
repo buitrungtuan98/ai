@@ -32,6 +32,19 @@ def fresh_env():
     Base.metadata.drop_all(engine)
 
 
+@pytest.fixture(autouse=True)
+def no_live_credential_checks(monkeypatch):
+    """The suite runs with no external services (same reason Redis is faked). Adding a Graph call to
+    the Facebook channel save made the suite ~3× slower by dialling out on every test that connects a
+    Page, so the check reports its "could not verify" state here — the path that must not block a save.
+    Tests that care about a verdict monkeypatch `check_facebook_page` themselves, which wins over this.
+    """
+    from services import verification
+
+    monkeypatch.setattr(verification, "check_facebook_page",
+                        lambda page_id, token: (None, "not checked in tests"))
+
+
 @pytest.fixture
 def session():
     from database.db_session import SessionLocal

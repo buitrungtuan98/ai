@@ -107,3 +107,33 @@ def verify_telegram(token: str, chat_id: str | None = None) -> tuple[bool, str]:
     except Exception as exc:  # noqa: BLE001 — the exception text embeds the URL (/bot<token>/); never expose it
         logger.warning("Telegram verification network error: %s", type(exc).__name__)
         return False, "Could not reach Telegram (network error)."
+
+
+def check_facebook_page(page_id: str, token: str) -> tuple[bool | None, str]:
+    """Does this Page id + token actually work? THREE-state on purpose (ADR-068):
+    `True` verified · `False` definitely rejected · `None` could not tell.
+
+    The other checks here answer a Test button, where "couldn't reach it" may as well be a failure.
+    This one gates a save, so the distinction matters: a made-up token must be refused, but a network
+    hiccup must never stop a real operator from connecting their Page. Never raises.
+    """
+    try:
+        import requests
+
+        resp = requests.get(
+            f"https://graph.facebook.com/v20.0/{page_id}",
+            params={"fields": "id,name", "access_token": token}, timeout=TIMEOUT)
+        if resp.status_code == 200 and (resp.json() or {}).get("id"):
+            return True, f"Verified: {(resp.json() or {}).get('name') or page_id}."
+        # Graph answers a bad token or a wrong Page id with 400/403/404 and an explanation.
+        if resp.status_code in (400, 401, 403, 404):
+            detail = ""
+            try:
+                detail = ((resp.json() or {}).get("error") or {}).get("message") or ""
+            except ValueError:
+                pass
+            return False, detail or f"Facebook rejected these details (HTTP {resp.status_code})."
+        return None, f"Facebook answered HTTP {resp.status_code} — could not verify right now."
+    except Exception as exc:  # noqa: BLE001 — the URL carries the token; never surface the raw text
+        logger.warning("Facebook page verification network error: %s", type(exc).__name__)
+        return None, "Could not reach Facebook to verify — saved without checking."

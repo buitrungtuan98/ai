@@ -6,6 +6,31 @@
   <a class="btn" href="/campaigns/new">+ New Campaign</a>
 {% endcall %}
 
+{# ── First-run setup: the three things that make the factory able to work at all. Top of the page
+   until they're done — this used to sit at the very bottom, below a "Factory" card full of dashes,
+   and only while there was no activity at all (ADR-068). ── #}
+{% if not setup.done %}
+<div class="card setup">
+  <div class="card-head"><h3>Finish setting up your factory</h3>
+    <span class="meta">{{ [setup.channels, setup.api_keys, setup.campaigns]|select|list|length }} of 3 done</span></div>
+  <ul class="steps mt-sm">
+    <li><span class="tick {{ 'done' if setup.channels }}">{{ '✓' if setup.channels else '1' }}</span>
+      <div class="grow"><a href="/channels">Connect a channel</a>
+        <div class="meta">A YouTube channel or Facebook Page — every campaign publishes to one.</div></div>
+      {% if setup.next == 'channels' %}<a class="btn sm" href="/channels">Connect →</a>{% endif %}</li>
+    <li><span class="tick {{ 'done' if setup.api_keys }}">{{ '✓' if setup.api_keys else '2' }}</span>
+      <div class="grow"><a href="/credentials">Add your API keys</a>
+        <div class="meta">Gemini writes the scripts, Pexels supplies the footage. Both are free.</div></div>
+      {% if setup.next == 'api_keys' %}<a class="btn sm" href="/credentials">Add keys →</a>{% endif %}</li>
+    <li><span class="tick {{ 'done' if setup.campaigns }}">{{ '✓' if setup.campaigns else '3' }}</span>
+      <div class="grow"><a href="/campaigns/new">Create &amp; start a campaign</a>
+        <div class="meta">Give it a topic and let AI design the rest. Your first one starts in Review
+          mode, so nothing publishes until you approve it.</div></div>
+      {% if setup.next == 'campaigns' %}<a class="btn sm" href="/campaigns/new">Create →</a>{% endif %}</li>
+  </ul>
+</div>
+{% endif %}
+
 {# ── System health strip: is the machine able to work at all? Infra only — CPU and memory moved
    here from a separate card, because "can the box cope?" is the same question as the rest of this
    row (ADR-066). Auto-refreshed by ui.js. ── #}
@@ -60,8 +85,9 @@
     <li>
       <span class="tri-dot failed"></span>
       <div class="grow">
-        <b><a href="/episodes/{{ t.id }}">{{ camp.topic_name if camp else 'C' ~ t.campaign_id }} · Ep {{ t.episode_number }}</a></b> failed
-        <div class="meta">{{ (t.error_message or 'Render failed — open the episode for details.')[:120] }}</div>
+        {% set dg = fail_causes.get(t.id) %}
+        <b><a href="/episodes/{{ t.id }}">{{ camp.topic_name if camp else 'C' ~ t.campaign_id }} · Ep {{ t.episode_number }}</a></b> failed{% if dg %} — {{ dg.cause }}{% endif %}
+        <div class="meta">{{ dg.fix if dg else (t.error_message or 'Render failed — open the episode for details.')[:120] }}</div>
       </div>
       <form class="retry-form" data-task="{{ t.id }}"><button class="btn ghost sm" type="submit">↻ Retry</button></form>
     </li>
@@ -81,8 +107,9 @@
   </ul>
 </div>
 {# Only "all clear" when the machine is healthy AND nothing needs a human — it used to sit directly
-   under a red "factory is degraded" banner, which made every other signal look untrustworthy. #}
-<div class="card allclear" id="allclear-card" {{ '' if not need and not degraded else 'hidden' }}>
+   under a red "factory is degraded" banner, which made every other signal look untrustworthy. It also
+   waits for setup: "nothing needs you" is not what an account with no channel and no keys needs. #}
+<div class="card allclear" id="allclear-card" {{ '' if not need and not degraded and setup.done else 'hidden' }}>
   <span class="ac-ico">✓</span>
   <div><b>All clear — nothing needs you right now.</b>
     <div class="meta">The factory is running on its own. Failed renders and videos awaiting review will surface here.</div></div>
@@ -203,14 +230,12 @@
     </li>
     {% endfor %}
   </ul>
+  {% elif setup.done %}
+  {% call ui.empty('🚀', 'No activity yet', 'Every render, review and publish lands here as it happens. Start a campaign and the first episode begins writing within a minute.', '/campaigns', 'Open campaigns') %}{% endcall %}
   {% else %}
-  {% call ui.empty('🚀', 'Get started in 3 steps', 'Your factory is ready — set it up once and it runs itself.') %}
-    <ul class="steps">
-      <li><span class="tick {{ 'done' if channels }}">{{ '✓' if channels else '1' }}</span> <a href="/channels">Connect a channel</a></li>
-      <li><span class="tick {{ 'done' if user.gemini_api_key and user.pexels_api_key }}">{{ '✓' if user.gemini_api_key and user.pexels_api_key else '2' }}</span> <a href="/credentials">Add your API keys</a></li>
-      <li><span class="tick">3</span> <a href="/campaigns/new">Create &amp; start a campaign</a></li>
-    </ul>
-  {% endcall %}
+  {# The checklist at the top of the page owns first-run guidance — repeating it here was the same
+     three steps twice on one screen (ADR-068). #}
+  {% call ui.empty('🚀', 'No activity yet', 'Finish the setup steps at the top of this page and your first episode starts writing itself.') %}{% endcall %}
   {% endif %}
 </div>
 {% endblock %}

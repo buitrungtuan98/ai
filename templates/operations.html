@@ -73,7 +73,8 @@
                 <button class="btn ghost sm" type="submit" title="Render this episode next">🔼 Next</button></form>
               {% endif %}
               <form method="post" action="/operations/jobs/{{ r.job_id }}/cancel"
-                    data-confirm="Cancel the queued render of Ep {{ r.task.episode_number }}{% if r.campaign %} — {{ r.campaign.topic_name }}{% endif %}? It is marked cancelled (not failed) and you can Retry it any time.">
+                    data-confirm="Cancel the queued render of Ep {{ r.task.episode_number }}{% if r.campaign %} — {{ r.campaign.topic_name }}{% endif %}? It is marked cancelled (not failed) and you can Retry it any time."
+                    data-confirm-verb="Cancel render">
                 <button class="btn danger sm" type="submit" title="Remove from the queue">✕ Cancel</button></form>
             </div>
           </td>
@@ -164,7 +165,7 @@
 
     <div class="mt-md">
       <form method="post" action="/operations/restart-worker"
-            data-confirm="Restart the render worker? An in-flight render is abandoned (it can be retried) and the worker comes back automatically.">
+            data-confirm="Restart the render worker? An in-flight render is abandoned (it can be retried) and the worker comes back automatically." data-confirm-verb="Restart worker">
         <button class="btn ghost block" type="submit">🔄 Restart worker</button></form>
       <p class="hint">Asks the worker to exit; its container is recreated automatically. Takes about
         a minute. A worker frozen so hard that even its own threads cannot run is the one case this

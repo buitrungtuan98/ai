@@ -9,10 +9,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from datetime import datetime
+from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.exception_handlers import http_exception_handler
@@ -183,15 +185,36 @@ LOGIN_SCOPES = [  # Google SSO login (identity only — no YouTube access)
 ]
 
 
+_ERROR_COPY = {
+    404: ("Nothing here", "That page or episode doesn’t exist — it may have been deleted, or the "
+                          "link may be from an older version of the app."),
+    403: ("Not yours", "That belongs to another account."),
+    400: ("That request didn’t work", "Something in the request was wrong — go back and try again."),
+    500: ("Something broke on our side", "The error was logged. Try again; if it keeps happening, "
+                                         "check the worker and the server log."),
+}
+
+
 @app.exception_handler(StarletteHTTPException)
 async def _auth_aware_http_exception(request: Request, exc: StarletteHTTPException):
-    """Browsers navigating unauthenticated get sent to /login; API callers keep the raw 401."""
-    if (
-        exc.status_code == 401
-        and settings.MULTI_TENANT_MODE
-        and "text/html" in (request.headers.get("accept") or "")
-    ):
+    """Browsers navigating unauthenticated get sent to /login; API callers keep the raw JSON.
+
+    A browser that asked for HTML also gets an HTML error page with the navigation intact (ADR-068) —
+    a bare `{"detail":"Not found"}` gave a dead end with no way back and read as "the app is broken"."""
+    wants_html = "text/html" in (request.headers.get("accept") or "")
+    if exc.status_code == 401 and settings.MULTI_TENANT_MODE and wants_html:
         return RedirectResponse("/login", status_code=303)
+    if wants_html and exc.status_code >= 400:
+        title, body = _ERROR_COPY.get(
+            exc.status_code, ("Something went wrong", "That request could not be completed."))
+        try:
+            return templates.TemplateResponse(
+                request, "error.html",
+                {"request": request, "code": exc.status_code, "title": title, "body": body,
+                 "detail": str(exc.detail or ""), "nav": ""},
+                status_code=exc.status_code)
+        except Exception:  # noqa: BLE001 — an error page that errors must still answer the request
+            logger.warning("Error page render failed for %s", exc.status_code, exc_info=True)
     return await http_exception_handler(request, exc)
 
 
@@ -349,6 +372,24 @@ def _attention_count(db, user_id: int, counts: dict | None = None) -> int:
     counts = counts if counts is not None else _task_counts(db, user_id)
     return (counts["failed"] + counts["awaiting_review"]
             + _autopilot_proposed_count(db, user_id))
+
+
+def _setup_state(user, channels, campaigns) -> dict:
+    """How far through first-run setup this account is (ADR-068).
+
+    The dashboard used to open on "All clear — nothing needs you right now" for an account with no
+    channel, no keys and no campaign: literally true (no work is failing) and completely wrong as the
+    first thing a new operator reads. The three steps that make the factory able to work are hoisted
+    to the top of the page until they are done, and "All clear" waits its turn."""
+    # `api_keys`, not `keys`: in Jinja `setup.keys` resolves to the dict's own `.keys` method, which
+    # is truthy — the checklist showed step 2 as done on an account with no keys at all.
+    have_keys = bool((user.gemini_api_key or settings.GEMINI_API_KEY)
+                     and (user.pexels_api_key or settings.PEXELS_API_KEY))
+    state = {"channels": bool(channels), "api_keys": have_keys, "campaigns": bool(campaigns)}
+    state["done"] = all(state.values())
+    # The step to point at: the first one not done.
+    state["next"] = next((k for k in ("channels", "api_keys", "campaigns") if not state[k]), "")
+    return state
 
 
 def _autopilot_proposed_count(db, user_id: int) -> int:
@@ -669,6 +710,9 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
     active_campaigns = [c for c in campaigns if c.status == CampaignStatus.active]
     autopilot_proposed = _autopilot_proposed_count(db, user.id)
     counts = _task_counts(db, user.id)
+    setup = _setup_state(user, channels, campaigns)
+    # One failure reads the same in triage, in the bell and on the episode page (ADR-068).
+    fail_causes = {t.id: _diagnose_failure(t.error_message) for t in attention_failed}
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -688,6 +732,7 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
             "camp_by_id": {c.id: c for c in campaigns},
             "chan_by_id": {c.id: c for c in channels},
             "feed": _activity_feed(tasks, {c.id: c for c in campaigns}, {c.id: c for c in channels}),
+            "setup": setup, "fail_causes": fail_causes,
         },
     )
 
@@ -698,7 +743,7 @@ _CHANNEL_STATUS_FILTERS = ("active", "expired")
 
 @app.get("/channels", response_class=HTMLResponse)
 def channels_page(request: Request, user: CurrentUser, db: DbDep, status: str = "", q: str = "",
-                  flash: str = ""):
+                  flash: str = "", flash_reason: str = ""):
     status_counts = {s.value: n for s, n in db.execute(
         select(Channel.status, func.count())
         .where(Channel.user_id == user.id).group_by(Channel.status)).all()}
@@ -732,8 +777,12 @@ def channels_page(request: Request, user: CurrentUser, db: DbDep, status: str = 
          # Growth series per channel (ADR-063): does publishing this much actually move subs/views?
          "growth": {c.id: analytics_service.channel_growth(db, c.id) for c in channels},
          "characters": {c.id: _sanitize_characters(c.characters_json) for c in channels},
-         "flash": flash if flash in ("profile", "autopilot", "character",
-                                     "char_img_ok", "char_img_fail") else ""},
+         "flash": flash if flash in ("profile", "autopilot", "character", "char_img_ok",
+                                     "char_img_fail", "no_google_client", "fb_added",
+                                     "fb_rejected") else "",
+         # Facebook's own words for why it refused. Truncated and escaped by Jinja on the way out;
+         # never contains the token (see services/verification.check_facebook_page).
+         "flash_reason": flash_reason[:200]},
     )
 
 
@@ -746,6 +795,20 @@ def add_facebook_channel(
     page_access_token: str = Form(...),
     avatar_url: str = Form(""),
 ):
+    # Verify before trusting (ADR-068). A made-up Page id and token used to save as "● Active" and
+    # count as a connected channel; the lie only surfaced weeks later when a publish failed. One cheap
+    # Graph call decides — and a network hiccup must not block a real operator, so only a definite
+    # rejection stops the save.
+    verdict = None
+    try:
+        from services import verification
+
+        verdict = verification.check_facebook_page(page_id, page_access_token)
+    except Exception:  # noqa: BLE001 — verification is a guard, never a gate on our own bugs
+        logger.warning("Facebook page verification raised", exc_info=True)
+    if verdict is not None and verdict[0] is False:
+        return RedirectResponse(
+            "/channels?flash=fb_rejected&flash_reason=" + quote(verdict[1][:200]), status_code=303)
     creds = json.dumps({"page_id": page_id, "page_access_token": page_access_token})
     channel = Channel(
         user_id=user.id, platform=Platform.facebook, channel_name=channel_name,
@@ -753,7 +816,7 @@ def add_facebook_channel(
     )
     db.add(channel)
     db.commit()
-    return RedirectResponse("/channels", status_code=303)
+    return RedirectResponse("/channels?flash=fb_added", status_code=303)
 
 
 @app.post("/channels/{channel_id}/delete")
@@ -1016,7 +1079,6 @@ def public_character_reference(token: str):
     fetch a character's uploaded reference over the internet (ADR-055). The token is a 32-hex random
     slug = the file name, so there's no DB lookup and no enumeration; the regex bars path traversal.
     This is the one intentional public exposure of a reference image (the operator opted in)."""
-    import re
 
     if not re.fullmatch(r"[a-f0-9]{8,64}", token):
         raise HTTPException(404, "Not found")
@@ -1069,6 +1131,13 @@ def set_channel_autopilot(channel=Depends(get_owned_channel), db=Depends(get_db)
 # ── Google OAuth2 web flow (connect a YouTube channel) ───────────────────────
 @app.get("/oauth/google/start")
 def google_oauth_start(request: Request, user: CurrentUser):
+    """Begin the YouTube connect flow — or explain what is missing (ADR-068).
+
+    Without a configured Google client this used to redirect to accounts.google.com with
+    `client_id=None`, so a first-time operator's very first click landed on Google's "Error 400:
+    invalid_request" page with nothing to tell them the app itself needed setting up first."""
+    if not (settings.GOOGLE_CLIENT_ID and settings.GOOGLE_CLIENT_SECRET):
+        return RedirectResponse("/channels?flash=no_google_client", status_code=303)
     flow = _google_flow(YOUTUBE_SCOPES, "/oauth/google/callback")
     auth_url, state = flow.authorization_url(access_type="offline", include_granted_scopes="true", prompt="consent")
     request.session["oauth_state"] = state
@@ -1196,6 +1265,15 @@ def campaign_new_form(request: Request, user: CurrentUser, db: DbDep,
     else:  # a fresh form starts from the user's saved new-campaign defaults (Settings page)
         ctx["cfg"] = _new_campaign_defaults(user)
         ctx["default_episodes"] = (user.settings_json or {}).get("total_episodes") or 10
+        # The very first campaign defaults to Review-first (ADR-068). Auto-publish is the right
+        # steady state, but as a *first* experience it uploads to a real channel before the operator
+        # has ever seen what this factory produces. An explicit Settings choice always wins.
+        if not (user.settings_json or {}).get("publish_mode"):
+            first = db.scalar(select(func.count()).select_from(Campaign)
+                              .where(Campaign.user_id == user.id)) == 0
+            if first:
+                ctx["cfg"] = {**ctx["cfg"], "auto_publish": False}
+                ctx["first_campaign"] = True
     if sel_channel is None and channel is not None:  # follow the scoped channel if the user owns it
         ch = db.get(Channel, channel)
         if ch is not None and ch.user_id == user.id:
@@ -1504,7 +1582,6 @@ def _campaigns_redirect(channel_id) -> RedirectResponse:
 def _campaign_return(return_to: str) -> str | None:
     """Safe internal campaign-hub path (`/campaigns/<digits>` or `/campaigns/<digits>/<tab>`) if
     `return_to` is one, else None — lets a hub action land back on the hub instead of the list."""
-    import re
 
     return return_to if re.fullmatch(r"/campaigns/\d+(?:/[a-z]+)?", return_to or "") else None
 
@@ -1727,7 +1804,6 @@ def save_settings(user: CurrentUser, db: DbDep, language: str = Form(""),
                   ai_daily_budget: str = Form("")):
     """Save the whole preferences form (a blank field clears that default — the form always submits
     every field). Values are whitelisted/validated exactly like the campaign form does."""
-    import re
 
     s: dict = {}
     if language in _SETTINGS_LANGS:
@@ -2208,6 +2284,7 @@ def episode_view(request: Request, user: CurrentUser, db: DbDep, task_id: int,
         buffer and buffer.status in (BufferStatus.ready, BufferStatus.awaiting_review)
         and buffer.video_path and os.path.exists(buffer.video_path))
     stage_index = _STAGE_INDEX.get(task.status.value)
+    diagnosis = _diagnose_failure(task.error_message) if task.status == TaskStatus.FAILED else None
     # Retention drop-off markers: attribute the measured curve to the scene that lost viewers.
     curve = (task.stats_json or {}).get("retention_curve")
     scenes = (task.render_json or {}).get("scenes")
@@ -2219,11 +2296,62 @@ def episode_view(request: Request, user: CurrentUser, db: DbDep, task_id: int,
          "channel": channel, "buffer": buffer, "previewable": previewable,
          "stages": _EPISODE_STAGES, "stage_index": stage_index,
          "retention_curve": curve, "retention_drops": retention_drops,
-         "failed": task.status == TaskStatus.FAILED,
+         "failed": task.status == TaskStatus.FAILED, "diagnosis": diagnosis,
          "cancelled": task.status == TaskStatus.CANCELLED,
          "flash": flash if flash in ("publish", "rerender", "rejected", "missing") else "",
          "flash_reason": flash_reason[:200]},
     )
+
+
+# The failure modes this box actually produces, each matched on words that appear in the recorded
+# error and each ending somewhere the operator can act (ADR-068). Order matters: the first match wins.
+_FAILURE_PATTERNS: tuple[tuple[tuple[str, ...], str, str, str, str], ...] = (
+    (("api key", "api_key", "invalid key", "unauthorized", "401", "403 forbidden"),
+     "A provider rejected the key",
+     "The AI or footage provider refused the credentials this render used. Check the key is present "
+     "and still valid, then retry.", "/credentials", "Check credentials"),
+    (("quota", "429", "rate limit", "resource_exhausted", "exceeded"),
+     "A free-tier quota ran out",
+     "The daily or per-minute allowance for the AI model is spent. It resets on its own — retry "
+     "later, or put a bigger-quota model first in the model chain.", "/credentials", "Model chain"),
+    (("no space", "disk", "enospc"),
+     "The box ran out of disk",
+     "Rendering needs working space. Old renders are cleaned automatically, but a stuck job can fill "
+     "the disk — check the disk reading and free space, then retry.", "/operations", "Operations"),
+    (("ffmpeg", "codec", "invalid data", "moov atom"),
+     "ffmpeg could not build the video",
+     "One of the source clips or the audio track was unusable. A retry usually picks different "
+     "footage and succeeds; if it repeats, try a different visual source on the campaign.",
+     "", ""),
+    (("timed out", "timeout", "connection", "network", "temporarily unavailable", "502", "503"),
+     "A provider was unreachable",
+     "This is almost always transient — the render reached out and got nothing back. Retry it.",
+     "", ""),
+    (("stalled", "wedged", "worker"),
+     "The worker stopped making progress",
+     "The render was abandoned because it stopped reporting progress. The worker recovers itself; "
+     "check it is running, then retry this episode.", "/operations", "Worker status"),
+    (("safety", "blocked", "policy", "profanity"),
+     "The safety filter blocked the content",
+     "The generated script tripped the brand-safety filter. Retrying re-writes it; if it keeps "
+     "happening, soften the campaign's topic or persona.", "", ""),
+)
+
+
+def _diagnose_failure(message: str | None) -> dict | None:
+    """Turn a recorded render error into a cause, a fix and somewhere to go (ADR-068).
+
+    A failed episode used to show the raw exception text and a single Retry button: true, unreadable,
+    and a dead end when retrying was not the answer (a spent quota, a missing key, a full disk).
+    Returns None when nothing matches — better no guess than a confident wrong one, and the raw
+    message is always shown either way."""
+    if not message:
+        return None
+    low = message.lower()
+    for words, cause, fix, href, action in _FAILURE_PATTERNS:
+        if any(w in low for w in words):
+            return {"cause": cause, "fix": fix, "href": href, "action": action}
+    return None
 
 
 # ── Performance & learning (self-improvement transparency) ──────────────────
@@ -2557,30 +2685,64 @@ def api_summary(user: CurrentUser, db: DbDep):
             "attention": _attention_count(db, user.id, counts)}
 
 
+def _fold(s: str) -> str:
+    """Lowercase and strip Vietnamese diacritics for accent-insensitive matching (ADR-068).
+
+    Titles here are routinely Vietnamese ("Lịch sử Việt Nam") and are routinely *typed* without
+    diacritics, because that is how people type on a phone. A plain `ilike` matched neither direction,
+    so the palette looked broken on exactly the content this box was built for. `đ` has no combining
+    form, so it is mapped by hand."""
+    import unicodedata
+
+    flat = unicodedata.normalize("NFD", (s or "").lower().replace("đ", "d"))
+    return "".join(c for c in flat if not unicodedata.combining(c))
+
+
+# "ep 3", "Ep.3", "episode 3", "tập 3" — how an operator actually refers to an episode. The bare
+# number was the only thing that used to work.
+_EP_QUERY = re.compile(r"^(?:ep|eps|episode|tap)\s*[.#·:-]?\s*(\d{1,6})$")
+
+
 @app.get("/api/search")
 def api_search(user: CurrentUser, db: DbDep, q: str = ""):
     """One read-only search across the whole workspace (channels, campaigns, episodes) for the ⌘K
-    palette — so 'find that thing' is one box, not 'which page do I search on?'. Tenant-scoped."""
+    palette — so 'find that thing' is one box, not 'which page do I search on?'. Tenant-scoped.
+
+    Names are matched accent-insensitively (`_fold`) in Python rather than by SQL `ilike`: SQLite has
+    no unaccent, and a solo box has tens of channels/campaigns, not thousands. Episodes stay in SQL —
+    that table does grow — and are reachable by number ("ep 3") or by synopsis text."""
     q = q.strip()
     if len(q) < 2:
         return {"results": []}
+    needle = _fold(q)
     like = f"%{q}%"
     results: list[dict] = []
-    for c in db.scalars(select(Channel).where(
-            Channel.user_id == user.id, Channel.channel_name.ilike(like)).limit(5)):
-        results.append({"type": "Channel", "label": c.channel_name,
-                        "sub": c.platform.value, "href": f"/campaigns?channel={c.id}"})
-    for c in db.scalars(select(Campaign).where(
-            Campaign.user_id == user.id, Campaign.topic_name.ilike(like))
-            .order_by(Campaign.id.desc()).limit(6)):
-        results.append({"type": "Campaign", "label": c.topic_name,
-                        "sub": c.status.value, "href": f"/campaigns/{c.id}"})
-    camp_names = {c.id: c.topic_name for c in db.scalars(
-        select(Campaign).where(Campaign.user_id == user.id))}
-    for t in db.scalars(select(Task).where(
-            Task.user_id == user.id,
-            or_(Task.synopsis.ilike(like), cast(Task.episode_number, String).ilike(like)))
-            .order_by(Task.id.desc()).limit(8)):
+    for c in db.scalars(select(Channel).where(Channel.user_id == user.id)):
+        if needle in _fold(c.channel_name):
+            results.append({"type": "Channel", "label": c.channel_name,
+                            "sub": c.platform.value, "href": f"/campaigns?channel={c.id}"})
+        if len(results) >= 5:
+            break
+    campaigns = list(db.scalars(select(Campaign).where(Campaign.user_id == user.id)
+                                .order_by(Campaign.id.desc())))
+    camp_names = {c.id: c.topic_name for c in campaigns}
+    hits = 0
+    for c in campaigns:
+        if needle in _fold(c.topic_name):
+            results.append({"type": "Campaign", "label": c.topic_name,
+                            "sub": c.status.value, "href": f"/campaigns/{c.id}"})
+            hits += 1
+            if hits >= 6:
+                break
+    ep_match = _EP_QUERY.match(needle)
+    ep_no = int(ep_match.group(1)) if ep_match else None
+    where = [Task.synopsis.ilike(like)]
+    if ep_no is not None:
+        where.append(Task.episode_number == ep_no)
+    else:
+        where.append(cast(Task.episode_number, String).ilike(like))
+    for t in db.scalars(select(Task).where(Task.user_id == user.id, or_(*where))
+                        .order_by(Task.id.desc()).limit(8)):
         topic = camp_names.get(t.campaign_id, f"C{t.campaign_id}")
         label = f"Ep {t.episode_number} · {topic}"
         results.append({"type": "Episode", "label": label,
@@ -2925,6 +3087,37 @@ def _infra_alerts(db, user) -> list[dict]:
     return out
 
 
+def _credential_alerts(db, user) -> list[dict]:
+    """An ACTIVE campaign whose required API keys are missing (ADR-068).
+
+    Nothing said this before: a first-time operator could create and start a campaign with no keys at
+    all, watch it queue three episodes, and read "All clear" on the dashboard while every render was
+    doomed. The keys are checked per campaign because the requirement differs — Studio/quote campaigns
+    draw their visuals and need no Pexels key, stock-footage campaigns do."""
+    active = db.scalars(select(Campaign).where(
+        Campaign.user_id == user.id, Campaign.status == CampaignStatus.active)).all()
+    if not active:
+        return []
+    has_gemini = bool(user.gemini_api_key or settings.GEMINI_API_KEY)
+    has_pexels = bool(user.pexels_api_key or settings.PEXELS_API_KEY)
+    needs_pexels = [c for c in active
+                    if (c.config_json or {}).get("visual_source") != "studio"
+                    and (c.config_json or {}).get("content_style") != "quote"]
+    out = []
+    if not has_gemini:
+        out.append(_alert("red", "missing-gemini",
+                          f"No Gemini API key — every render for your {len(active)} active "
+                          f"campaign{'s' if len(active) != 1 else ''} will fail. It is free to get.",
+                          href="/credentials", action="Add key"))
+    if needs_pexels and not has_pexels:
+        out.append(_alert("red", "missing-pexels",
+                          f"No Pexels API key — {len(needs_pexels)} active campaign"
+                          f"{'s' if len(needs_pexels) != 1 else ''} use stock footage and cannot "
+                          "render without it. It is free to get.",
+                          href="/credentials", action="Add key"))
+    return out
+
+
 def _work_alerts(db, user) -> list[dict]:
     """Things that need a human: failed episodes, a campaign the breaker stopped, review, proposals."""
     campaigns = {c.id: c for c in db.scalars(
@@ -2943,11 +3136,13 @@ def _work_alerts(db, user) -> list[dict]:
             .limit(_ALERT_FAILED_LIMIT)).all():
         campaign = campaigns.get(task.campaign_id)
         chan, camp = names(campaign)
-        # The stack trace's LAST line is the actual error; the rest is noise in a one-line alert.
-        # A task can legitimately carry no message (an old row, a cleared retry) — say so rather than
-        # rendering "Ep 7 failed — failed".
+        # Prefer the plain-language cause the episode page shows, so one failure reads the same
+        # everywhere. Falling back to the stack trace's LAST line: that is the actual error, the rest
+        # is noise in a one-line alert. A task can legitimately carry no message (an old row, a
+        # cleared retry) — say so rather than rendering "Ep 7 failed — failed".
         lines = (task.error_message or "").strip().splitlines()
-        reason = lines[-1][:120] if lines else "no error recorded"
+        diag = _diagnose_failure(task.error_message)
+        reason = diag["cause"] if diag else (lines[-1][:120] if lines else "no error recorded")
         out.append(_alert("red", f"task-failed:{task.id}", f"Ep {task.episode_number} failed — {reason}",
                           channel=chan, campaign=camp, href=f"/episodes/{task.id}", action="Open",
                           at=task.finished_at or task.updated_at))
@@ -3028,7 +3223,8 @@ def _alerts(db, user) -> list[dict]:
     """The whole feed, most urgent first. Fail-soft per source: one broken query must not empty the
     bell, because an empty bell reads as "everything is fine"."""
     rows: list[dict] = []
-    for source in (_infra_alerts, _work_alerts, _schedule_alerts, _success_alerts):
+    for source in (_infra_alerts, _credential_alerts, _work_alerts, _schedule_alerts,
+                   _success_alerts):
         try:
             rows += source(db, user)
         except Exception:  # noqa: BLE001

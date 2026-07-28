@@ -41,6 +41,9 @@
           captions, look, music &amp; schedule for you — review and tweak anything before saving.
           Click again for a completely fresh idea.</p>
         <p class="hint" id="ai-rationale" style="display:none"></p>
+        {# The failure lands here instead of in a browser alert(): an alert can't be re-read, can't be
+           copied, and can't link to the page that fixes it (ADR-068). #}
+        <p class="err" id="ai-error" style="display:none" role="status" aria-live="polite"></p>
       </div>
       <div class="form-row"><label>Topic name</label>
         <input name="topic_name" required placeholder="Amazing space facts" value="{{ campaign.topic_name if editing else (source.topic_name if dup else '') }}"></div>
@@ -275,7 +278,11 @@
           <option value="auto" {{ 'selected' if cfg.get('auto_publish', true) }}>Auto-publish (hands-off)</option>
           <option value="review" {{ 'selected' if not cfg.get('auto_publish', true) }}>Review first — I preview &amp; approve each video</option>
         </select>
-        <p class="hint">Review mode parks each rendered video in the Asset Pool with an in-browser player.</p>
+        <p class="hint">Review mode parks each rendered video in the Review queue with an in-browser
+          player — nothing reaches the channel until you approve it.
+          {% if first_campaign %}<b>Your first campaign starts in Review mode</b> so you see what the
+          factory makes before anything is published. Switch to auto-publish whenever you're happy —
+          on this form, or for all future campaigns in <a href="/settings">Settings</a>.{% endif %}</p>
       </div>
       <div class="form-row"><label>Privacy on the platform</label>
         <select name="privacy">
@@ -494,12 +501,31 @@
   const idForm = document.getElementById("campaign-form");
   if (idForm) { idForm.addEventListener("input", updateIdentity); idForm.addEventListener("change", updateIdentity); }
 
+  // Both AI buttons need a Gemini key, and "no key yet" is the most likely failure on a fresh
+  // install — so the error offers the page that fixes it instead of only naming the problem, and it
+  // stays on screen to be re-read (this was a browser alert() that vanished on click — ADR-068).
+  const aiErr = document.getElementById("ai-error");
+  const clearAiError = () => { if (aiErr) aiErr.style.display = "none"; };
+  const showAiError = (msg) => {
+    if (!aiErr) { if (window.ui) window.ui.toast(msg, "danger"); return; }
+    aiErr.textContent = "⚠ " + msg + " ";
+    if (/api key/i.test(msg)) {
+      const a = document.createElement("a");     // built, not interpolated — href is a literal
+      a.href = "/credentials";
+      a.textContent = "Add your keys →";
+      aiErr.appendChild(a);
+    }
+    aiErr.style.display = "block";
+    aiErr.scrollIntoView({ block: "center", behavior: "smooth" });
+  };
+
   // 📝 Script preview: dry-run the scriptwriter with the current form values (nothing saved).
   const previewBtn = document.getElementById("script-preview");
   if (previewBtn) {
     previewBtn.addEventListener("click", function () {
       const form = previewBtn.closest("form");
       const out = document.getElementById("script-preview-out");
+      clearAiError();
       window.ui.busyButton(previewBtn, "📝 Writing…", async function () {
         try {
           const body = new URLSearchParams();
@@ -527,8 +553,8 @@
           });
           out.style.display = "block";
         } catch (e) {
-          out.textContent = e.message || "Preview failed — please try again.";
-          out.style.display = "block";
+          out.style.display = "none";       // a stale preview under an error reads as success
+          showAiError(e.message || "Preview failed — please try again.");
         }
       });
     });
@@ -539,6 +565,7 @@
   if (proposeBtn) {
     proposeBtn.addEventListener("click", function () {
       const form = proposeBtn.closest("form");
+      clearAiError();
       const setVal = (name, val) => {
         const el = form.elements[name];
         if (el && val !== null && val !== undefined) el.value = val;
@@ -596,7 +623,7 @@
           }
           updateIdentity();  // fields set programmatically don't fire input events
         } catch (e) {
-          alert(e.message || "AI proposal failed — please try again.");
+          showAiError(e.message || "AI proposal failed — please try again.");
         }
       });
     });

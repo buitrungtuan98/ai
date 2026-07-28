@@ -1342,6 +1342,39 @@ Two pages answered "what publishes when" and gave different answers (ADR-067):
 - Verified: 391 tests (4 new), ruff clean, docs guard green; grid ✏ chips, the toggle, the 301 and the
   agreeing ready counts all checked in a real browser.
 
+## UX consolidation R5 — surviving the first hour `DONE`
+The product was navigable only by someone who already knew it worked (ADR-068):
+- **The dashboard no longer greets a fresh install with "All clear — nothing needs you right now."**
+  The three setup steps lead the page until a channel, keys and a campaign exist — and they now live in
+  exactly one place (the activity card's duplicate copy is gone). Found and fixed a real bug doing it:
+  `setup.keys` in Jinja resolves to the dict's own `.keys` method, so step 2 rendered as ✓ done on an
+  account with no keys at all.
+- **No button leads somewhere impossible.** "+ YouTube (OAuth)" with no configured Google client used
+  to hand the operator Google's "Error 400: invalid_request"; it now explains what the server is
+  missing. A Facebook Page is verified against the Graph API *before* it is stored — a made-up token
+  used to save as "● Active" and reveal the lie weeks later, when a publish failed. Only a definite
+  rejection blocks the save, so a network hiccup never locks an operator out of their own Page.
+- **Missing keys are named before they cost a render.** A campaign could be started with no keys at
+  all: three episodes queued, every one doomed, dashboard green. Now a red alert, with Pexels demanded
+  only from campaigns that actually use stock footage. Every Credentials row links to the page that
+  issues that free key and says what breaks without it; the two model-chain cards fold away (and the
+  Test button no longer overwrites the explanation next to it).
+- **A failure says what to do about it.** A stack trace with one Retry button is the wrong advice for a
+  spent quota, a rejected key or a full disk. Seven recognised causes now carry a fix and a link, worded
+  identically on the episode page, in triage and in the bell — with the raw text folded underneath, and
+  no guess when nothing matches.
+- **The first campaign starts in Review mode** (an explicit Settings choice still wins), and every
+  irreversible action confirms with a verb — "Delete campaign", "Publish now" — naming the campaign or
+  episode. One generic "Confirm" for both delete-a-campaign and publish-now trains the reflex to click.
+- Flashes are one-shot (a reload used to re-show a success for an action nobody took), a browser 404 is
+  a styled page that keeps the navigation instead of `{"detail":"Not found"}`, the AI buttons report
+  errors inline with a link to Credentials instead of in a lost `alert()`, ⌘K jumps to pages as well as
+  content and folds Vietnamese diacritics both ways ("lich dang" → Publishing, "ep 3" → Ep 3), and
+  every phone control is ≥44px.
+- Verified: 422 tests (31 new), ruff clean, docs guard green; checked in a real browser at 375px and
+  1280px — no page scrolls sideways, the setup card leads, the confirm modal shows its verb and stays
+  on screen, the palette lists 11 destinations, and `?flash=` disappears without a reload.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

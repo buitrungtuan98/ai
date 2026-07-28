@@ -138,7 +138,7 @@
               {# Publishing to a real channel cannot be undone, so it asks — the same guard /assets
                  has always had. This form used to be a bare POST beside Reschedule (ADR-067). #}
               <form method="post" action="/assets/{{ r.item.id }}/publish-now"
-                    data-confirm="Publish Ep {{ r.item.episode_number }}{% if r.campaign %} — {{ r.campaign.topic_name }}{% endif %} right now, skipping its schedule? This uploads to {{ r.channel.channel_name if r.channel else 'the channel' }} and can't be undone.">
+                    data-confirm="Publish Ep {{ r.item.episode_number }}{% if r.campaign %} — {{ r.campaign.topic_name }}{% endif %} right now, skipping its schedule? This uploads to {{ r.channel.channel_name if r.channel else 'the channel' }} and can't be undone." data-confirm-verb="Publish now">
                 <input type="hidden" name="return_to" value="/calendar?view=list">
                 <button class="btn sm" type="submit" {{ 'disabled' if r.missing }}>⚡ Now</button></form>
               <details class="resched">

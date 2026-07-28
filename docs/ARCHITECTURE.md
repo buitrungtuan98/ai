@@ -1387,3 +1387,43 @@ Collapsing to one surface fixes the disagreement by construction; deleting the s
 is what makes it stay fixed. The confirm on `⚡ Now` closes the other half of the audit's finding here:
 the single most irreversible action in the product (publish publicly, immediately) was a bare POST
 sitting beside Reschedule on a dense row, while the identical action on `/assets` asked first.
+
+### ADR-068 — Onboarding survival: nothing may be impossible, unexplained, or a dead end
+**Decision:** five classes of first-hour failure are closed at their source.
+1. **The setup checklist leads the dashboard** (`_setup_state`) until a channel, keys and a campaign all
+   exist, and `All clear` waits for it. Its three steps exist in exactly one place — the activity
+   card's copy is gone. (`setup.api_keys`, not `setup.keys`: `setup.keys` in Jinja resolves to the
+   dict's own `.keys` method, which is truthy, so the step rendered as done on an empty account.)
+2. **No button leads somewhere impossible.** `/oauth/google/start` with no configured Google client
+   redirects to `/channels?flash=no_google_client` and explains what the *server* is missing, instead
+   of redirecting to Google with `client_id=None`. Facebook Page details are verified against the Graph
+   API before they are stored (`services.verification.check_facebook_page`, three-state: verified /
+   definitely rejected / could-not-tell — only a definite rejection blocks the save, so a network
+   hiccup never locks an operator out of their own Page). Each Credentials row links to the page that
+   issues that free key, and says what breaks without it; an active campaign missing a required key is
+   a red alert (`_credential_alerts`), with Pexels required only for campaigns that use stock footage.
+3. **A failure names its cause and its fix** (`_diagnose_failure` over `_FAILURE_PATTERNS`) — quota,
+   rejected key, full disk, ffmpeg, network, wedged worker, safety filter — and links somewhere the
+   operator can act. The same wording is used on the episode page, in the dashboard triage row and in
+   the bell, and the raw text stays available, folded. An unrecognised error gets no guess.
+4. **The first campaign defaults to Review-first** (an explicit Settings choice always wins), and
+   irreversible actions confirm with a **verb** (`data-confirm-verb`) naming the campaign or episode.
+5. **Flashes are one-shot** (`ui.initFlash` strips `?flash=`), a browser 404/403/500 renders
+   `error.html` **with the navigation intact** (API callers still get JSON), the AI buttons report
+   failures inline with a link to Credentials rather than in a lost `alert()`, ⌘K lists destinations
+   as well as content and folds Vietnamese diacritics on both sides (`main._fold` / `ui.fold`, `đ`
+   mapped by hand — NFD leaves it), `ep 3` finds episode 3, and every phone control is ≥44px.
+
+**Why:** the product was navigable only by someone who already knew it worked. A first-run account was
+greeted with "All clear — nothing needs you right now" — literally true and completely wrong — with the
+three steps that would fix it below a Factory card full of dashes. The first button a new operator
+presses, "+ YouTube (OAuth)", handed them Google's "Error 400: invalid_request" with nothing to say the
+fault was our unset `.env`. Facebook accepted a made-up Page id and token, showed "● Active", counted
+as a connected channel, and revealed the lie weeks later when a publish failed. A campaign could be
+started with no API keys at all: three episodes queued, every one doomed, dashboard still green. And
+when a render did fail, the page printed a stack trace and offered one Retry button — the wrong move
+for a spent quota or a full disk, and unreadable either way. Each of these is a place where the system
+knew the answer and did not say it. Diagnosis is a fixed pattern table rather than an AI call because
+it must work when the AI is exactly what is broken, and it returns nothing rather than guessing: a
+confident wrong cause is worse than a stack trace. The verb on the confirm button matters because
+"Confirm" was the word for both delete-a-campaign and publish-now, which trains the reflex to click it.

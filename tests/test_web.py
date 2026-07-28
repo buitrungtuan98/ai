@@ -53,7 +53,9 @@ def test_add_facebook_channel_encrypts(client):
     r = client.post("/channels/facebook",
                     data={"channel_name": "My Page", "page_id": "P1", "page_access_token": "sekret"},
                     follow_redirects=False)
-    assert r.status_code == 303 and r.headers["location"] == "/channels"
+    # The save now reports back (ADR-068); verification could not reach Graph in the test sandbox,
+    # which must NOT block a real operator, so the channel is still created.
+    assert r.status_code == 303 and r.headers["location"] == "/channels?flash=fb_added"
     assert "My Page" in client.get("/channels").text
     db_path = os.environ["DATABASE_URL"].replace("sqlite:///", "")
     raw = sqlite3.connect(db_path).execute("SELECT encrypted_credentials FROM channels").fetchone()[0]

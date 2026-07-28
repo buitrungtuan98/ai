@@ -413,6 +413,16 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
   display: inline-flex; align-items: center; justify-content: center; font-size: var(--fs-xs);
   background: var(--surface-2); color: var(--muted); border: 1px solid var(--border); }
 .steps .tick.done { background: var(--st-success-bg); color: var(--st-success); border-color: var(--st-success-bd); }
+/* The same checklist as a first-run card: full width, one explanation per step, and a CTA on the
+   step you are actually on (the empty-state variant above stays narrow and centred). */
+.err-page { padding: var(--sp-10) var(--sp-4); }
+.setup { border-color: var(--primary-weak); }
+.setup .steps { max-width: none; margin: 0; }
+.setup .steps li { align-items: flex-start; gap: var(--sp-3); padding: var(--sp-3) 0;
+  border-top: 1px solid var(--border); }
+.setup .steps li:first-child { border-top: 0; }
+.setup .steps .tick { margin-top: 1px; }
+.setup .steps .meta { margin-top: 2px; }
 .skeleton { background: linear-gradient(90deg, var(--surface-2) 25%, var(--surface-3) 37%, var(--surface-2) 63%);
   background-size: 400% 100%; animation: sk 1.4s ease infinite; border-radius: var(--radius-sm); }
 .sk-line { height: 14px; margin: var(--sp-2) 0; }
@@ -431,6 +441,10 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 .text-bad { color: var(--st-failed); }
 .row-actions.center { justify-content: center; }
 .mono { font-family: var(--font-mono); }
+/* Raw error text: monospace, but it must wrap — a long provider URL or stack line would otherwise
+   stretch the card and scroll the whole page sideways on a phone. */
+.mono-wrap { font-family: var(--font-mono); font-size: var(--fs-xs); overflow-wrap: anywhere;
+  white-space: pre-wrap; }
 .nowrap { white-space: nowrap; }
 
 /* ── 17. Auth (login page + sidebar session chip) ──────────────────────────── */
@@ -837,11 +851,19 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
   .tabbar .ico { font-size: 18px; }
   .tabbar .nav-badge { position: absolute; top: 8px; left: 55%; margin: 0; }
 
-  /* Bigger tap targets */
-  .btn { min-height: 44px; }
-  .btn.sm { min-height: 40px; }
+  /* Bigger tap targets. Buttons, inputs and tab strips get the full 44px: row actions ("↻ Retry",
+     "⚡ Now", "Approve") are all `.btn.sm` and sat at 40px, and the tab strips were nearer 30px.
+     Filter chips stop at 40px on purpose — eight of them wrap to three rows, and the extra 4px each
+     would cost a chunk of the first screen on the list pages for a control that is already easy to
+     hit horizontally. */
+  .btn, .btn.sm { min-height: 44px; }
   input, select, textarea { min-height: 44px; font-size: var(--fs-md); }
-  input[type="checkbox"], input[type="radio"], input[type="range"] { min-height: 0; }
+  input[type="checkbox"], input[type="radio"] { min-height: 0; width: 20px; height: 20px; }
+  input[type="range"] { min-height: 0; }
+  .icon-btn, .nav-toggle { width: 44px; height: 44px; }
+  .chip, .chip.sm { min-height: 40px; display: inline-flex; align-items: center; }
+  .tab-btn, .hub-tab { min-height: 44px; display: inline-flex; align-items: center; }
+  .steps .tick { width: 26px; height: 26px; }
 
   .savebar { border-radius: var(--radius) var(--radius) 0 0; margin-left: calc(-1 * var(--main-pad));
     margin-right: calc(-1 * var(--main-pad));

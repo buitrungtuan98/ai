@@ -433,6 +433,7 @@ def test_publish_now_asks_before_it_publishes(client, session, user, channel, tm
     item = _buffer(session, camp, channel, 1, BufferStatus.ready, path=str(f))
 
     body = client.get("/calendar?view=list").text
-    form = body.split(f'/assets/{item.id}/publish-now', 1)[1].split(">", 1)[0]
-    assert "data-confirm" in body
-    assert "can&#39;t be undone" in body or "can't be undone" in body
+    # The guard must be on THIS form, not merely somewhere on the page.
+    form = body.split(f'action="/assets/{item.id}/publish-now"', 1)[1].split(">", 1)[0]
+    assert "data-confirm=" in form
+    assert "can&#39;t be undone" in form or "can't be undone" in form
