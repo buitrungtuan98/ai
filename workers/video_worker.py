@@ -20,6 +20,7 @@ from functools import partial
 from sqlalchemy import func, select
 
 from core import video_factory
+from core import vibe as vibe_mod
 from core.ai_engine import generate_image, generate_script
 from core.config import settings
 from core.video_factory import Branding
@@ -474,9 +475,18 @@ def render_task(task_id: int) -> None:
         # Default ON; every check fails open, so a vision-API outage never blocks an episode.
         auto_qc = cfg.get("auto_qc", "on") != "off"
 
-        # Visual source (ADR-052): stock footage (Pexels) or Studio Mode (AI-drawn consistent
-        # characters). Studio draws with the Gemini image model, so it needs no Pexels key.
-        visual_source = "studio" if cfg.get("visual_source") == "studio" else "stock"
+        # Content style (ADR-056): "quote" = aesthetic poem-per-video with a per-episode Vibe roll and
+        # drawn visuals (so it forces Studio). "story" = the normal narrated video.
+        content_style = "quote" if cfg.get("content_style") == "quote" else "story"
+        # Vibe Engine: roll this episode's mood/subject/setting/music/pace, seeded per (campaign,
+        # episode) so a re-render is identical but every video differs.
+        vibe = (vibe_mod.roll(campaign.id * 1000 + task.episode_number)
+                if content_style == "quote" else None)
+
+        # Visual source (ADR-052): stock footage (Pexels) or Studio Mode (AI-drawn). Studio draws with
+        # the Gemini image model, so it needs no Pexels key. Quote videos are always drawn.
+        visual_source = "studio" if (cfg.get("visual_source") == "studio"
+                                     or content_style == "quote") else "stock"
         gemini_key, pexels_key = _resolve_keys(user, visual_source=visual_source)
         # Model chain: the user's Credentials choice wins; .env GEMINI_MODEL is the server default.
         gemini_model = user.gemini_model or settings.GEMINI_MODEL
@@ -505,12 +515,16 @@ def render_task(task_id: int) -> None:
             ).all()
         ][-15:]
         learning = campaign.learning_json or {}
+        # Voice pace: quote mode adds the vibe's small per-episode jitter to the campaign rate.
+        rate_pct = int(cfg.get("rate_pct", 0)) + (vibe["rate_delta"] if vibe else 0)
         script = generate_script(
             topic=campaign.topic_name,
             language=cfg.get("language", "en"),
             total_episodes=campaign.total_episodes,
             episode=task.episode_number,
             api_key=gemini_key,
+            content_style=content_style,
+            vibe=vibe,
             custom_system_prompt=cfg.get("system_prompt"),
             persona=cfg.get("persona"),
             style_examples=cfg.get("style_examples"),
@@ -524,7 +538,7 @@ def render_task(task_id: int) -> None:
             self_critique=cfg.get("self_critique", "on") != "off",
             duration_min_s=cfg.get("duration_min_s"),
             duration_max_s=cfg.get("duration_max_s"),
-            rate_pct=int(cfg.get("rate_pct", 0)),
+            rate_pct=rate_pct,
             script_depth=cfg.get("script_depth", "standard"),
             video_format=cfg.get("video_format", "short"),
             model=gemini_model,
@@ -537,7 +551,10 @@ def render_task(task_id: int) -> None:
 
         _set_status(db, task, TaskStatus.RENDERING, 10)
         output_dir = os.path.join(settings.MEDIA_ROOT, "buffer", str(campaign.id))
-        music_path, music_credit = _resolve_music(cfg)
+        # Quote mode with Auto music: use the vibe's rolled mood for the CC0 search.
+        music_cfg = ({**cfg, "music_mood": vibe["music_mood"]}
+                     if (vibe and cfg.get("music_mode") == "auto") else cfg)
+        music_path, music_credit = _resolve_music(music_cfg)
         recent_clips = _recent_clip_ids(db, channel.id)  # prefer footage this channel hasn't used
 
         vet_batch = None
@@ -557,7 +574,7 @@ def render_task(task_id: int) -> None:
                 job_id=str(task.id),
                 output_dir=output_dir,
                 voice=cfg.get("voice"),
-                rate_pct=int(cfg.get("rate_pct", 0)),
+                rate_pct=rate_pct,
                 branding=_branding_from_config(cfg),
                 subtitle_style=cfg.get("subtitle_style", "word"),
                 caption_theme=cfg.get("caption_theme", "highlight"),

@@ -146,6 +146,9 @@ class VideoScript(_SynopsisMixin):
     # 40 and the prompt asks for a count that fits the target duration.
     scenes: list[Scene] = Field(min_length=3, max_length=40)
     metadata_variations: list[MetadataVariation] = Field(min_length=3, max_length=3)
+    # ONE evocative word summarising the piece (quote/content-style="quote" only) — drawn on the
+    # thumbnail as the "scribble cover" (like ENEMY / CALM / AFRAID). Optional (story mode omits it).
+    cover_word: str | None = Field(default=None, max_length=24)
 
 
 class MetadataSet(BaseModel):
@@ -795,6 +798,50 @@ def build_script_prompt(
     return base
 
 
+def build_quote_prompt(
+    topic: str, language: str, episode: int, *,
+    vibe: dict | None = None, previous_synopses: list[str] | None = None,
+) -> str:
+    """Prompt for the "quote" content style (ADR-056): a short aesthetic poem, one line per scene, each
+    line paired with a vivid illustration brief in the episode's rolled mood. Every video is unique
+    because the `vibe` (mood + subject + setting) is re-rolled per episode."""
+    vibe = vibe or {}
+    mood = vibe.get("mood", "melancholic")
+    setting = vibe.get("setting", "an atmospheric dusk scene")
+    subject = vibe.get("subject")
+    subject_line = (
+        f"This video FEATURES a single anonymous figure: {subject}. Keep that same figure "
+        "(small and distant in-frame) across every line's image."
+        if subject else
+        "This video has NO people — pure atmosphere/scenery only. Keep it consistent across lines."
+    )
+    base = (
+        f"Write a vertical short-form AESTHETIC QUOTE video for a channel about: '{topic}'. "
+        f"Language: {language}. Overall mood: {mood}.\n"
+        "Write ONE short poem / affirmation of 5-8 lines. Each line is at most 10 words, spoken "
+        "slowly by a calm, intimate second-person voice, forming ONE emotional arc in the mood above. "
+        "No clichés, no hashtags inside the lines, no line numbers.\n"
+        "Each 'scene' is ONE line, in order:\n"
+        "- narration = the EXACT line text (this same text is shown centered on screen).\n"
+        "- caption_hook = null.\n"
+        "- pexels_keywords = a vivid ENGLISH illustration brief for that line's single image: the "
+        f"subject, the setting ({setting}), the light and palette, and a composition that RESONATES "
+        "with the line's meaning. 2-4 terms. " + subject_line + "\n"
+        "Also produce 'cover_word': ONE evocative English word capturing the whole piece (e.g. ENEMY, "
+        "CALM, AFRAID, SEEN). Also a one-sentence 'synopsis' of this poem's theme. "
+        "Also exactly 3 A/B metadata variations (A/B/C), each a short evocative title (<=100 chars, "
+        "NO series name, NO episode number), a 1-3 line description whose FIRST line re-hooks, and "
+        "5-15 tags. End each description with hashtags including #poetry #quotes #deepthoughts.\n"
+        "IMPORTANT: pexels_keywords/illustration briefs are ALWAYS in English even when the poem is not."
+    )
+    prev = [s for s in (previous_synopses or []) if s]
+    if prev:
+        listing = "\n".join(f"- {s}" for s in prev[-12:])
+        base += ("\n\nALREADY PUBLISHED (do NOT repeat these themes, images or the cover word):\n"
+                 + listing)
+    return base
+
+
 def generate_script(
     *,
     topic: str,
@@ -802,6 +849,8 @@ def generate_script(
     total_episodes: int,
     episode: int,
     api_key: str,
+    content_style: str = "story",
+    vibe: dict | None = None,
     custom_system_prompt: str | None = None,
     persona: str | None = None,
     style_examples: str | None = None,
@@ -833,8 +882,9 @@ def generate_script(
     )
     # Deep mode: one research pass first, so the script is built from specific facts + a real arc
     # instead of one-shot waffle. Optional and fail-open — a brief failure never blocks the episode.
+    # (Deep briefs are for factual stories, not poems — quote mode skips them.)
     brief = None
-    if script_depth == "deep":
+    if script_depth == "deep" and content_style != "quote":
         try:
             brief = generate_brief(
                 topic=topic, language=language, episode=episode, total_episodes=total_episodes,
@@ -843,12 +893,16 @@ def generate_script(
             )
         except Exception:  # noqa: BLE001 — the brief is an enhancement, not a gate
             logger.warning("Episode brief generation failed — proceeding without it.")
-    prompt = build_script_prompt(
-        topic, language, total_episodes, episode,
-        continuity=continuity, previous_synopses=previous_synopses,
-        duration_min_s=duration_min_s, duration_max_s=duration_max_s, rate_pct=rate_pct,
-        brief=brief, video_format=video_format,
-    )
+    if content_style == "quote":
+        prompt = build_quote_prompt(topic, language, episode, vibe=vibe,
+                                    previous_synopses=previous_synopses)
+    else:
+        prompt = build_script_prompt(
+            topic, language, total_episodes, episode,
+            continuity=continuity, previous_synopses=previous_synopses,
+            duration_min_s=duration_min_s, duration_max_s=duration_max_s, rate_pct=rate_pct,
+            brief=brief, video_format=video_format,
+        )
     temperature = 0.85 if continuity != "none" else 0.7
     script = generate_structured(
         prompt=prompt, schema=VideoScript, api_key=api_key, system_prompt=system,

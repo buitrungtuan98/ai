@@ -1148,6 +1148,7 @@ def _build_campaign_config(
     motion: str = "on", caption_theme: str = "highlight", self_critique: str = "on",
     script_depth: str = "standard", video_format: str = "short",
     visual_source: str = "stock", visual_style: str = "", title_overlay: str = "off",
+    content_style: str = "story", signature: str = "",
     music_mode: str = "none", music_mood: str = "",
     color_grade: str = "", auto_qc: str = "on",
     max_per_day: str = "", min_per_day: str = "",
@@ -1196,6 +1197,12 @@ def _build_campaign_config(
         # Billboard title (ADR-054): burn the hook title into the video (top, two-tone) AND draw it as
         # a poster-style thumbnail — the reference-channel look. One toggle drives both. Default off.
         "title_overlay": "on" if title_overlay == "on" else "off",
+        # Content style (ADR-056): "story" = normal narrated video (default); "quote" = aesthetic
+        # poem-per-video with a per-episode Vibe roll, centered quote text, drawn visuals + scribble
+        # cover. `signature` is an optional custom on-screen text mark (channel name), drawn small
+        # lower-centre on every frame + the thumbnail (blank = none).
+        "content_style": "quote" if content_style == "quote" else "story",
+        "signature": signature.strip()[:40] or None,
         # Music: none | auto (random CC0 by mood, per episode) | file (operator-supplied path).
         "music_mode": music_mode if music_mode in ("none", "auto", "file") else "none",
         "music_mood": music_mood.strip() or None,
@@ -1272,6 +1279,8 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
     visual_source: str = Form("stock"),
     visual_style: str = Form(""),
     title_overlay: str = Form("off"),
+    content_style: str = Form("story"),
+    signature: str = Form(""),
     music_mode: str = Form("none"),
     music_mood: str = Form(""),
     color_grade: str = Form(""),
@@ -1298,6 +1307,7 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
             motion=motion, caption_theme=caption_theme, self_critique=self_critique,
             script_depth=script_depth, video_format=video_format,
             visual_source=visual_source, visual_style=visual_style, title_overlay=title_overlay,
+            content_style=content_style, signature=signature,
             music_mode=music_mode, music_mood=music_mood,
             color_grade=color_grade, auto_qc=auto_qc,
             max_per_day=max_per_day, min_per_day=min_per_day,
