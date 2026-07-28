@@ -375,6 +375,51 @@ def _buffer_counts(db, user_id: int) -> dict:
     return out
 
 
+def _campaigns_with_empty_buffer(db, user_id: int) -> int:
+    """Active auto-publish campaigns with posting slots and NOTHING rendered — each one is a slot
+    that will be missed. The dashboard leads with this instead of an average that averages it away."""
+    ready_by_camp = dict(db.execute(
+        select(BufferPoolItem.campaign_id, func.count())
+        .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
+        .where(Campaign.user_id == user_id, BufferPoolItem.status == BufferStatus.ready)
+        .group_by(BufferPoolItem.campaign_id)).all())
+    n = 0
+    for c in db.scalars(select(Campaign).where(
+            Campaign.user_id == user_id, Campaign.status == CampaignStatus.active)).all():
+        cfg = c.config_json or {}
+        if cfg.get("auto_publish", True) and (cfg.get("posting_slots") or []) \
+                and not ready_by_camp.get(c.id):
+            n += 1
+    return n
+
+
+def _activity_feed(tasks, camp_by_id, chan_by_id) -> list[dict]:
+    """Collapse runs of identical consecutive events into one row (ADR-066).
+
+    A burst of published episodes produced ten near-identical lines — "Published — <same campaign> ·
+    Ep 51x · 50m ago" over and over — which is where the dashboard's last two phone screens went. One
+    row per run ("6 episodes published") says the same thing and leaves room for what changed."""
+    feed: list[dict] = []
+    for task in tasks:
+        campaign = camp_by_id.get(task.campaign_id)
+        last = feed[-1] if feed else None
+        if (last is not None and last["status"] == task.status.value
+                and last["campaign_id"] == task.campaign_id):
+            last["episodes"].append(task.episode_number)
+            last["count"] += 1
+            continue
+        feed.append({
+            "status": task.status.value, "campaign_id": task.campaign_id,
+            "topic": campaign.topic_name if campaign else f"C{task.campaign_id}",
+            "channel": (chan_by_id.get(campaign.channel_id).channel_name
+                        if campaign and campaign.channel_id in chan_by_id else None),
+            "episodes": [task.episode_number], "count": 1,
+            "at": task.updated_at, "task_id": task.id,
+            "published_url": task.published_url,
+        })
+    return feed
+
+
 def _scorecard(db, user_id: int) -> dict:
     """Trajectory signals for the dashboard: 7-day publish throughput, buffer runway, and
     week-over-week retention. Read-only; answers 'is the factory winning?'."""
@@ -410,6 +455,9 @@ def _scorecard(db, user_id: int) -> dict:
         "throughput": thr, "throughput_days": [d.strftime("%a") for d in days],
         "throughput_max": max(thr) if thr else 0, "published_7d": sum(thr),
         "ready": ready, "runway_days": round(ready / demand, 1) if demand else None,
+        # The AVERAGE hid emergencies: "≈1.0 day of runway" read as fine while two campaigns had an
+        # empty buffer and were about to miss tonight's slots. Report the worst case too (ADR-066).
+        "empty_campaigns": _campaigns_with_empty_buffer(db, user_id),
         "retention_this": round(sum(ret_this) / len(ret_this), 1) if ret_this else None,
         "retention_prev": round(sum(ret_prev) / len(ret_prev), 1) if ret_prev else None,
     }
@@ -639,6 +687,7 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
             "ops": _campaign_ops(db, user.id, active_campaigns),
             "camp_by_id": {c.id: c for c in campaigns},
             "chan_by_id": {c.id: c for c in channels},
+            "feed": _activity_feed(tasks, {c.id: c for c in campaigns}, {c.id: c for c in channels}),
         },
     )
 

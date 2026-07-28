@@ -174,7 +174,9 @@ def test_vitals_are_tenant_scoped(session, user, channel):
     assert main._factory_vitals(session, user.id)["views"] == 10
 
 
-def test_the_dashboard_renders_the_vitals_card(client, session, user, channel):
+def test_the_dashboard_reports_the_factory_in_one_card(client, session, user, channel):
+    """Two adjacent cards with the same layout ("scorecard" + "vitals") became one "Factory" card,
+    and CPU/RAM moved into the health strip where the rest of the infra signals live (ADR-066)."""
     from database.types import TaskStatus
 
     camp = _campaign(session, user, channel)
@@ -182,14 +184,25 @@ def test_the_dashboard_renders_the_vitals_card(client, session, user, channel):
           stats_json={"views": 4321})
 
     body = " ".join(client.get("/").text.split())    # collapse template line breaks
-    assert "Factory vitals" in body
+    assert ">Factory<" in body
+    assert "Factory vitals" not in body and "Factory scorecard" not in body
     assert "4,321" in body                     # thousands-separated, one measured episode
-    assert "across 1 measured episode of 1 published" in body
-    assert "CPU load" in body and "Memory" in body
+    assert "across 1 measured episode" in body
+    # Host vitals live in the health strip now, not in a card of their own.
+    strip = body.split('id="health-strip"', 1)[1].split("</div>", 1)[0]
+    assert "CPU" in strip or "RAM" in strip
 
 
-def test_the_vitals_card_explains_itself_with_no_data_yet(client):
+def test_the_factory_card_explains_itself_with_no_data_yet(client):
     body = client.get("/").text
-    assert "Factory vitals" in body
     assert "no analytics collected yet" in body
     assert "nothing finished today yet" in body
+
+
+def test_the_six_stat_tiles_are_gone(client):
+    """Every number they showed already lived in the triage card, the health strip or the Factory
+    card — six tiles were a screen of scrolling that answered nothing new (ADR-066)."""
+    body = client.get("/").text
+    assert 'class="stats"' not in body
+    for retired in ("Connected channels", "Active campaigns", "Videos published", "In pipeline"):
+        assert retired not in body

@@ -293,6 +293,8 @@ details.disclosure > summary > .sum { flex: 1; min-width: 0; display: flex; flex
   border: 1px solid var(--border); border-radius: var(--radius); padding: var(--sp-2) var(--sp-3);
   margin-bottom: var(--sp-5); font-size: var(--fs-sm); color: var(--muted); box-shadow: var(--shadow-1); }
 .health.degraded { border-color: var(--st-failed-bd); background: var(--st-failed-bg); }
+/* Sits tight under the strip it explains (was an inline style on the element). */
+.degraded-note { margin: calc(-1 * var(--sp-3)) 0 var(--sp-4); }
 .hitem { display: inline-flex; align-items: center; gap: 7px; padding: 6px 10px;
   border-radius: var(--radius-sm); }
 .health b { color: var(--text); }
@@ -622,8 +624,13 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
   background: var(--surface); color: var(--st-success); border: 1px solid var(--st-success-bd);
   display: inline-flex; align-items: center; justify-content: center; font-weight: var(--fw-bold); }
 
-/* Factory scorecard (dashboard trajectory) */
+/* Factory card cells (dashboard). Two columns even on a phone: six one-per-row cells were the
+   biggest remaining block of dashboard scrolling, and these numbers are short enough to pair up. */
 .scorecard { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--sp-5); }
+@media (max-width: 480px) {
+  .scorecard { grid-template-columns: 1fr 1fr; gap: var(--sp-4) var(--sp-3); }
+  .sc-cell .n { font-size: var(--fs-lg); }
+}
 .sc-cell .l { color: var(--muted); font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .4px; }
 .sc-cell .n { font-size: var(--fs-xl); font-weight: var(--fw-bold); margin-top: 4px; }
 .sc-cell .n.muted { color: var(--muted); }
@@ -847,3 +854,9 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
 }
+
+/* Scope switcher, disabled on the whole-factory Dashboard (ADR-066) — visibly inert beats silently
+   doing nothing, which is what selecting a channel there used to do. */
+.scope-switcher:disabled { opacity: .55; cursor: not-allowed; }
+.scope-off-note { margin: var(--sp-1) var(--sp-1) 0; font-size: 11px; color: var(--text-subtle);
+  line-height: 1.35; }

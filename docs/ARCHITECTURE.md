@@ -1342,3 +1342,27 @@ surfaces. Retiring the page also deleted a whole parallel implementation — a s
 second pager, dead Time/Result columns, and progress bars that showed 0% on published episodes.
 Keeping `/api/tasks` intact means every existing test of pagination, search and scope still applies to
 the code that still exists.
+
+### ADR-066 — The dashboard answers four questions, in four blocks
+**Decision:** the dashboard is **health strip → triage → running now → one Factory card → activity**,
+and nothing else. The six stat tiles are deleted; "Factory scorecard" and "Factory vitals" merge into
+one **Factory** card; CPU and memory move into the health strip; buffer runway leads with the number of
+campaigns at **zero** rather than an average; the green all-clear renders only when the machine is
+healthy *and* nothing needs a human; the activity feed collapses runs of identical consecutive events;
+and the sidebar scope switcher is **disabled** on this page, because the Dashboard is deliberately
+factory-wide. Mobile went from 5.0 phone screens to 2.9.
+**Why:** the phone operator's first finding was that eight widgets competed to answer one question, so
+"is anything broken?" took four screens of scrolling and four disagreeing numbers. Each deletion has a
+specific reason rather than a taste argument. The six tiles restated numbers already present in the
+triage card, the health strip or the card below. The two analytics cards used the *same* layout and
+split one question down the wrong seam — total views (content performance) sat in the machine-health
+card while the failure rate sat away from the failure count — so nobody could say which card answered
+what. CPU/RAM belong beside Disk and Queue: they are all "can the box cope?". The runway average was
+actively misleading, not merely vague: it reported "≈1.0 day" while two campaigns directly below it
+showed "buffer empty — next slot will be missed", so the aggregate averaged away the emergency it
+existed to surface. The all-clear card contradicting a red banner one row above it is the cheapest way
+to teach an operator that the UI cannot be trusted. And the scope switcher was the clearest lie on the
+page: selecting a channel updated the URL and changed nothing, while every number kept showing the
+whole factory — disabling it with a note is honest, whereas half-scoping some sections and not others
+would reproduce the inconsistency this whole refactor is removing. Per-channel remains a real view: it
+is what `/channels`, and scoped Campaigns and Episodes, are for.

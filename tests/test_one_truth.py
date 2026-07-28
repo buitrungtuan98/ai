@@ -322,3 +322,60 @@ def test_banners_render_as_prose_not_columns():
     css = pathlib.Path("static/app.css").read_text()
     rule = css.split(".banner {", 1)[1].split("}", 1)[0]
     assert "display: block" in rule and "display: flex" not in rule
+
+
+# ── R3: an honest, short dashboard (ADR-066) ─────────────────────────────────
+def test_runway_reports_the_worst_campaign_not_a_soothing_average(client, session, user, channel):
+    """"≈1.0 day of runway" read as fine while two campaigns were about to miss tonight's slots."""
+    import main
+    from database.models import BufferPoolItem
+    from database.types import BufferStatus
+
+    stocked = _campaign(session, user, channel, topic="Stocked", posting_slots=["21:00"])
+    _campaign(session, user, channel, topic="Empty A", posting_slots=["20:00"])
+    _campaign(session, user, channel, topic="Empty B", posting_slots=["11:30"])
+    session.add(BufferPoolItem(campaign_id=stocked.id, channel_id=channel.id, episode_number=1,
+                               video_path="/v.mp4", status=BufferStatus.ready, metadata_json={}))
+    session.commit()
+
+    assert main._campaigns_with_empty_buffer(session, user.id) == 2
+    body = " ".join(client.get("/").text.split())
+    assert "2<span class=\"u\"> at zero</span>".replace('"', '"') in body or "at zero" in body
+    assert "those slots will be missed" in body
+
+
+def test_all_clear_never_shows_beside_a_red_degraded_banner(client, session, user, channel, monkeypatch):
+    """They used to render together: a green "everything is fine" directly under "factory degraded"."""
+    from workers import task_queue
+
+    monkeypatch.setattr(task_queue, "worker_alive", lambda: False)
+    body = client.get("/").text
+    assert "The factory is degraded" in body
+    allclear = body.split('id="allclear-card"', 1)[1].split(">", 1)[0]
+    assert "hidden" in allclear
+
+
+def test_repeated_activity_rows_collapse_into_one(session, user, channel):
+    """A burst of publishes was ten near-identical lines — the last two phone screens of the page."""
+    import main
+    from database.types import TaskStatus
+
+    camp = _campaign(session, user, channel, topic="Burst")
+    tasks = [_task(session, camp, user, ep, status=TaskStatus.COMPLETED,
+                   finished_at=datetime.utcnow()) for ep in (519, 520, 521)]
+    tasks.append(_task(session, camp, user, 522, status=TaskStatus.FAILED,
+                       finished_at=datetime.utcnow(), error_message="boom"))
+
+    feed = main._activity_feed(list(reversed(tasks)), {camp.id: camp}, {channel.id: channel})
+    assert len(feed) == 2                                  # one failure row + one publish run
+    assert feed[1]["count"] == 3 and feed[1]["episodes"] == [521, 520, 519]
+
+
+def test_the_scope_switcher_is_visibly_inert_on_the_whole_factory_dashboard(client, session, user, channel):
+    """Selecting a channel there changed nothing while every number still showed the whole factory."""
+    body = client.get("/").text
+    switcher = body.split('id="scope-switcher"', 1)[1].split(">", 1)[0]
+    assert "disabled" in switcher
+    assert "Whole factory" in body
+    # On a scoped page it works normally.
+    assert "disabled" not in client.get("/episodes").text.split('id="scope-switcher"', 1)[1].split(">", 1)[0]

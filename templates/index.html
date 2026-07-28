@@ -6,14 +6,25 @@
   <a class="btn" href="/campaigns/new">+ New Campaign</a>
 {% endcall %}
 
-{# ── System health strip (degraded = red when worker/redis down; auto-refreshes) ── #}
-{% set degraded = not health.worker or not health.redis %}
+{# ── System health strip: is the machine able to work at all? Infra only — CPU and memory moved
+   here from a separate card, because "can the box cope?" is the same question as the rest of this
+   row (ADR-066). Auto-refreshed by ui.js. ── #}
+{% set degraded = not health.worker or not health.redis or health.worker_stalled %}
 <div class="health{{ ' degraded' if degraded }}" id="health-strip" role="status" aria-live="polite">
-  <span class="hitem"><span class="dot2 {{ 'ok' if health.worker else 'bad' }}" id="hd-worker"></span>
-    Worker <b id="hl-worker">{{ 'running' if health.worker else 'stopped' }}</b></span>
+  <span class="hitem"><span class="dot2 {{ 'ok' if health.worker and not health.worker_stalled else 'bad' }}" id="hd-worker"></span>
+    Worker <b id="hl-worker">{{ 'wedged' if health.worker_stalled else ('running' if health.worker else 'stopped') }}</b></span>
   <span class="hitem"><span class="dot2 {{ 'ok' if health.redis else 'bad' }}" id="hd-redis"></span>
     Redis <b id="hl-redis">{{ 'connected' if health.redis else 'down' }}</b></span>
   <span class="hitem">Queue <b id="hv-queue">{{ health.queue_depth if health.queue_depth is not none else '—' }}</b> waiting</span>
+  {% set h = vitals.host %}
+  {% if h.load_pct is not none %}
+  <span class="hitem {{ 'warn' if h.load_pct >= 90 }}" title="Load {{ h.load }} across {{ h.cores }} core{{ 's' if h.cores != 1 }} — one render at a time is by design">
+    CPU <b>{{ h.load_pct }}%</b></span>
+  {% endif %}
+  {% if h.ram_pct is not none %}
+  <span class="hitem {{ 'warn' if h.ram_pct >= 90 }}" title="{{ h.ram_used_mb }} of {{ h.ram_total_mb }} MB (page cache excluded)">
+    RAM <b>{{ h.ram_pct }}%</b></span>
+  {% endif %}
   <span class="hitem {{ 'warn' if health.disk_pct and health.disk_pct >= 85 }}">
     Disk <b id="hv-disk">{{ health.disk_pct ~ '%' if health.disk_pct is not none else '—' }}</b></span>
   <span class="hitem {{ 'warn' if health.ai_budget and health.ai_calls >= health.ai_budget * 0.8 }}">
@@ -26,7 +37,7 @@
   </span>
   <span class="hitem live-stamp" title="Auto-refreshes every few seconds"><span class="live-dot" id="live-dot"></span> Live</span>
 </div>
-<p class="hint" id="degraded-note" style="margin:-12px 0 16px; color:var(--st-failed)"
+<p class="hint text-bad degraded-note" id="degraded-note"
    {{ '' if degraded else 'hidden' }}>⚠ The factory is degraded — rendering and publishing are paused until the worker and Redis are back.</p>
 
 {# ── Triage inbox: what needs a human, in order ─────────────────────────────── #}
@@ -69,7 +80,9 @@
     {% endfor %}
   </ul>
 </div>
-<div class="card allclear" id="allclear-card" {{ '' if not need else 'hidden' }}>
+{# Only "all clear" when the machine is healthy AND nothing needs a human — it used to sit directly
+   under a red "factory is degraded" banner, which made every other signal look untrustworthy. #}
+<div class="card allclear" id="allclear-card" {{ '' if not need and not degraded else 'hidden' }}>
   <span class="ac-ico">✓</span>
   <div><b>All clear — nothing needs you right now.</b>
     <div class="meta">The factory is running on its own. Failed renders and videos awaiting review will surface here.</div></div>
@@ -96,94 +109,66 @@
 </div>
 {% endif %}
 
-<div class="stats">
-  {{ ui.stat(channels|length, 'Connected channels', href='/channels', live='channels') }}
-  {{ ui.stat(campaigns|selectattr('status.value','equalto','active')|list|length, 'Active campaigns', tone='work', href='/campaigns', live='active_campaigns') }}
-  {{ ui.stat(counts.published, 'Videos published', tone='ok', live='published') }}
-  {{ ui.stat(counts.working, 'In pipeline', tone='work', href='/episodes?status=rendering', live='working') }}
-  {{ ui.stat(counts.awaiting_review, 'Awaiting review', tone='warn' if counts.awaiting_review else '', href='/assets', live='awaiting_review') }}
-  {{ ui.stat(counts.failed, 'Failed', tone='bad' if counts.failed else '', href='/episodes?status=failed', live='failed') }}
-</div>
-
-{# ── Factory scorecard: trajectory, not just current counts ─────────────────── #}
+{# ── One Factory card: how the whole factory is doing. This replaced two adjacent cards with the
+   same layout ("Factory scorecard" + "Factory vitals") that split one question — content performance
+   sat in the machine-health card and nobody could say which card answered what (ADR-066). ── #}
+{% set v = vitals %}
 <div class="card">
-  <div class="card-head"><h3>Factory scorecard</h3><span class="meta">is the factory winning?</span></div>
+  <div class="card-head"><h3>Factory</h3>
+    <span class="meta">every channel, all time unless stated</span></div>
   <div class="scorecard mt">
     <div class="sc-cell">
       <div class="l">Published · 7 days</div>
       <div class="n">{{ scorecard.published_7d }}</div>
       <div class="spark-bars">
-        {% for v in scorecard.throughput %}
-        <span class="sb" style="height:{{ (100 * v / scorecard.throughput_max)|round|int if scorecard.throughput_max else 3 }}%"
-              title="{{ scorecard.throughput_days[loop.index0] }}: {{ v }}"></span>
+        {% for n in scorecard.throughput %}
+        <span class="sb" style="height:{{ (100 * n / scorecard.throughput_max)|round|int if scorecard.throughput_max else 3 }}%"
+              title="{{ scorecard.throughput_days[loop.index0] }}: {{ n }}"></span>
         {% endfor %}
       </div>
+      <div class="meta">{{ v.published_total }} published in total</div>
     </div>
     <div class="sc-cell">
-      <div class="l">Buffer runway</div>
-      <div class="n">{{ scorecard.ready }}<span class="u"> ready</span></div>
-      <div class="meta">{% if scorecard.runway_days is not none %}≈ {{ scorecard.runway_days }} day{{ 's' if scorecard.runway_days != 1 }} at current cadence{% else %}no active posting slots{% endif %}</div>
+      <div class="l">Views</div>
+      {% if v.measured %}
+      <div class="n">{{ '{:,}'.format(v.views) }}</div>
+      <div class="meta">across {{ v.measured }} measured episode{{ 's' if v.measured != 1 }} — analytics lag ~2 days</div>
+      {% else %}<div class="n muted">—</div><div class="meta">no analytics collected yet</div>{% endif %}
     </div>
     <div class="sc-cell">
-      <div class="l">Retention · this week</div>
+      <div class="l">Retention · last 7 days</div>
       {% if scorecard.retention_this is not none %}
       {% set delta = scorecard.retention_this - (scorecard.retention_prev or scorecard.retention_this) %}
       <div class="n">{{ scorecard.retention_this }}%
         {% if scorecard.retention_prev is not none %}<span class="delta {{ 'up' if delta >= 0 else 'down' }}">{{ '▲' if delta >= 0 else '▼' }} {{ (delta if delta >= 0 else -delta)|round(1) }}</span>{% endif %}
       </div>
-      <div class="meta">{% if scorecard.retention_prev is not none %}vs {{ scorecard.retention_prev }}% last week{% else %}avg % viewed{% endif %}</div>
-      {% else %}<div class="n muted">—</div><div class="meta">no published stats yet</div>{% endif %}
+      <div class="meta">avg % viewed{% if scorecard.retention_prev is not none %} · vs {{ scorecard.retention_prev }}% the week before{% endif %}</div>
+      {% else %}<div class="n muted">—</div><div class="meta">avg % viewed — no measured episodes yet</div>{% endif %}
+    </div>
+    <div class="sc-cell">
+      <div class="l">Buffer runway</div>
+      {# The worst case leads. An average said "≈1 day" while two campaigns were about to miss slots. #}
+      {% if scorecard.empty_campaigns %}
+      <div class="n bad">{{ scorecard.empty_campaigns }}<span class="u"> at zero</span></div>
+      <div class="meta">campaign{{ 's' if scorecard.empty_campaigns != 1 }} with nothing rendered — those slots will be missed</div>
+      {% else %}
+      <div class="n">{{ scorecard.ready }}<span class="u"> ready</span></div>
+      <div class="meta">{% if scorecard.runway_days is not none %}≈ {{ scorecard.runway_days }} day{{ 's' if scorecard.runway_days != 1 }} at current cadence{% else %}no active posting slots{% endif %}</div>
+      {% endif %}
     </div>
     <div class="sc-cell">
       <div class="l">Next publish</div>
       {% if next_publish %}
-      <div class="n">~{{ next_publish.in_hours }}h</div>
+      <div class="n"><a href="/calendar">~{{ next_publish.in_hours }}h</a></div>
       <div class="meta">{{ next_publish.when }} · {{ next_publish.campaign }}</div>
       {% else %}<div class="n muted">—</div><div class="meta">no upcoming slots</div>{% endif %}
-    </div>
-  </div>
-</div>
-
-{# ── Factory vitals: reach produced, today's render success, and what the box costs ─────────── #}
-{% set v = vitals %}
-{% set h = v.host %}
-<div class="card">
-  <div class="card-head"><h3>Factory vitals</h3>
-    <span class="meta">the whole factory, and the box it runs on</span></div>
-  <div class="scorecard mt">
-    <div class="sc-cell">
-      <div class="l">Total views</div>
-      {% if v.measured %}
-      <div class="n">{{ '{:,}'.format(v.views) }}</div>
-      <div class="meta">across {{ v.measured }} measured episode{{ 's' if v.measured != 1 }} of
-        {{ v.published_total }} published — analytics lag about 2 days</div>
-      {% else %}<div class="n muted">—</div>
-      <div class="meta">{{ v.published_total }} published; no analytics collected yet</div>{% endif %}
     </div>
     <div class="sc-cell">
       <div class="l">Renders today</div>
       {% if v.renders_today %}
-      <div class="n {{ 'bad' if v.fail_pct_today and v.fail_pct_today >= 50 else '' }}">{{ v.fail_pct_today }}%<span class="u"> failed</span></div>
-      <div class="meta">{{ v.failed_today }} of {{ v.renders_today }} finished episode{{ 's' if v.renders_today != 1 }}
-        {%- if v.render_minutes_today %} · {{ v.render_minutes_today }} min of machine time{% endif %}</div>
+      <div class="n {{ 'bad' if v.fail_pct_today and v.fail_pct_today >= 50 else '' }}">{{ v.renders_today }}<span class="u"> finished</span></div>
+      <div class="meta">{{ v.failed_today }} failed ({{ v.fail_pct_today }}%){% if v.render_minutes_today %} · {{ v.render_minutes_today }} min of machine time{% endif %}</div>
       {% else %}<div class="n muted">—</div><div class="meta">nothing finished today yet</div>{% endif %}
-    </div>
-    <div class="sc-cell">
-      <div class="l">CPU load</div>
-      {% if h.load_pct is not none %}
-      <div class="n">{{ h.load_pct }}%</div>
-      {{ ui.progress(h.load_pct, 'done' if h.load_pct < 80 else '') }}
-      <div class="meta">load {{ h.load }} over {{ h.cores }} core{{ 's' if h.cores != 1 }} — one
-        render at a time is by design</div>
-      {% else %}<div class="n muted">—</div><div class="meta">not readable on this host</div>{% endif %}
-    </div>
-    <div class="sc-cell">
-      <div class="l">Memory</div>
-      {% if h.ram_pct is not none %}
-      <div class="n">{{ h.ram_pct }}%</div>
-      {{ ui.progress(h.ram_pct, 'done' if h.ram_pct < 85 else '') }}
-      <div class="meta">{{ h.ram_used_mb }} of {{ h.ram_total_mb }} MB (page cache excluded)</div>
-      {% else %}<div class="n muted">—</div><div class="meta">not readable on this host</div>{% endif %}
     </div>
   </div>
 </div>
@@ -195,24 +180,26 @@
   </div>
   {% if tasks %}
   {% set FK = {'COMPLETED': ('done', 'Published'), 'FAILED': ('failed', 'Failed'),
+               'CANCELLED': ('pending', 'Cancelled'),
                'AWAITING_REVIEW': ('review', 'Awaiting review'), 'SCHEDULED': ('scheduled', 'Rendered · scheduled'),
                'PUBLISHING': ('working', 'Publishing'), 'RENDERING': ('working', 'Rendering'),
-               'AI_GENERATION': ('working', 'Writing script'), 'AUDIO_SYNCED': ('working', 'Audio synced'),
-               'PENDING_QUEUE': ('pending', 'Queued')} %}
+               'AI_GENERATION': ('working', 'Writing'), 'PENDING_QUEUE': ('pending', 'Queued')} %}
   <ul class="feed mt">
-    {% for t in tasks %}
-    {% set camp = camp_by_id.get(t.campaign_id) %}
-    {% set chan = chan_by_id.get(camp.channel_id) if camp else none %}
-    {% set ev = FK.get(t.status.value, ('pending', t.status.value.replace('_',' ')|title)) %}
-    <li class="feed-item" data-time="{{ t.updated_at.isoformat() }}Z">
+    {# One row per RUN of identical events: a burst of publishes was ten near-identical lines and the
+       last two phone screens of this page (ADR-066). #}
+    {% for e in feed %}
+    {% set ev = FK.get(e.status, ('pending', e.status.replace('_',' ')|title)) %}
+    <li class="feed-item" data-time="{{ e.at.isoformat() }}Z">
       <span class="feed-dot {{ ev[0] }}"></span>
       <div class="grow">
         <span class="feed-label">{{ ev[1] }}</span> —
-        <a href="/campaigns/{{ t.campaign_id }}">{{ camp.topic_name if camp else 'C' ~ t.campaign_id }}</a> · Ep {{ t.episode_number }}
-        {% if chan %}<span class="meta">· {{ chan.channel_name }}</span>{% endif %}
-        {% if t.published_url %} · <a href="{{ t.published_url }}" target="_blank" rel="noopener">View ↗</a>{% endif %}
+        <a href="/campaigns/{{ e.campaign_id }}">{{ e.topic }}</a> ·
+        {% if e.count > 1 %}{{ e.count }} episodes (Ep {{ e.episodes|min }}–{{ e.episodes|max }})
+        {%- else %}<a href="/episodes/{{ e.task_id }}">Ep {{ e.episodes[0] }}</a>{% endif %}
+        {% if e.channel %}<span class="meta">· {{ e.channel }}</span>{% endif %}
+        {% if e.count == 1 and e.published_url %} · <a href="{{ e.published_url }}" target="_blank" rel="noopener">View ↗</a>{% endif %}
       </div>
-      <span class="feed-when" data-reltime="{{ t.updated_at.isoformat() }}Z">{{ t.updated_at.strftime('%H:%M') }} UTC</span>
+      <span class="feed-when" data-reltime="{{ e.at.isoformat() }}Z">{{ e.at.strftime('%H:%M') }} UTC</span>
     </li>
     {% endfor %}
   </ul>

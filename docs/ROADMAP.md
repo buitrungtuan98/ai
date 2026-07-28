@@ -1306,6 +1306,27 @@ the duplication; the chips were how you noticed (ADR-065):
 - Verified: 382 tests (5 new), ruff clean, docs guard green; chips, live row movement, the redirect and
   both breakpoints checked in a real browser.
 
+## UX consolidation R3 — an honest, short dashboard `DONE`
+Eight widgets competed to answer "is anything broken?", so the answer took four phone screens and came
+back as four disagreeing numbers. The dashboard is now four blocks (ADR-066): health strip → triage →
+running now → one Factory card → activity. **5.0 phone screens → 2.9.**
+- **Deleted the six stat tiles** — every number was already in the triage card, the health strip or the
+  card below.
+- **Merged "Factory scorecard" + "Factory vitals" into one Factory card.** They shared a layout and
+  split one question down the wrong seam (total views sat in the machine-health card; the failure rate
+  sat away from the failure count). Windows are now named: "Retention · last 7 days", "across N
+  measured episodes — analytics lag ~2 days".
+- **CPU + RAM moved into the health strip**, beside Disk and Queue — they answer the same question.
+- **Runway leads with the worst case**: "2 at zero — those slots will be missed" instead of "≈1.0 day",
+  which averaged away the very emergency shown in the panel directly below it.
+- **All-clear can no longer sit beside a red banner** (a green "everything is fine" under "factory is
+  degraded" teaches the operator to distrust every signal).
+- **Activity collapses runs**: "6 episodes published (Ep 519–524)" instead of six identical lines.
+- **The scope switcher is visibly disabled here.** Selecting a channel changed the URL and nothing
+  else while every number still showed the whole factory. Per-channel lives on Channels and on scoped
+  Campaigns/Episodes; half-scoping this page would recreate the inconsistency being removed.
+- Verified: 387 tests (4 new), ruff clean, docs guard green; measured in a real browser at 375px/1280px.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download
