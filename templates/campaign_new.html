@@ -67,6 +67,17 @@
           the description, and allow part numbering in titles. They take much longer to render on one
           CPU — keep a small daily cap and a modest buffer.</p>
       </div>
+      <div class="form-row"><label>Content style</label>
+        <select name="content_style" id="content-style">
+          <option value="story" {{ 'selected' if cfg.get('content_style','story')!='quote' }}>Story — a narrated video (facts, stories, explainers) — the default</option>
+          <option value="quote" {{ 'selected' if cfg.get('content_style')=='quote' }}>Quote — an aesthetic poem-per-video (drawn scenes, centered lines, one word cover)</option>
+        </select>
+        <p class="hint">Quote mode is the aesthetic "whisper" style: each video is a short poem shown
+          line-by-line over an AI-drawn mood illustration, with a scribble-word cover. A per-episode
+          <b>Vibe Engine</b> re-rolls the mood, whether a lone figure appears, the setting &amp; music —
+          so every video is unique — while your <b>art style stays constant</b>. Draws with the image
+          model (works on free Pollinations flux). Picking Quote auto-tunes the fields below.</p>
+      </div>
       <div class="form-row"><label>Visual source — where the picture comes from</label>
         <select name="visual_source" id="visual-source">
           <option value="stock" {{ 'selected' if cfg.get('visual_source','stock')!='studio' }}>Stock footage — real clips from Pexels (default, no image quota)</option>
@@ -79,11 +90,25 @@
           cap. Stock footage never touches the image quota.</p>
       </div>
       <div class="form-row" id="visual-style-row" style="display:none">
-        <label>Art-style override for this campaign (optional)</label>
-        <input name="visual_style" value="{{ cfg.get('visual_style') or '' }}"
+        <label>Art style for this campaign <span class="meta">(the constant channel look)</span></label>
+        <input name="visual_style" id="visual-style-input" value="{{ cfg.get('visual_style') or '' }}"
                placeholder="e.g. hand-drawn pencil sketch, black &amp; white, bold ink outlines">
-        <p class="hint">Blank = use each character's own style. A value here restyles every drawn
-          frame in this campaign (great for a distinct look without editing the channel's cast).</p>
+        <div class="row-actions" style="margin-top:var(--sp-2)">
+          <span class="meta">Presets:</span>
+          <button type="button" class="btn ghost sm" data-style="lofi retro anime illustration, painterly texture, film grain, muted teal and warm dusk-orange palette, soft fading light, a lone small figure in a vast atmospheric scene, 1980s Japanese illustration mood">Lofi retro anime (quote look)</button>
+          <button type="button" class="btn ghost sm" data-style="soft watercolour illustration, gentle washes, muted palette, dreamy and quiet">Soft watercolour</button>
+          <button type="button" class="btn ghost sm" data-style="moody cinematic digital painting, deep shadows, rim light, film grain">Moody cinematic</button>
+        </div>
+        <p class="hint">In <b>Quote</b> mode this is the channel identity — the SAME art style across every
+          video (the Vibe Engine only varies mood/scene, never the style). In Studio character mode,
+          blank = each character's own style; a value restyles every drawn frame.</p>
+      </div>
+      <div class="form-row" id="signature-row" style="display:none">
+        <label>On-screen signature <span class="meta">(your channel mark, optional)</span></label>
+        <input name="signature" value="{{ cfg.get('signature') or '' }}" maxlength="40"
+               placeholder="@YourChannel">
+        <p class="hint">Drawn small in italic, lower-centre of every frame and the thumbnail — like the
+          reference channel's watermark, but your own. Blank = none.</p>
       </div>
       <div class="form-row"><label>Billboard title</label>
         <select name="title_overlay">
@@ -381,15 +406,33 @@
   applyFormatConstraints();
   if (fmtSel) fmtSel.addEventListener("change", applyFormatConstraints);
 
-  // Studio Mode: the art-style override only applies when the visual source is "studio", so hide it
-  // for stock-footage campaigns to keep the form uncluttered.
+  // The art style + signature rows are relevant when the picture is drawn — Studio character mode OR
+  // Quote mode (which always draws). Quote forces Studio (its poem lines are illustrated).
   const vsSel = document.getElementById("visual-source");
   const vsRow = document.getElementById("visual-style-row");
-  function applyVisualSource() {
-    if (vsRow) vsRow.style.display = (vsSel && vsSel.value === "studio") ? "" : "none";
+  const csSel = document.getElementById("content-style");
+  const sigRow = document.getElementById("signature-row");
+  const vstyleInput = document.getElementById("visual-style-input");
+  function isQuote() { return csSel && csSel.value === "quote"; }
+  function applyContentVisual() {
+    const drawn = (vsSel && vsSel.value === "studio") || isQuote();
+    if (vsRow) vsRow.style.display = drawn ? "" : "none";
+    if (sigRow) sigRow.style.display = drawn ? "" : "none";
+    if (isQuote() && vsSel && vsSel.value !== "studio") vsSel.value = "studio";  // quote is always drawn
   }
-  applyVisualSource();
-  if (vsSel) vsSel.addEventListener("change", applyVisualSource);
+  applyContentVisual();
+  if (vsSel) vsSel.addEventListener("change", applyContentVisual);
+  if (csSel) csSel.addEventListener("change", function () {
+    // Picking Quote auto-suggests a starter art style (the lofi look) when none is set yet.
+    if (isQuote() && vstyleInput && !vstyleInput.value.trim()) {
+      const preset = document.querySelector("[data-style]");
+      if (preset) vstyleInput.value = preset.dataset.style;
+    }
+    applyContentVisual();
+  });
+  document.querySelectorAll("[data-style]").forEach(function (b) {
+    b.addEventListener("click", function () { if (vstyleInput) vstyleInput.value = b.dataset.style; });
+  });
 
   // Per-channel localization: switching the target channel re-seeds language / voice / timezone
   // from that channel's profile (only on a new campaign — the map is absent when editing).
