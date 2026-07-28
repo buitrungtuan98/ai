@@ -216,6 +216,15 @@ def reap_stuck_tasks(db, now: datetime | None = None) -> int:
 _LOCK_SUSPECT_KEY = "render:lock-suspect"
 
 
+def _render_appears_live(db) -> bool:
+    """True while anything looks like a real render in flight — a task in a working status or a live
+    Redis progress entry. THE guard for render-concurrency-1: a real render sets a working status
+    within milliseconds of acquiring the lock, so this can never be false during one."""
+    working = db.scalar(select(func.count()).select_from(Task)
+                        .where(Task.status.in_(_STUCK_STATUSES))) or 0
+    return bool(working or task_queue.active_render_task_ids())
+
+
 def clear_orphaned_render_lock(db) -> bool:
     """Free a render lock left behind by a hard-crashed worker (its release `finally` was skipped),
     so the queue doesn't have to wait out the full lock TTL (~46 min) before anything renders again.
@@ -228,9 +237,7 @@ def clear_orphaned_render_lock(db) -> bool:
         if not task_queue.conn.get(task_queue.LOCK_KEY):
             task_queue.conn.delete(_LOCK_SUSPECT_KEY)
             return False
-        working = db.scalar(select(func.count()).select_from(Task)
-                            .where(Task.status.in_(_STUCK_STATUSES))) or 0
-        if working or task_queue.active_render_task_ids():
+        if _render_appears_live(db):
             task_queue.conn.delete(_LOCK_SUSPECT_KEY)  # a render is genuinely live — not orphaned
             return False
         # Lock held but nothing is actually rendering. Require the condition to persist across two
@@ -243,6 +250,27 @@ def clear_orphaned_render_lock(db) -> bool:
     except Exception:  # noqa: BLE001 — housekeeping must never raise
         logger.debug("orphaned-lock check failed", exc_info=True)
     return False
+
+
+def recover_now(db, now: datetime | None = None) -> dict:
+    """Operator-triggered recovery, exposed as the Operations page's "Recover stuck renders" button:
+    fail definitively-dead tasks and free a render lock left behind by a crashed worker.
+
+    Same recovery the hourly tick performs — the point is not having to wait for the tick (or SSH in)
+    when an episode is already stranded. It keeps the render-concurrency-1 guard (`_render_appears
+    _live`) but skips the automatic sweep's two-tick delay, because an explicit operator click is
+    itself the confirming second signal. Returns {'reaped': n, 'lock_cleared': bool}."""
+    reaped = reap_stuck_tasks(db, now=now)
+    cleared = False
+    try:
+        if task_queue.conn.get(task_queue.LOCK_KEY) and not _render_appears_live(db):
+            task_queue.conn.delete(task_queue.LOCK_KEY)
+            task_queue.conn.delete(_LOCK_SUSPECT_KEY)
+            cleared = True
+            logger.warning("Operator cleared an orphaned render lock from the Operations page")
+    except Exception:  # noqa: BLE001 — recovery must never raise at the operator
+        logger.debug("operator lock clear failed", exc_info=True)
+    return {"reaped": reaped, "lock_cleared": cleared}
 
 
 def maybe_distill_campaign(db, campaign: Campaign, now: datetime | None = None) -> bool:

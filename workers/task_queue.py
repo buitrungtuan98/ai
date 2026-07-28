@@ -20,6 +20,10 @@ from core.config import settings
 
 QUEUE_NAME = "renders"
 LOCK_KEY = "render:global-lock"
+# Both job kinds share the one queue (uploads stay sequential with renders — ADR-004), so anything
+# introspecting the queue must tell them apart by function name.
+RENDER_FUNC = "workers.video_worker.render_task"
+PUBLISH_FUNC = "workers.video_worker.publish_task"
 _PROGRESS_KEY = "task:progress"  # a Redis hash: field=<task_id> value=<pct>
 # Companion hash: field=<task_id> value=<unix ts of the last progress CHANGE>. Only a changed value
 # refreshes the stamp, so "progress stopped moving" is measurable without polling the render itself.
@@ -167,6 +171,111 @@ def worker_alive() -> bool:
         return len(Worker.all(connection=conn)) > 0
     except Exception:  # noqa: BLE001 — healthcheck must never raise
         return False
+
+
+# ── Queue introspection + operator controls (Operations page) ────────────────
+# Read-only views of what the worker will actually do next, plus the two interventions an operator
+# needs when a slot is close: jump the queue, or drop a job. Everything lives here because this
+# module owns the queue (DRY) and everything fails soft — the Operations page must render even when
+# Redis is unreachable.
+def queued_jobs() -> list[dict]:
+    """Queued jobs in the exact order the worker will run them:
+    [{position, job_id, kind ('render'|'publish'), arg (task/buffer id), enqueued_at}].
+
+    `position` is the true queue position across BOTH kinds, so a render sitting behind a publish
+    job is not shown as if it were next."""
+    from rq.job import Job
+
+    try:
+        ids = render_queue.get_job_ids()
+        jobs = Job.fetch_many(ids, connection=conn)
+    except Exception:  # noqa: BLE001 — a broken queue read must not break the page
+        return []
+    out: list[dict] = []
+    for pos, job in enumerate(jobs, start=1):
+        if job is None:  # expired/vanished job id still listed in the queue
+            continue
+        kind = {RENDER_FUNC: "render", PUBLISH_FUNC: "publish"}.get(job.func_name)
+        if kind is None:
+            continue
+        out.append({"position": pos, "job_id": job.id, "kind": kind,
+                    "arg": job.args[0] if job.args else None,
+                    "enqueued_at": job.enqueued_at})
+    return out
+
+
+def move_job_to_front(job_id: str) -> bool:
+    """Re-queue an already-queued job at the head. The Job itself is untouched (so `Task.rq_job_id`
+    stays valid) — only its place in the queue's id list changes. False if it is no longer queued."""
+    try:
+        if job_id not in render_queue.get_job_ids():
+            return False
+        render_queue.remove(job_id)
+        render_queue.push_job_id(job_id, at_front=True)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def cancel_job(job_id: str) -> bool:
+    """Drop a queued job so the worker never runs it. Only affects the QUEUE — a job already in
+    flight keeps running (RQ cannot interrupt it); the caller owns the Task-row bookkeeping."""
+    from rq.job import Job
+
+    try:
+        if job_id not in render_queue.get_job_ids():
+            return False
+        Job.fetch(job_id, connection=conn).cancel()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def worker_snapshot() -> dict | None:
+    """Live state of the single RQ worker, or None when none is registered. Every field is
+    best-effort: an older/partial registration must still render a card."""
+    try:
+        from rq import Worker
+
+        workers = Worker.all(connection=conn)
+    except Exception:  # noqa: BLE001
+        return None
+    if not workers:
+        return None
+    w = workers[0]  # render concurrency is 1 by topology — there is only ever one (ADR-004)
+    snap = {"name": None, "state": None, "current_job_id": None, "last_heartbeat": None,
+            "birth_date": None, "successful": None, "failed": None}
+    for key, attr in (("name", "name"), ("last_heartbeat", "last_heartbeat"),
+                      ("birth_date", "birth_date"), ("successful", "successful_job_count"),
+                      ("failed", "failed_job_count")):
+        snap[key] = getattr(w, attr, None)
+    try:
+        state = w.get_state()
+        snap["state"] = state if state in ("busy", "idle", "suspended", "started") else None
+        snap["current_job_id"] = w.get_current_job_id()
+    except Exception:  # noqa: BLE001
+        pass
+    return snap
+
+
+def render_lock_held() -> bool:
+    try:
+        return conn.get(LOCK_KEY) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def progress_age_seconds(task_id: int, now: float | None = None) -> float | None:
+    """Seconds since this render's progress last MOVED (None when it has no change-stamp). Unlike
+    `stalled_render` this reports the age whatever it is, so the UI can show a rising number long
+    before the watchdog's limit is reached."""
+    try:
+        stamp = conn.hget(_PROGRESS_TS_KEY, str(task_id))
+        if stamp is None:
+            return None
+        return (time.time() if now is None else now) - float(_text(stamp))
+    except Exception:  # noqa: BLE001
+        return None
 
 
 # ── Operator-requested restart (no Docker socket) ────────────────────────────

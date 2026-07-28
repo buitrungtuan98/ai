@@ -163,7 +163,9 @@ code { font-family: var(--font-mono); font-size: .92em; background: var(--surfac
 .grid.cols-3 { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
 .grid.cols-2 { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
 .grid-12 { display: grid; grid-template-columns: repeat(12, 1fr); gap: var(--sp-5); }
+.col-4 { grid-column: span 4; }
 .col-6 { grid-column: span 6; }
+.col-8 { grid-column: span 8; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
   padding: var(--sp-5); box-shadow: var(--shadow-1); }
 .card h3 { margin: 0 0 var(--sp-1); font-size: var(--fs-md); }
@@ -389,7 +391,10 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 .grow { flex: 1; }
 .mt { margin-top: var(--sp-5); }
 .mt-sm { margin-top: var(--sp-2); }
+.mt-md { margin-top: var(--sp-4); }
 .muted { color: var(--muted); }
+.text-bad { color: var(--st-failed); }
+.row-actions.center { justify-content: center; }
 .mono { font-family: var(--font-mono); }
 .nowrap { white-space: nowrap; }
 
@@ -657,7 +662,7 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 }
 
 @media (max-width: 900px) {
-  .grid-12 .col-6 { grid-column: span 12; }
+  .grid-12 .col-4, .grid-12 .col-6, .grid-12 .col-8 { grid-column: span 12; }
 }
 
 /* Shell tier 2 — tablet: a compact icon rail (721–1024px). Full labels return above 1024px. */

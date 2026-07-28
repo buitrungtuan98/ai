@@ -284,11 +284,15 @@ def _system_health(db, user=None) -> dict:
     should show as red, not take the page down. The AI daily budget is the user's Settings value
     when set, else the app-wide GEMINI_DAILY_BUDGET fallback."""
     budget = (user.settings_json or {}).get("ai_daily_budget") if user is not None else None
-    health = {"redis": False, "worker": False, "queue_depth": None, "buffer_ready": 0,
-              "disk_pct": None, "ai_calls": 0, "ai_budget": budget or settings.GEMINI_DAILY_BUDGET}
+    health = {"redis": False, "worker": False, "worker_stalled": False, "queue_depth": None,
+              "buffer_ready": 0, "disk_pct": None, "ai_calls": 0,
+              "ai_budget": budget or settings.GEMINI_DAILY_BUDGET}
     try:
         health["redis"] = bool(task_queue.conn.ping())
         health["worker"] = task_queue.worker_alive()
+        # A worker that hung mid-render still registers, so liveness alone read as healthy for hours
+        # (ADR-057). Surface "registered but wedged" as its own signal.
+        health["worker_stalled"] = task_queue.stalled_render() is not None
         health["queue_depth"] = len(task_queue.render_queue)
     except Exception:  # noqa: BLE001
         pass
@@ -1743,17 +1747,31 @@ def _episode_return(return_to: str) -> str | None:
     return return_to if return_to.startswith("/episodes/") and tail.isdigit() else None
 
 
-def _action_redirect(return_to: str, flash: str, default: str, flash_reason: str = "") -> RedirectResponse:
-    """Redirect an asset/task action to its Episode view (when it came from there) or the default
-    /assets URL (unchanged behavior when no return path is supplied)."""
+def _safe_return(return_to: str) -> str | None:
+    """An internal path a shared action may bounce back to, or None. Allow-list only (never an
+    arbitrary `return_to`, which would be an open redirect): the Episode view, and the Operations
+    page — whose Publish-queue tab reuses the same asset actions and must not dump the operator on
+    /assets afterwards."""
     ep = _episode_return(return_to)
-    if ep is None:
+    if ep is not None:
+        return ep
+    if (return_to or "").split("?", 1)[0] == "/operations":
+        return return_to
+    return None
+
+
+def _action_redirect(return_to: str, flash: str, default: str, flash_reason: str = "") -> RedirectResponse:
+    """Redirect an asset/task action to the page it came from (Episode view / Operations) or the
+    default /assets URL (unchanged behavior when no return path is supplied)."""
+    target = _safe_return(return_to)
+    if target is None:
         return RedirectResponse(default, status_code=303)
-    qs = f"?flash={flash}" if flash else ""
+    sep = "&" if "?" in target else "?"
+    qs = f"{sep}flash={flash}" if flash else ""
     if flash_reason:
         from urllib.parse import quote
-        qs += f"&flash_reason={quote(flash_reason)}"
-    return RedirectResponse(ep + qs, status_code=303)
+        qs += ("&" if qs else sep) + f"flash_reason={quote(flash_reason)}"
+    return RedirectResponse(target + qs, status_code=303)
 
 
 @app.post("/assets/{item_id}/approve")
@@ -2322,3 +2340,154 @@ def retry_task(task_id: int, user: CurrentUser, db: DbDep, return_to: str = Form
     db.commit()
     return _action_redirect(return_to, "rerender", "") if _episode_return(return_to) \
         else {"ok": True, "mode": "render"}
+
+
+# ── Operations: the factory floor (render queue · worker · publish queue) ─────
+# The one place that answers "what is the machine doing, and why is nothing moving?" — and lets the
+# operator intervene from the browser instead of SSHing into the box (ADR-058). Everything here
+# reads live queue/worker state, so every lookup fails soft: a dead Redis renders an empty,
+# explained page rather than a 500.
+_OPS_TABS = ("queue", "worker")
+
+
+def _ops_job_rows(db, user_id: int) -> tuple[list[dict], int]:
+    """Queued jobs (true queue order) joined to their episode, scoped to this user. Returns the
+    render rows and how many publish jobs are queued — a render waiting behind uploads is a real
+    thing an operator needs to see, so it is reported rather than hidden."""
+    jobs = task_queue.queued_jobs()
+    render_ids = [j["arg"] for j in jobs if j["kind"] == "render" and j["arg"] is not None]
+    tasks = {t.id: t for t in db.scalars(
+        select(Task).where(Task.user_id == user_id, Task.id.in_(render_ids or [-1]))).all()}
+    campaigns = {c.id: c for c in db.scalars(
+        select(Campaign).where(Campaign.user_id == user_id)).all()}
+    channels = {c.id: c for c in db.scalars(
+        select(Channel).where(Channel.user_id == user_id)).all()}
+    rows, publish_queued = [], 0
+    for job in jobs:
+        if job["kind"] == "publish":
+            publish_queued += 1
+            continue
+        task = tasks.get(job["arg"])
+        if task is None:  # another tenant's job (or a vanished task) — never leak it
+            continue
+        campaign = campaigns.get(task.campaign_id)
+        rows.append({
+            "position": job["position"], "job_id": job["job_id"], "task": task,
+            "campaign": campaign,
+            "channel": channels.get(campaign.channel_id) if campaign else None,
+            "enqueued_at": job["enqueued_at"],
+        })
+    return rows, publish_queued
+
+
+def _ops_worker_card(db, user_id: int) -> dict:
+    """The single worker's state, plus whatever it is rendering right now. `state` is the operator-
+    facing verdict: down (nothing registered) · stalled (progress past the watchdog limit) ·
+    busy · idle."""
+    snap = task_queue.worker_snapshot()
+    stalled = task_queue.stalled_render()
+    live = []
+    for raw_id in sorted(task_queue.active_render_task_ids()):
+        try:
+            task = db.get(Task, int(raw_id))
+        except (TypeError, ValueError):
+            continue
+        if task is None or task.user_id != user_id:
+            continue
+        campaign = db.get(Campaign, task.campaign_id)
+        age = task_queue.progress_age_seconds(task.id)
+        live.append({"task": task, "campaign": campaign,
+                     "pct": round(task_queue.get_progress(task.id), 1),
+                     "idle_min": int(age // 60) if age is not None else None})
+    # Liveness comes from the same helper the dashboard health strip uses (one definition of "the
+    # worker is up"); the snapshot only adds detail and may be unavailable on a partial registration.
+    if not task_queue.worker_alive():
+        state = "down"
+    elif stalled is not None:
+        state = "stalled"
+    elif live:
+        state = "busy"
+    else:
+        state = "idle"
+    return {"snapshot": snap, "state": state, "live": live,
+            "lock_held": task_queue.render_lock_held(),
+            "stall_limit_min": task_queue.stall_limit_seconds() // 60,
+            "stalled_min": int(stalled[1] // 60) if stalled else None,
+            "restart_pending": task_queue.restart_requested(),
+            "queue_depth": len(task_queue.queued_jobs())}
+
+
+@app.get("/operations", response_class=HTMLResponse)
+def operations_page(request: Request, user: CurrentUser, db: DbDep, tab: str = "queue",
+                    flash: str = ""):
+    tab = tab if tab in _OPS_TABS else "queue"
+    ctx = {"request": request, "user": user, "nav": "operations", "tab": tab, "flash": flash,
+           "worker": _ops_worker_card(db, user.id)}
+    if tab == "queue":
+        ctx["job_rows"], ctx["publish_queued"] = _ops_job_rows(db, user.id)
+    return templates.TemplateResponse(request, "operations.html", ctx)
+
+
+def _ops_redirect(tab: str, flash: str = "") -> RedirectResponse:
+    qs = f"?tab={tab}" + (f"&flash={flash}" if flash else "")
+    return RedirectResponse("/operations" + qs, status_code=303)
+
+
+def _owned_queued_task(db, user_id: int, job_id: str) -> Task:
+    """The Task behind a queued render job, or 404. Tenancy is checked through the Task row, so one
+    operator can never reorder or cancel another's queue."""
+    for job in task_queue.queued_jobs():
+        if job["job_id"] != job_id:
+            continue
+        if job["kind"] != "render":
+            raise HTTPException(400, "Only queued renders can be reordered or cancelled")
+        task = db.get(Task, job["arg"]) if job["arg"] is not None else None
+        if task is None or task.user_id != user_id:
+            raise HTTPException(404, "Job not found")
+        return task
+    raise HTTPException(404, "That job is no longer queued")
+
+
+@app.post("/operations/jobs/{job_id}/front")
+def ops_move_job_front(job_id: str, user: CurrentUser, db: DbDep):
+    """Render this episode next — for when a posting slot is close and the buffer is empty."""
+    _owned_queued_task(db, user.id, job_id)
+    return _ops_redirect("queue", "prioritised" if task_queue.move_job_to_front(job_id) else "gone")
+
+
+@app.post("/operations/jobs/{job_id}/cancel")
+def ops_cancel_job(job_id: str, user: CurrentUser, db: DbDep):
+    """Drop a queued render. The Task is marked FAILED (not deleted) so it stays visible and the
+    normal Retry button can put it back — cancelling is a pause, not a delete."""
+    task = _owned_queued_task(db, user.id, job_id)
+    if not task_queue.cancel_job(job_id):
+        return _ops_redirect("queue", "gone")
+    task.status = TaskStatus.FAILED
+    task.finished_at = datetime.utcnow()
+    task.error_message = "Cancelled from the Operations page before it started. Use Retry to queue it again."
+    task_queue.clear_progress(task.id)
+    db.commit()
+    return _ops_redirect("queue", "cancelled")
+
+
+@app.post("/operations/recover")
+def ops_recover(user: CurrentUser, db: DbDep):
+    """Fail definitively-dead tasks and free a render lock left by a crashed worker, now instead of
+    at the next hourly tick. The render-concurrency-1 guard still applies: a live render is never
+    touched."""
+    from workers.scheduler import recover_now
+
+    result = recover_now(db)
+    flash = "recovered" if (result["reaped"] or result["lock_cleared"]) else "nothing"
+    return _ops_redirect("worker", flash)
+
+
+@app.post("/operations/restart-worker")
+def ops_restart_worker(user: CurrentUser, db: DbDep):
+    """Ask the worker to exit so its container is recreated (compose's restart policy does the rest).
+
+    A flag in Redis, NOT a Docker command: the web container is the internet-facing service and must
+    never hold the Docker socket, which is host-root (ADR-057). The worker's watchdog thread sees the
+    flag within a minute and leaves cleanly."""
+    task_queue.request_worker_restart()
+    return _ops_redirect("worker", "restarting")

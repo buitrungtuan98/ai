@@ -1138,6 +1138,28 @@ hung worker still is. Fixed at the mechanism level (ADR-057):
 - Healthcheck: `worker_alive()` → `worker_healthy()` so a wedged worker shows as `(unhealthy)`.
 - Verified: 293 tests (12 new), ruff clean, docs guard green.
 
+## Operations page — the factory floor (queue + worker) `DONE`
+"Can I restart the worker from the website instead of SSH?" — yes, and without ever giving the
+internet-facing web container the Docker socket (host-root). New `/operations` page (ADR-058), System
+group in the rail:
+- **⏳ Render queue** — queued jobs in true RQ order joined to their episode: `🔼 Next` (RQ
+  `at_front`, same Job so `rq_job_id` stays valid) and `✕ Cancel` (drops the job, Task→FAILED so the
+  normal Retry puts it back). Uploads share the one queue, so `#` is the real queue position and
+  queued uploads are counted, not hidden.
+- **⚙ Worker** — the single worker's verdict (down/stalled/busy/idle, liveness from the same
+  `worker_alive()` the health strip uses), the live render's progress **and how long since it last
+  moved** (the number that was missing during the 2-hour incident), render-lock state, plus
+  `🩹 Recover stuck renders` (the hourly sweep on demand — `scheduler.recover_now`, keeping the
+  render-concurrency-1 guard, dropping only the two-tick wait) and `🔄 Restart worker` (Redis flag
+  honoured by the watchdog).
+- Tenancy runs through the Task row: another operator's job id is neither listed nor controllable.
+- `_system_health` gained `worker_stalled`; the rail badges Operations when the worker is down OR
+  wedged, and the degraded note is worded for a registered-but-wedged worker.
+- A plain-language explainer of the three recovery layers (RQ timeout → watchdog → housekeeping), so
+  the operator knows whether to wait or intervene.
+- Verified: 312 tests (19 new), ruff clean, docs guard green; queue + worker tabs checked in a real
+  browser at 1280px and 375px against a seeded wedged render.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

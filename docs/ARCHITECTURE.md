@@ -1147,3 +1147,30 @@ restarted. Because silent stages exist (image generation, concat, Auto-QC upload
 a shorter limit would kill healthy renders. Remaining honest gap: a process frozen so hard that even
 its threads cannot run is reachable only by the healthcheck's `(unhealthy)` signal or SSH — no
 in-app button can reach code that cannot execute.
+
+### ADR-058 — An Operations page: recover the factory from the browser, never from the Docker socket
+**Decision:** add `/operations` (System group in the rail) — the factory floor, with URL-driven tabs.
+**Render queue** lists queued jobs in true RQ order joined to their episode, with `🔼 Next`
+(RQ `at_front`, reusing the same Job so `Task.rq_job_id` stays valid) and `✕ Cancel` (drops the job,
+marks the Task FAILED so the normal Retry puts it back — cancelling is a pause, not a delete).
+Because renders and uploads share the one queue, the `#` column is the *real* queue position and
+queued uploads are counted rather than hidden. **Worker** shows the single worker's verdict —
+`down | stalled | busy | idle`, where liveness comes from the same `worker_alive()` the dashboard
+health strip uses (one definition) — its live render with progress *and how long since that progress
+last moved*, the render-lock state, and two controls: `🩹 Recover stuck renders` (the hourly sweep on
+demand via `scheduler.recover_now`) and `🔄 Restart worker`. Tenancy is enforced through the Task row,
+so a job id is never a way around it. `_system_health` gained `worker_stalled` so a
+registered-but-wedged worker is its own signal on the rail badge and the health strip.
+**Why:** the operator asked "can I restart the worker from the website instead of SSH?" The literal
+answer — mount `/var/run/docker.sock` into the web container — is refused on purpose: that socket is
+host-root, and the web container is the one service exposed through the tunnel, so it would trade a
+web vulnerability for the whole box. But the *need* is real and satisfiable without it, because the
+web process already shares Redis and the DB with the worker: it can read exactly what the worker is
+doing, fix stranded rows and locks directly, and ask the worker to exit via a flag the worker's own
+watchdog honours (ADR-057). That covers both real failure modes — a stranded task/lock (the Recover
+button) and a wedged process (the restart flag, plus the automatic watchdog). The page is also the
+*explanation*: the two-hour "Rendering 10%" incident was hard to diagnose because progress past 10%
+lives only in Redis while the DB row freezes, so the UI showed a number that could not move. Showing
+"last moved N min ago" next to the percentage makes the difference between slow and wedged legible,
+and the three-layer explainer (RQ timeout → watchdog → housekeeping) tells the operator which one
+will fix it and when, instead of leaving them to guess whether to wait or intervene.

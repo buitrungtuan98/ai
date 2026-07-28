@@ -146,10 +146,19 @@
     document.querySelectorAll('[data-live="' + key + '"]').forEach(function (el) { el.textContent = val; });
   }
   function setText(id, v) { var el = document.getElementById(id); if (el) el.textContent = v; }
+  // A dead OR wedged worker is the one fault that stops the whole factory, so the Operations rail
+  // item carries it even when the health strip isn't on screen.
+  function setWorkerBadge(h) {
+    var bad = !!h && (!h.worker || h.worker_stalled);
+    document.querySelectorAll('[data-badge="worker_down"]').forEach(function (b) {
+      b.textContent = "!";
+      b.hidden = !bad;
+    });
+  }
   function updateHealth(h) {
     var strip = document.getElementById("health-strip");
     if (!strip) return;
-    var degraded = !h.worker || !h.redis;
+    var degraded = !h.worker || !h.redis || h.worker_stalled;
     strip.classList.toggle("degraded", degraded);
     var note = document.getElementById("degraded-note");
     if (note) {
@@ -158,13 +167,17 @@
         var c = [];
         if (!h.worker) c.push("worker");
         if (!h.redis) c.push("Redis");
-        note.textContent = "⚠ The factory is degraded — " + c.join(" and ") +
-          (c.length > 1 ? " are" : " is") + " down; rendering and publishing are paused.";
+        // A registered-but-wedged worker is its own fault: nothing is "down", yet nothing moves.
+        note.textContent = c.length
+          ? "⚠ The factory is degraded — " + c.join(" and ") +
+            (c.length > 1 ? " are" : " is") + " down; rendering and publishing are paused."
+          : "⚠ The render worker is wedged — it has stopped making progress. It restarts itself; " +
+            "see Operations for details.";
       }
     }
     var wd = document.getElementById("hd-worker"), wl = document.getElementById("hl-worker");
-    if (wd) wd.className = "dot2 " + (h.worker ? "ok" : "bad");
-    if (wl) wl.textContent = h.worker ? "running" : "stopped";
+    if (wd) wd.className = "dot2 " + (h.worker && !h.worker_stalled ? "ok" : "bad");
+    if (wl) wl.textContent = !h.worker ? "stopped" : (h.worker_stalled ? "wedged" : "running");
     var rd = document.getElementById("hd-redis"), rl = document.getElementById("hl-redis");
     if (rd) rd.className = "dot2 " + (h.redis ? "ok" : "bad");
     if (rl) rl.textContent = h.redis ? "connected" : "down";
@@ -195,7 +208,7 @@
     if (bf) bf.hidden = !(c.failed > 0);
     var br = document.getElementById("banner-review");
     if (br) br.hidden = !(c.awaiting_review > 0);
-    if (d.health) updateHealth(d.health);
+    if (d.health) { updateHealth(d.health); setWorkerBadge(d.health); }
     flashLive();
   }
   function pollSummary() {
