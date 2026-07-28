@@ -860,3 +860,14 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 .scope-switcher:disabled { opacity: .55; cursor: not-allowed; }
 .scope-off-note { margin: var(--sp-1) var(--sp-1) 0; font-size: 11px; color: var(--text-subtle);
   line-height: 1.35; }
+
+/* An operator-set publish time on the week grid (ADR-067) — distinct from a scheduled slot, because
+   it ignores the slots entirely. Rescheduled episodes used to vanish from this grid completely. */
+.slot.own { color: var(--st-review); font-weight: var(--fw-medium); }
+.slot-key.own { color: var(--st-review); }
+/* Grid/List segmented control in the page head. */
+.hub-tabs.seg { border-bottom: none; margin-bottom: 0; }
+
+/* The Ready column carries a count plus a note ("incl. N at your own time"), so give it room —
+   it was wrapping to four lines. */
+.cal-table .col-runway, .cal-table td:nth-child(2) { min-width: 108px; }

@@ -1179,8 +1179,7 @@ the operator asked for (ADR-059):
 - Times are read and shown in the CAMPAIGN's timezone (the clock its slots already use) and stored
   as naive UTC — interpreting a `datetime-local` value as UTC would have shifted every reschedule by
   the operator's offset.
-- Deferred: drawing overridden episodes on the week-planner calendar (they correctly leave the slot
-  grid now; placing them at their own time needs a non-slot-aligned cell).
+- Deferred → DONE in R4 (ADR-067): overridden episodes are drawn on the week grid as ✏ chips.
 - Verified: 325 tests (13 new), ruff clean, docs guard green; all four row states (slot / your time /
   needs review / file missing) plus the open reschedule panel checked in a real browser at 1280px
   and 375px.
@@ -1326,6 +1325,22 @@ running now → one Factory card → activity. **5.0 phone screens → 2.9.**
   else while every number still showed the whole factory. Per-channel lives on Channels and on scoped
   Campaigns/Episodes; half-scoping this page would recreate the inconsistency being removed.
 - Verified: 387 tests (4 new), ruff clean, docs guard green; measured in a real browser at 375px/1280px.
+
+## UX consolidation R4 — one scheduling surface `DONE`
+Two pages answered "what publishes when" and gave different answers (ADR-067):
+- `/calendar` is now **Publishing**, with a `Week grid | List & actions` toggle. The list view IS the
+  former Operations publish tab (`?tab=publish` 301s there), so Operations is purely the machine.
+- **Deleted the codebase's only duplicated business rule.** "Ready episodes fill upcoming slots,
+  lowest number first" existed twice — in `_upcoming_slots` (dashboard chip, publish list) and again as
+  a private day-walk with `pool.pop(0)` inside the calendar. It had already drifted: after a reschedule
+  the calendar said "2 ready" while the hub said 4.
+- **Rescheduled episodes appear again.** They used to vanish from the one page whose job is showing
+  when things publish, and the grid drew "will be missed" on days that actually had a publish. They now
+  render as ✏ chips at their own time and count toward Ready ("incl. 2 at your own time").
+- **⚡ Now asks first.** Publishing publicly and immediately — the most irreversible action in the
+  product — was a bare POST beside Reschedule, while the same action on /assets always confirmed.
+- Verified: 391 tests (4 new), ruff clean, docs guard green; grid ✏ chips, the toggle, the 301 and the
+  agreeing ready counts all checked in a real browser.
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation

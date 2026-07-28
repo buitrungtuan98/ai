@@ -1366,3 +1366,24 @@ page: selecting a channel updated the URL and changed nothing, while every numbe
 whole factory — disabling it with a note is honest, whereas half-scoping some sections and not others
 would reproduce the inconsistency this whole refactor is removing. Per-channel remains a real view: it
 is what `/channels`, and scoped Campaigns and Episodes, are for.
+
+### ADR-067 — One scheduling surface, and one copy of the slot-assignment rule
+**Decision:** `/calendar` becomes **Publishing**, with a `Week grid | List & actions` toggle. The list
+view is the former Operations publish-queue tab (`/operations?tab=publish` 301s there), so Operations
+is purely the machine (render queue + worker). `_calendar_row_cells` no longer re-implements the
+scheduler's slot assignment: it consumes the shared `_upcoming_slots`. Episodes with an operator-set
+`publish_at` are drawn on the grid as ✏ chips at their own time and counted in the Ready column, and
+`⚡ Now` gained the same confirm dialog `/assets` always had.
+**Why:** two pages answered "what publishes when" and gave different answers. The calendar owned the
+forward week view but had no actions and — worse — **hid** every episode an operator had rescheduled,
+while showing "will be missed" on days that actually had publishes; the Operations tab owned exact
+times and actions but no forward view. A tester following the buffer-empty drill had to visit three
+pages and still got two different ready counts (calendar 2, hub 4), because the calendar counted only
+slot-bound episodes. The root cause was structural, not cosmetic: the assignment rule ("ready
+episodes fill upcoming slots, lowest number first") existed twice — once in `_upcoming_slots`, used by
+the dashboard chip and the publish list, and once as a private day-walk with `pool.pop(0)` inside the
+calendar. Two copies of a business rule is a bug with a delay on it, and this one had already fired.
+Collapsing to one surface fixes the disagreement by construction; deleting the second copy of the rule
+is what makes it stay fixed. The confirm on `⚡ Now` closes the other half of the audit's finding here:
+the single most irreversible action in the product (publish publicly, immediately) was a bare POST
+sitting beside Reschedule on a dense row, while the identical action on `/assets` asked first.

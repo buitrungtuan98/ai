@@ -362,7 +362,10 @@ def test_publish_tab_projects_ready_episodes_onto_upcoming_slots(client, session
     assert [r["state"] for r in rows] == ["slot", "slot"]
     assert rows[0]["when"] < rows[1]["when"]          # distinct, ordered slots
     assert rows[0]["tz"] == "Asia/Ho_Chi_Minh"
-    assert "Publish queue" in client.get("/operations?tab=publish").text
+    # It renders on the Calendar's list view now; the old Operations tab redirects there.
+    assert "List &amp; actions" in client.get("/calendar?view=list").text
+    r = client.get("/operations?tab=publish", follow_redirects=False)
+    assert r.status_code == 301 and r.headers["location"] == "/calendar?view=list"
 
 
 def test_reschedule_stores_the_operators_wall_clock_as_utc(client, session, user, channel):
@@ -598,5 +601,8 @@ def test_calendar_projection_ignores_rescheduled_episodes(client, session, user,
     session.refresh(camp)
     _ready(session, camp, channel, 7, publish_at=datetime.utcnow() + timedelta(days=1))
 
+    # It no longer competes for a slot, but it IS still going out — so the grid shows it as ✏ at its
+    # own time rather than hiding the episode on the one page whose job is "what publishes when".
     body = client.get("/calendar").text
-    assert "Ep 7" not in body
+    assert "Ep 7" in body and "✏" in body
+    assert "at your own time" in body

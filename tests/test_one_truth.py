@@ -379,3 +379,60 @@ def test_the_scope_switcher_is_visibly_inert_on_the_whole_factory_dashboard(clie
     assert "Whole factory" in body
     # On a scoped page it works normally.
     assert "disabled" not in client.get("/episodes").text.split('id="scope-switcher"', 1)[1].split(">", 1)[0]
+
+
+# ── R4: one scheduling surface (ADR-067) ─────────────────────────────────────
+def test_the_calendar_uses_the_shared_slot_projection(session, user, channel):
+    """It used to re-implement the scheduler's assignment rule with its own day-walk and pool.pop —
+    the only duplicated business rule in the codebase, and it had already drifted."""
+    import main
+
+    camp = _campaign(session, user, channel, posting_slots=["09:00", "21:00"], timezone="UTC")
+    rows = main._calendar_row_cells(camp, [4, 5])
+    filled = [(c["t"], c["ep"]) for day in rows for c in day["slots"] if c["state"] == "filled"]
+    upcoming = main._upcoming_slots(camp, 2)
+    # Same slots, same order, lowest episode first — because both read _upcoming_slots.
+    assert [t for t, _ in filled][:2] == [d.strftime("%H:%M") for d in upcoming]
+    assert [ep for _, ep in filled][:2] == [4, 5]
+
+
+def test_a_rescheduled_episode_is_drawn_on_the_grid_and_counted(client, session, user, channel):
+    """It vanished from the one page whose job is "what publishes when", and the ready count dropped."""
+    from datetime import timedelta
+
+    from database.types import BufferStatus
+
+    camp = _campaign(session, user, channel, topic="Own Time", posting_slots=["21:00"], timezone="UTC")
+    item = _buffer(session, camp, channel, 7, BufferStatus.ready)
+    item.publish_at = datetime.utcnow() + timedelta(hours=20)
+    session.commit()
+
+    body = client.get("/calendar").text
+    assert "Ep 7" in body and "✏" in body
+    assert "1 ready" in body and "at your own time" in body
+
+
+def test_the_publish_queue_moved_to_the_calendar(client):
+    """Two pages answered "what publishes when" and their ready counts disagreed."""
+    r = client.get("/operations?tab=publish", follow_redirects=False)
+    assert r.status_code == 301 and r.headers["location"] == "/calendar?view=list"
+    ops = client.get("/operations").text
+    assert "Publish queue" not in ops                 # Operations is the machine now
+    assert 'href="/calendar?view=list"' in ops        # …and points at the scheduling surface
+    cal = client.get("/calendar?view=list").text
+    assert "Week grid" in cal and "List &amp; actions" in cal
+
+
+def test_publish_now_asks_before_it_publishes(client, session, user, channel, tmp_path):
+    """The most irreversible action in the app was a bare POST here, while /assets always confirmed."""
+    from database.types import BufferStatus
+
+    camp = _campaign(session, user, channel, posting_slots=["21:00"])
+    f = tmp_path / "v.mp4"
+    f.write_bytes(b"x")
+    item = _buffer(session, camp, channel, 1, BufferStatus.ready, path=str(f))
+
+    body = client.get("/calendar?view=list").text
+    form = body.split(f'/assets/{item.id}/publish-now', 1)[1].split(">", 1)[0]
+    assert "data-confirm" in body
+    assert "can&#39;t be undone" in body or "can't be undone" in body

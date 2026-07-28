@@ -1917,7 +1917,7 @@ def _safe_return(return_to: str) -> str | None:
     ep = _episode_return(return_to)
     if ep is not None:
         return ep
-    if (return_to or "").split("?", 1)[0] == "/operations":
+    if (return_to or "").split("?", 1)[0] in ("/operations", "/calendar"):
         return return_to
     return None
 
@@ -2315,13 +2315,20 @@ def reset_learning(db: DbDep, campaign=Depends(get_owned_campaign)):
 
 
 # ── Content calendar ─────────────────────────────────────────────────────────
-def _calendar_row_cells(campaign: Campaign, ready_eps: list[int], week: int = 0,
-                        days: int = 7) -> list[dict] | None:
-    """Richer calendar cells for the week planner: per day, per slot, what will HAPPEN — not just
-    the time. Assigns the campaign's ready buffer episodes (lowest-numbered first, the scheduler's
-    real rule) to upcoming slots in chronological order; slots past that are 'missed' (buffer will be
-    empty). Past slots render for reference. Returns per-day {gate, slots:[{t,state,ep}]} or None
-    (non-slotted). The episode projection assumes the buffer doesn't change — honest caveat in the UI."""
+def _calendar_row_cells(campaign: Campaign, ready_eps: list[int], overrides=None,
+                        week: int = 0, days: int = 7) -> list[dict] | None:
+    """Week-planner cells: per day, per slot, what will HAPPEN — not just the time.
+
+    The slot→episode assignment comes from the SHARED `_upcoming_slots` (ADR-067). This function used
+    to re-implement it with its own day-walk and `pool.pop(0)`, which made it the only duplicated
+    business rule in the codebase — and it had already drifted: the calendar's ready count disagreed
+    with the campaign hub's after a reschedule.
+
+    `overrides` are (local datetime, episode) pairs for episodes an operator moved to their own time.
+    They no longer compete for a slot, so they are drawn in their own day cell marked `own` instead of
+    silently vanishing from the only page whose job is "what publishes when".
+    Returns per-day {gate, slots:[{t,state,ep}]} or None (non-slotted).
+    """
     from datetime import timedelta
 
     from workers.scheduler import WEEKDAY_KEYS, local_now
@@ -2330,17 +2337,28 @@ def _calendar_row_cells(campaign: Campaign, ready_eps: list[int], week: int = 0,
     slots = sorted(cfg.get("posting_slots") or [])
     if not slots or not cfg.get("auto_publish", True):
         return None
+    # ONE definition of "which episode lands in which slot": the next N free slots, lowest-numbered
+    # episode first — exactly what the scheduler does and what the publish list shows.
+    assigned = dict(zip(_upcoming_slots(campaign, len(ready_eps)), ready_eps))
+    own_by_slot: dict = {}
+    for when, ep in (overrides or []):
+        own_by_slot.setdefault(when.replace(second=0, microsecond=0), ep)
+
     allowed = cfg.get("posting_days") or []
     now_l = local_now(cfg.get("timezone"))
     start = now_l + timedelta(days=week * 7)
-    pool = list(ready_eps)  # lowest episode number first (mutated as slots consume it)
     rows: list[dict] = []
     for d in range(days):
         day = start + timedelta(days=d)
-        if allowed and WEEKDAY_KEYS[day.weekday()] not in allowed:
-            rows.append({"gate": True, "slots": []})
-            continue
         cells = []
+        # An operator-set time ignores the weekday gate (it outranks the schedule — ADR-059), so its
+        # chip is drawn even on a gated day.
+        for when, ep in sorted(own_by_slot.items()):
+            if when.date() == day.date():
+                cells.append({"t": when.strftime("%H:%M"), "state": "own", "ep": ep})
+        if allowed and WEEKDAY_KEYS[day.weekday()] not in allowed:
+            rows.append({"gate": True, "slots": cells})
+            continue
         for s in slots:
             try:
                 hh, mm = (int(x) for x in s.split(":"))
@@ -2349,17 +2367,20 @@ def _calendar_row_cells(campaign: Campaign, ready_eps: list[int], week: int = 0,
             slot_dt = day.replace(hour=hh, minute=mm, second=0, microsecond=0)
             if slot_dt < now_l:
                 cells.append({"t": s, "state": "past", "ep": None})
-            elif pool:
-                cells.append({"t": s, "state": "filled", "ep": pool.pop(0)})
+            elif slot_dt in assigned:
+                cells.append({"t": s, "state": "filled", "ep": assigned[slot_dt]})
             else:
                 cells.append({"t": s, "state": "missed", "ep": None})
+        cells.sort(key=lambda c: c["t"])
         rows.append({"gate": False, "slots": cells})
     return rows
 
 
 @app.get("/calendar", response_class=HTMLResponse)
 def calendar_page(request: Request, user: CurrentUser, db: DbDep, week: int = 0,
-                  channel: int | None = None):
+                  channel: int | None = None, view: str = "grid", flash: str = ""):
+    """The one answer to "what publishes when" (ADR-067): a week grid, or the same episodes as an
+    actionable list (`?view=list`, which absorbed the Operations publish-queue tab)."""
     from datetime import timedelta
 
     from workers.scheduler import local_now
@@ -2381,10 +2402,28 @@ def calendar_page(request: Request, user: CurrentUser, db: DbDep, week: int = 0,
                    BufferPoolItem.publish_at.is_(None))
             .order_by(BufferPoolItem.episode_number)).all():
         ready_by_camp.setdefault(cid, []).append(epn)
+    # Episodes an operator moved to their own time: they no longer compete for a slot, but they ARE
+    # still going out, so the grid draws them and the runway counts them (ADR-067).
+    override_by_camp: dict[int, list] = {}
+    for cid, epn, at in db.execute(
+            select(BufferPoolItem.campaign_id, BufferPoolItem.episode_number,
+                   BufferPoolItem.publish_at)
+            .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
+            .where(Campaign.user_id == user.id, BufferPoolItem.status == BufferStatus.ready,
+                   BufferPoolItem.publish_at.isnot(None))
+            .order_by(BufferPoolItem.publish_at)).all():
+        campaign_obj = next((c for c in campaigns if c.id == cid), None)
+        if campaign_obj is not None:
+            override_by_camp.setdefault(cid, []).append((_to_campaign_tz(at, campaign_obj), epn))
     slotted, unslotted = [], []
     for c in campaigns:
-        cells = _calendar_row_cells(c, ready_by_camp.get(c.id, []), week=week)
-        entry = {"campaign": c, "ready": len(ready_by_camp.get(c.id, [])),
+        overrides = override_by_camp.get(c.id, [])
+        cells = _calendar_row_cells(c, ready_by_camp.get(c.id, []), overrides, week=week)
+        entry = {"campaign": c,
+                 # Everything rendered and waiting — slot-bound AND own-time. Counting only the
+                 # slot-bound ones made the calendar disagree with the hub after a reschedule.
+                 "ready": len(ready_by_camp.get(c.id, [])) + len(overrides),
+                 "own_time": len(overrides),
                  "channel": chan_by_id.get(c.channel_id),
                  "fmt": (c.config_json or {}).get("video_format", "short"),
                  "tz": (c.config_json or {}).get("timezone") or settings.TIMEZONE,
@@ -2405,6 +2444,9 @@ def calendar_page(request: Request, user: CurrentUser, db: DbDep, week: int = 0,
         {"request": request, "user": user, "nav": "calendar", "slotted": slotted,
          "unslotted": unslotted, "day_headers": day_headers,
          "week": week, "week_label": label, "scope_cid": channel,
+         "view": "list" if view == "list" else "grid", "flash": flash,
+         # Same rows the Operations publish tab used to show — one implementation, one place.
+         "publish_rows": _ops_publish_rows(db, user.id) if view == "list" else None,
          "scope_channel": db.get(Channel, channel) if channel else None},
     )
 
@@ -2587,7 +2629,7 @@ def retry_task(task_id: int, user: CurrentUser, db: DbDep, return_to: str = Form
 # operator intervene from the browser instead of SSHing into the box (ADR-058). Everything here
 # reads live queue/worker state, so every lookup fails soft: a dead Redis renders an empty,
 # explained page rather than a 500.
-_OPS_TABS = ("queue", "worker", "publish")
+_OPS_TABS = ("queue", "worker")
 
 
 def _ops_job_rows(db, user_id: int) -> tuple[list[dict], int]:
@@ -2720,14 +2762,22 @@ def _ops_publish_rows(db, user_id: int) -> list[dict]:
 @app.get("/operations", response_class=HTMLResponse)
 def operations_page(request: Request, user: CurrentUser, db: DbDep, tab: str = "queue",
                     flash: str = ""):
+    # The publish queue moved to the Calendar's list view (ADR-067): two pages answered "what
+    # publishes when" and disagreed. Old links keep working.
+    if tab == "publish":
+        return RedirectResponse("/calendar?view=list", status_code=301)
     tab = tab if tab in _OPS_TABS else "queue"
     ctx = {"request": request, "user": user, "nav": "operations", "tab": tab, "flash": flash,
            "worker": _ops_worker_card(db, user.id)}
     if tab == "queue":
         ctx["job_rows"], ctx["publish_queued"] = _ops_job_rows(db, user.id)
-    elif tab == "publish":
-        ctx["publish_rows"] = _ops_publish_rows(db, user.id)
     return templates.TemplateResponse(request, "operations.html", ctx)
+
+
+def _calendar_redirect(flash: str = "") -> RedirectResponse:
+    """Publish-time actions land back on the one scheduling surface (ADR-067)."""
+    return RedirectResponse("/calendar?view=list" + (f"&flash={flash}" if flash else ""),
+                            status_code=303)
 
 
 def _ops_redirect(tab: str, flash: str = "") -> RedirectResponse:
@@ -2811,18 +2861,18 @@ def ops_reschedule(db: DbDep, item=Depends(get_owned_buffer_item), publish_at: s
     if not raw:
         item.publish_at = None
         db.commit()
-        return _ops_redirect("publish", "resched_cleared")
+        return _calendar_redirect("resched_cleared")
     try:
         naive_local = datetime.fromisoformat(raw)
     except ValueError:
-        return _ops_redirect("publish", "resched_bad")
+        return _calendar_redirect("resched_bad")
     from zoneinfo import ZoneInfo
 
     campaign = db.get(Campaign, item.campaign_id)
     item.publish_at = (naive_local.replace(tzinfo=_campaign_tz(campaign))
                        .astimezone(ZoneInfo("UTC")).replace(tzinfo=None))
     db.commit()
-    return _ops_redirect("publish", "rescheduled")
+    return _calendar_redirect("rescheduled")
 
 
 # ── Cross-channel alert feed (the header bell) ────────────────────────────────
