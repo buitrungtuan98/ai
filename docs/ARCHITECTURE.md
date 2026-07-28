@@ -1243,3 +1243,25 @@ copy (double-rendering a block is a subtle trap once a block contains `{% set %}
 solution turned out to be simpler — drop the brand instead). Verified across fifteen pages at 1280px
 and 375px that the trail appears in the app bar exactly where expected, never in the content, and that
 a long Vietnamese campaign name never pushes the bell off screen.
+
+### ADR-062 — Macro analytics: factory-wide vitals, and host readings from the kernel not psutil
+**Decision:** the dashboard gains a "Factory vitals" card answering the four questions the
+per-campaign pages structurally cannot: how much reach the whole factory has produced (cumulative
+views, reported **with** the count of measured episodes), whether today's renders are actually
+succeeding (failure rate over renders that *finished* today, plus the machine minutes they cost from
+`render_json.render_seconds`), and whether the box itself is saturated (CPU + memory). Host numbers
+come from a new stdlib-only `core/host.py`: CPU as a **load average per core** via `os.getloadavg()`
+and `os.sched_getaffinity(0)`, memory as Total−**Available** from `/proc/meminfo`. Every reader fails
+soft to `None`. Disk is *not* duplicated here — `main._system_health` remains its one definition.
+**Why:** three judgement calls carry this. (1) **No psutil.** It is a compiled dependency added for
+two numbers the kernel already publishes on the single Linux box this deploys to; the repo's YAGNI
+rule says a dependency needs a roadmap task justifying it, and "read two files" does not. (2) **Load
+average, not instantaneous CPU percent.** A percent needs two samples and retained state, and would
+mostly report whatever ffmpeg was doing in that 100ms window. The real question on a box whose job is
+one `nice -19` render is "is work queueing up?", which is exactly what load-per-core measures — and it
+is capped at 100% for the gauge because how far past saturated stops mattering to the operator.
+(3) **Views must be qualified.** YouTube Analytics lags about two days, so a bare "31,832 views" reads
+as the whole catalogue when it may cover three of thirty episodes; showing "across 3 measured episodes
+of 30 published" makes the number honest instead of flattering. Memory deliberately excludes
+reclaimable page cache: Total−Free would show this 24 GB box at ~95% while it is perfectly healthy,
+training the operator to ignore the one number that should mean something.

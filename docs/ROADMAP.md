@@ -1222,6 +1222,23 @@ Completes the operator's header layout — breadcrumb left, bell/theme/profile r
   browser — the trail is in the app bar exactly where expected, never left behind in the content, and
   a long Vietnamese campaign name never pushes the bell off screen.
 
+## Macro analytics — factory vitals `DONE`
+The top-down view the per-campaign pages cannot give (ADR-062), as one dashboard card:
+- **Total views** across every measured episode, reported WITH how many episodes are measured out of
+  how many are published — YouTube Analytics lags ~2 days, so a bare total would read as the whole
+  catalogue when it may cover a fraction of it.
+- **Renders today**: failure rate over renders that FINISHED today (in-flight work has no outcome
+  yet), plus the machine minutes they consumed from `render_json.render_seconds`.
+- **CPU load + memory** from a new stdlib-only `core/host.py` — no psutil dependency for two numbers
+  the kernel publishes. CPU is load-average-per-core (the right question on a box running one
+  `nice -19` render: is work queueing?), memory is Total−Available so reclaimable page cache does not
+  show a healthy 24 GB box at 95%. Both fail soft to "—" off Linux.
+- Every cell has an explaining empty state; the card reuses the existing scorecard cells and the
+  progress-bar macro rather than inventing a widget.
+- GPU is deliberately absent — this deployment is CPU-only by hard constraint.
+- Verified: 350 tests (11 new), ruff clean, docs guard green; checked in a real browser at 1280px and
+  375px in both the empty and populated states.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

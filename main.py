@@ -523,6 +523,56 @@ def _campaign_ops(db, user_id: int, campaigns) -> dict:
     return ops
 
 
+def _server_day_start_utc(now=None):
+    """Midnight of "today" on the server's configured clock, as naive UTC (what the DB stores).
+    Reuses `_campaign_tz(None)`, so the dashboard's day and a campaign's day agree on the zone."""
+    from zoneinfo import ZoneInfo
+
+    now_local = (now or datetime.utcnow()).replace(tzinfo=ZoneInfo("UTC")).astimezone(_campaign_tz(None))
+    start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return start.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+
+
+def _factory_vitals(db, user_id: int, now=None) -> dict:
+    """Factory-wide operating numbers (ADR-062) — the macro view the per-campaign pages cannot give:
+    how much reach the whole factory has produced, whether today's renders are actually succeeding,
+    how much machine time they cost, and whether the box itself is saturated.
+
+    Views are reported WITH the number of measured episodes, because YouTube Analytics lags ~2 days:
+    a bare total would silently read as "the whole catalogue" when it only covers what has data.
+    """
+    from core import host
+
+    day_start = _server_day_start_utc(now)
+    views, measured = 0, 0
+    for (stats,) in db.execute(
+            select(Task.stats_json).where(Task.user_id == user_id, Task.stats_json.isnot(None))).all():
+        if not stats:
+            continue
+        got = stats.get("views")
+        if got is None:
+            continue
+        views += int(got)
+        measured += 1
+    published_total = db.scalar(select(func.count()).select_from(Task).where(
+        Task.user_id == user_id, Task.status == TaskStatus.COMPLETED)) or 0
+
+    # Today's render outcomes. A render that FINISHED today counts, whatever day it started.
+    finished_today = db.scalars(select(Task).where(
+        Task.user_id == user_id, Task.finished_at.isnot(None),
+        Task.finished_at >= day_start)).all()
+    failed = sum(1 for t in finished_today if t.status == TaskStatus.FAILED)
+    total = len(finished_today)
+    render_seconds = sum(int((t.render_json or {}).get("render_seconds") or 0) for t in finished_today)
+    return {
+        "views": views, "measured": measured, "published_total": published_total,
+        "renders_today": total, "failed_today": failed,
+        "fail_pct_today": round(100 * failed / total) if total else None,
+        "render_minutes_today": round(render_seconds / 60) if render_seconds else 0,
+        "host": host.snapshot(),
+    }
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request, user: CurrentUser, db: DbDep):
     channels = db.scalars(select(Channel).where(Channel.user_id == user.id)).all()
@@ -566,6 +616,7 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
             "attention_failed": attention_failed, "attention_review": attention_review,
             "review_ids": review_ids,
             "scorecard": _scorecard(db, user.id), "next_publish": _next_publish(db, user.id),
+            "vitals": _factory_vitals(db, user.id),
             "active_running": active_campaigns,
             "autopilot_proposed": autopilot_proposed,
             "ops": _campaign_ops(db, user.id, active_campaigns),
