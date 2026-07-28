@@ -2753,7 +2753,10 @@ def _work_alerts(db, user) -> list[dict]:
         campaign = campaigns.get(task.campaign_id)
         chan, camp = names(campaign)
         # The stack trace's LAST line is the actual error; the rest is noise in a one-line alert.
-        reason = ((task.error_message or "").strip().splitlines() or ["failed"])[-1][:120]
+        # A task can legitimately carry no message (an old row, a cleared retry) — say so rather than
+        # rendering "Ep 7 failed — failed".
+        lines = (task.error_message or "").strip().splitlines()
+        reason = lines[-1][:120] if lines else "no error recorded"
         out.append(_alert("red", f"task-failed:{task.id}", f"Ep {task.episode_number} failed — {reason}",
                           channel=chan, campaign=camp, href=f"/episodes/{task.id}", action="Open",
                           at=task.finished_at or task.updated_at))

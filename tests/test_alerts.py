@@ -98,6 +98,25 @@ def test_a_failed_episode_names_its_channel_and_campaign_and_the_last_error_line
     assert row["at"] is not None
 
 
+def test_a_failure_with_no_recorded_message_says_so(session, user, channel, monkeypatch):
+    """Falling back to the word "failed" rendered as "Ep 7 failed — failed"."""
+    import main
+    from database.models import Task
+    from database.types import TaskStatus
+    from workers import task_queue
+
+    monkeypatch.setattr(task_queue, "worker_alive", lambda: True)
+    camp = _campaign(session, user, channel)
+    t = Task(campaign_id=camp.id, user_id=user.id, episode_number=7, status=TaskStatus.FAILED,
+             finished_at=datetime.utcnow(), error_message=None)
+    session.add(t)
+    session.commit()
+    session.refresh(t)
+
+    row = [r for r in main._alerts(session, user) if r["key"] == f"task-failed:{t.id}"][0]
+    assert row["text"] == "Ep 7 failed — no error recorded"
+
+
 def test_failed_episodes_are_capped_so_the_bell_stays_readable(session, user, channel, monkeypatch):
     import main
     from database.models import Task
