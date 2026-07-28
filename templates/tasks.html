@@ -3,6 +3,7 @@
 {% block title %}Task Logs · AI Video Factory{% endblock %}
 {% block crumbs %}
 {%- if scope_campaign %}
+{{ ui.breadcrumb([{'label': 'Campaigns', 'href': '/campaigns'}, {'label': scope_campaign.topic_name, 'href': '/campaigns/' ~ scope_campaign.id}, {'label': 'Render log'}]) }}
 {%- elif scope_channel %}
 {{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': scope_channel.channel_name}, {'label': 'Render log'}]) }}
 {%- endif %}
@@ -15,7 +16,6 @@
 {% endif %}
 
 {% if scope_campaign %}
-{{ ui.breadcrumb([{'label': 'Campaigns', 'href': '/campaigns'}, {'label': scope_campaign.topic_name, 'href': '/campaigns/' ~ scope_campaign.id}, {'label': 'Render log'}]) }}
 {{ ui.scope_note('Render jobs for', scope_campaign.topic_name, '/tasks') }}
 {% elif scope_channel %}
 {{ ui.scope_note('Render jobs for channel', scope_channel.channel_name, '/tasks') }}

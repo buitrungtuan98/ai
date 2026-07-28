@@ -333,8 +333,22 @@ def _task_counts(db, user_id: int) -> dict:
         "published": by_status.get(TaskStatus.COMPLETED, 0),
         "working": sum(by_status.get(s, 0) for s in _WORKING_STATUSES),
         "awaiting_review": awaiting,
+        # CANCELLED is excluded on purpose — an operator's own decision is not a failure (ADR-064).
         "failed": by_status.get(TaskStatus.FAILED, 0),
+        "cancelled": by_status.get(TaskStatus.CANCELLED, 0),
     }
+
+
+def _attention_count(db, user_id: int, counts: dict | None = None) -> int:
+    """THE number of things asking for a human, used by every badge in the app (ADR-064).
+
+    One rule, computed once: failed episodes + episodes awaiting review + open autopilot proposals.
+    Before this, the hamburger counted failed+review, the sidebar something else, the bell its own
+    (grouped) row count and the triage card its own capped list — four numbers for one question,
+    visible simultaneously, which taught the operator to trust none of them."""
+    counts = counts if counts is not None else _task_counts(db, user_id)
+    return (counts["failed"] + counts["awaiting_review"]
+            + _autopilot_proposed_count(db, user_id))
 
 
 def _autopilot_proposed_count(db, user_id: int) -> int:
@@ -606,6 +620,7 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
     # "Running now" panel: one row per active campaign (what each is doing + when it posts next).
     active_campaigns = [c for c in campaigns if c.status == CampaignStatus.active]
     autopilot_proposed = _autopilot_proposed_count(db, user.id)
+    counts = _task_counts(db, user.id)
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -613,7 +628,8 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
             "request": request, "user": user, "channels": channels, "campaigns": campaigns,
             "tasks": tasks, "nav": "dashboard",
             "health": _system_health(db, user),
-            "counts": _task_counts(db, user.id),
+            "counts": counts,
+            "attention": _attention_count(db, user.id, counts),
             "attention_failed": attention_failed, "attention_review": attention_review,
             "review_ids": review_ids,
             "scorecard": _scorecard(db, user.id), "next_publish": _next_publish(db, user.id),
@@ -1949,6 +1965,7 @@ _STAGE_STATUSES: dict[str, tuple[str, ...]] = {
     "scheduled": ("SCHEDULED",),
     "published": ("PUBLISHING", "COMPLETED"),
     "failed": ("FAILED",),
+    "cancelled": ("CANCELLED",),
 }
 _STATUS_TO_STAGE = {st: stage for stage, sts in _STAGE_STATUSES.items() for st in sts}
 _EPISODES_LIST_PER_PAGE = 25
@@ -2082,6 +2099,7 @@ def episode_view(request: Request, user: CurrentUser, db: DbDep, task_id: int,
          "stages": _EPISODE_STAGES, "stage_index": stage_index,
          "retention_curve": curve, "retention_drops": retention_drops,
          "failed": task.status == TaskStatus.FAILED,
+         "cancelled": task.status == TaskStatus.CANCELLED,
          "flash": flash if flash in ("publish", "rerender", "rejected", "missing") else "",
          "flash_reason": flash_reason[:200]},
     )
@@ -2356,7 +2374,7 @@ def api_tasks(user: CurrentUser, db: DbDep,
             "status": t.status.value, "progress": round(live or t.progress_pct, 1),
             "error": t.error_message, "published_url": t.published_url,
             "duration_s": duration_s, "retry_count": t.retry_count,
-            "can_retry": t.status == TaskStatus.FAILED,
+            "can_retry": t.status in (TaskStatus.FAILED, TaskStatus.CANCELLED),
             "updated_at": t.updated_at.isoformat() if t.updated_at else None,
         })
     return {"tasks": out, "page": page, "pages": pages, "total": total}
@@ -2371,9 +2389,12 @@ def api_summary(user: CurrentUser, db: DbDep):
     active = db.scalar(
         select(func.count()).select_from(Campaign).where(
             Campaign.user_id == user.id, Campaign.status == CampaignStatus.active)) or 0
-    return {"health": _system_health(db, user), "counts": _task_counts(db, user.id),
+    counts = _task_counts(db, user.id)
+    return {"health": _system_health(db, user), "counts": counts,
             "channels": channels, "active_campaigns": active,
-            "autopilot_proposed": _autopilot_proposed_count(db, user.id)}
+            "autopilot_proposed": _autopilot_proposed_count(db, user.id),
+            # Every badge renders THIS number — see `_attention_count` (ADR-064).
+            "attention": _attention_count(db, user.id, counts)}
 
 
 @app.get("/api/search")
@@ -2417,8 +2438,9 @@ def retry_task(task_id: int, user: CurrentUser, db: DbDep, return_to: str = Form
     task = db.get(Task, task_id)
     if task is None or task.user_id != user.id:
         raise HTTPException(404, "Task not found")
-    if task.status != TaskStatus.FAILED:
-        raise HTTPException(400, "Only failed tasks can be retried")
+    # CANCELLED is retryable too: cancelling is a pause the operator can undo (ADR-064).
+    if task.status not in (TaskStatus.FAILED, TaskStatus.CANCELLED):
+        raise HTTPException(400, "Only failed or cancelled episodes can be retried")
     task.error_message = None
     task.retry_count += 1
     task.progress_pct = 0
@@ -2619,12 +2641,13 @@ def ops_move_job_front(job_id: str, user: CurrentUser, db: DbDep):
 
 @app.post("/operations/jobs/{job_id}/cancel")
 def ops_cancel_job(job_id: str, user: CurrentUser, db: DbDep):
-    """Drop a queued render. The Task is marked FAILED (not deleted) so it stays visible and the
-    normal Retry button can put it back — cancelling is a pause, not a delete."""
+    """Drop a queued render. The Task becomes CANCELLED — not deleted, and deliberately NOT failed
+    (ADR-064): a choice the operator made must not inflate the failure rate, raise an alert, or be
+    auto-retried behind their back. Retry still works whenever they want it back."""
     task = _owned_queued_task(db, user.id, job_id)
     if not task_queue.cancel_job(job_id):
         return _ops_redirect("queue", "gone")
-    task.status = TaskStatus.FAILED
+    task.status = TaskStatus.CANCELLED
     task.finished_at = datetime.utcnow()
     task.error_message = "Cancelled from the Operations page before it started. Use Retry to queue it again."
     task_queue.clear_progress(task.id)
@@ -2852,6 +2875,10 @@ def api_alerts(user: CurrentUser, db: DbDep):
     disagree with the list length."""
     rows = _alerts(db, user)
     return {"alerts": rows,
+            # The badge number is the SHARED attention count, not this feed's row count: the panel
+            # groups backlogs into one row, so counting rows produced a number that disagreed with
+            # every other badge for the same facts (ADR-064).
+            "attention": _attention_count(db, user.id),
             "actionable": sum(1 for a in rows if a["level"] in ("red", "amber")),
             "worst": ("red" if any(a["level"] == "red" for a in rows)
                       else "amber" if any(a["level"] == "amber" for a in rows) else "")}

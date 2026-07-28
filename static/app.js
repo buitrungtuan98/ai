@@ -16,16 +16,20 @@
   var seq = 0;              // request token — ignore responses that arrive out of order
   var searchTimer = null;
 
+  // ONE vocabulary, shared with the server-rendered stage chips (ADR-064). The old labels invented
+  // synonyms ("Pending Queue" vs "Queued", "Completed" vs "Published") for stages the rest of the app
+  // already had names for, so the same episode read differently depending on which page you were on.
   var STATUS_LABELS = {
-    PENDING_QUEUE: "Pending Queue",
-    AI_GENERATION: "AI Generation",
-    AUDIO_SYNCED: "Audio Synced",
+    PENDING_QUEUE: "Queued",
+    AI_GENERATION: "Writing",
+    AUDIO_SYNCED: "Rendering",
     RENDERING: "Rendering",
-    AWAITING_REVIEW: "Awaiting Review",
+    AWAITING_REVIEW: "Review",
     SCHEDULED: "Scheduled",
     PUBLISHING: "Publishing",
-    COMPLETED: "Completed",
+    COMPLETED: "Published",
     FAILED: "Failed",
+    CANCELLED: "Cancelled",
   };
 
   function esc(s) {

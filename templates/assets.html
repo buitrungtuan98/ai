@@ -14,14 +14,14 @@
 
 {% if flash == 'publish' %}
 {% call ui.banner('success') %}⏳ <b>Publish queued.</b> The episode uploads as soon as the worker is free (one job at a
-  time — a render in progress runs first). Track it in <a href="/tasks">Task Logs</a>; this card flips to
-  <i>Consumed</i> with the video link once it's live.{% endcall %}
+  time — a render in progress runs first). This card flips to <i>Published</i> with the video link
+  once it's live.{% endcall %}
 {% elif flash == 'rerender' %}
 {% call ui.banner() %}⏳ <b>Re-render queued.</b> The old files were discarded; a fresh render starts as soon as
-  the worker is free. Watch progress in <a href="/tasks">Task Logs</a>.{% endcall %}
+  the worker is free.{% endcall %}
 {% elif flash == 'rejected' %}
 {% call ui.banner() %}🗑 <b>Rejected.</b> The render was deleted{% if flash_reason %} and the AI was told to avoid:
-  “{{ flash_reason }}”{% endif %}. Re-render it anytime from Task Logs → Retry.{% endcall %}
+  “{{ flash_reason }}”{% endif %}. Use <b>Discard &amp; re-render</b> on any card to produce that episode again.{% endcall %}
 {% elif flash == 'missing' %}
 {% call ui.banner('danger') %}⚠️ <b>That episode's video file is no longer on disk</b>, so it can't be published.
   Use <b>Discard &amp; re-render</b> on the card to produce it again.{% endcall %}

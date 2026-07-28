@@ -184,7 +184,9 @@ def test_prioritise_moves_the_render_to_the_front(client, session, user, channel
     assert [j["arg"] for j in task_queue.queued_jobs()] == [t2.id, t1.id]
 
 
-def test_cancel_marks_the_task_failed_so_retry_still_works(client, session, user, channel):
+def test_cancel_marks_the_task_cancelled_not_failed(client, session, user, channel):
+    """An operator's own decision must not read as a fault: CANCELLED keeps it out of the failure
+    KPI, out of the alert feed, and out of autopilot's auto-retry (ADR-064)."""
     from database.types import TaskStatus
     from workers import task_queue
 
@@ -195,7 +197,7 @@ def test_cancel_marks_the_task_failed_so_retry_still_works(client, session, user
     assert r.status_code == 303 and "flash=cancelled" in r.headers["location"]
     assert task_queue.queued_jobs() == []
     session.refresh(t)
-    assert t.status == TaskStatus.FAILED          # visible + retryable, not deleted
+    assert t.status == TaskStatus.CANCELLED      # visible + retryable, not deleted, NOT failed
     assert "Cancelled" in t.error_message
     assert t.finished_at is not None
 

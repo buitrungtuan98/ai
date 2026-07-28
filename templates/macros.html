@@ -109,6 +109,9 @@
   <a class="chip {{ 'active' if active == 'scheduled' }}" href="/episodes?status=scheduled{{ sq }}">Scheduled ({{ c.get('scheduled', 0) }})</a>
   <a class="chip {{ 'active' if active == 'published' }}" href="/episodes?status=published{{ sq }}">Published ({{ c.get('published', 0) }})</a>
   <a class="chip {{ 'active' if active == 'failed' }}" href="/episodes?status=failed{{ sq }}">Failed ({{ c.get('failed', 0) }})</a>
+  {%- if c.get('cancelled', 0) %}
+  <a class="chip {{ 'active' if active == 'cancelled' }}" href="/episodes?status=cancelled{{ sq }}">Cancelled ({{ c.cancelled }})</a>
+  {%- endif %}
   {%- if search %}
   <form method="get" action="/episodes" class="filter-search" role="search">
     {%- for k, v in scope_hidden.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}

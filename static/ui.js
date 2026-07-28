@@ -182,7 +182,6 @@
     if (rd) rd.className = "dot2 " + (h.redis ? "ok" : "bad");
     if (rl) rl.textContent = h.redis ? "connected" : "down";
     setText("hv-queue", h.queue_depth == null ? "—" : h.queue_depth);
-    setText("hv-buffer", h.buffer_ready);
     setText("hv-disk", h.disk_pct == null ? "—" : h.disk_pct + "%");
   }
   function flashLive() {
@@ -197,17 +196,16 @@
     setBadge("failed", c.failed || 0);
     setBadge("awaiting_review", c.awaiting_review || 0);
     setBadge("autopilot_proposed", d.autopilot_proposed || 0);
-    setBadge("attn", (c.failed || 0) + (c.awaiting_review || 0));
+    // ONE attention number, computed server-side, rendered by every badge that answers "what needs
+    // me" — hamburger, Dashboard rail item, bell and the triage card (ADR-064).
+    setBadge("attn", d.attention || 0);
+    setText("triage-count", d.attention || 0);
     setLive("channels", d.channels);
     setLive("active_campaigns", d.active_campaigns);
     setLive("published", c.published);
     setLive("working", c.working);
     setLive("awaiting_review", c.awaiting_review);
     setLive("failed", c.failed);
-    var bf = document.getElementById("banner-failed");
-    if (bf) bf.hidden = !(c.failed > 0);
-    var br = document.getElementById("banner-review");
-    if (br) br.hidden = !(c.awaiting_review > 0);
     if (d.health) { updateHealth(d.health); setWorkerBadge(d.health); }
     flashLive();
   }
@@ -236,7 +234,9 @@
     var summary = document.getElementById("bell-summary");
     if (!list || !count) return;
     var rows = (data && data.alerts) || [];
-    var n = (data && data.actionable) || 0;
+    // `attention` is the shared count (ADR-064). The panel may GROUP rows ("2 episodes waiting"), so
+    // its row count is not the number to badge — that disagreement is exactly what confused people.
+    var n = (data && data.attention) || 0;
     count.textContent = n > 99 ? "99+" : n;
     count.hidden = n === 0;
     count.className = "bell-count" + (data && data.worst === "amber" ? " amber" : "");

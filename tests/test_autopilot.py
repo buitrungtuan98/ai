@@ -135,7 +135,8 @@ def test_autopilot_review_full_auto_approves_rejects_escalates():
     assert counts == {"approved": 1, "rejected": 1, "recommended": 0, "escalated": 1}
 
     db.refresh(b_hi), db.refresh(b_lo), db.refresh(b_mid), db.refresh(t_hi), db.refresh(t_lo)
-    assert t_hi.status == TaskStatus.PENDING_QUEUE          # approved → queued to publish
+    assert t_hi.status == TaskStatus.SCHEDULED              # approved → rendered, waiting to go out
+    assert b_hi.status == BufferStatus.ready                # and it leaves the review queue at once
     assert b_lo.status == BufferStatus.rejected            # rejected → files gone, row rejected
     assert t_lo.status == TaskStatus.PENDING_QUEUE          # rejected → re-render queued
     assert b_mid.status == BufferStatus.awaiting_review     # escalated → still waiting

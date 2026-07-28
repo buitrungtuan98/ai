@@ -276,7 +276,10 @@ details.disclosure > summary > .sum { flex: 1; min-width: 0; display: flex; flex
   border: 1px solid transparent; white-space: nowrap; }
 .pill::before { content: ""; width: 6px; height: 6px; border-radius: var(--radius-round);
   background: currentColor; flex-shrink: 0; }
-.pill.pending, .pill.PENDING_QUEUE, .pill.expired { background: var(--st-pending-bg); color: var(--st-pending); border-color: var(--st-pending-bd); }
+/* CANCELLED reads neutral-grey like "pending", NOT red: an operator's own decision is not a fault
+   (ADR-064), and colouring it red is what made the failure rate look like a crisis. */
+.pill.pending, .pill.PENDING_QUEUE, .pill.expired,
+.pill.cancelled, .pill.CANCELLED { background: var(--st-pending-bg); color: var(--st-pending); border-color: var(--st-pending-bd); }
 .pill.active, .pill.RENDERING, .pill.AI_GENERATION, .pill.PUBLISHING, .pill.AUDIO_SYNCED { background: var(--st-working-bg); color: var(--st-working); border-color: var(--st-working-bd); }
 .pill.completed, .pill.COMPLETED { background: var(--st-success-bg); color: var(--st-success); border-color: var(--st-success-bd); }
 .pill.failed, .pill.FAILED { background: var(--st-failed-bg); color: var(--st-failed); border-color: var(--st-failed-bd); }

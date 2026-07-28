@@ -239,11 +239,14 @@ def hydrate_campaign(db, campaign: Campaign, *, buffer_size: int | None = None, 
     # Query episode numbers directly (never via the cached `campaign.tasks` relationship, which can
     # be stale after we insert Tasks by campaign_id within the same session).
     all_eps = set(db.scalars(select(Task.episode_number).where(Task.campaign_id == campaign.id)).all())
+    # "Active" = still on its way to publication. COMPLETED/FAILED/CANCELLED are all finished
+    # outcomes: leaving CANCELLED in here would make hydration believe that episode is still coming
+    # and starve the buffer forever (ADR-064).
     active_eps = set(
         db.scalars(
             select(Task.episode_number).where(
                 Task.campaign_id == campaign.id,
-                Task.status.notin_([TaskStatus.COMPLETED, TaskStatus.FAILED]),
+                Task.status.notin_([TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]),
             )
         ).all()
     )
@@ -320,14 +323,22 @@ def _safe_remove(*paths: str) -> None:
 
 # ── Shared review actions (used by the manual Review page AND the autopilot reviewer) ──
 def apply_approve(db, item) -> None:
-    """Approve a review render: mark its task queued and enqueue the publish job. DRY: the /assets
-    approve route and `core.autopilot`'s reviewer both go through here."""
+    """Approve a review render: it leaves the review queue immediately and its publish job is queued.
+    DRY: the /assets approve route and `core.autopilot`'s reviewer both go through here.
+
+    Both state changes matter (ADR-064). The buffer row moves `awaiting_review` → `ready`, so the
+    review queue, its counters and the Review page all drop it the moment it is approved — leaving it
+    `awaiting_review` until the upload finished made one episode read as "approved" and "still waiting
+    for review" at the same time, and invited a second approve click. The Task moves to SCHEDULED, not
+    PENDING_QUEUE: it is rendered and waiting to go out, and calling it "queued" both mislabelled the
+    stage and inflated the render-queue count with something that was never a render job."""
+    item.status = BufferStatus.ready
     task = db.scalar(select(Task).where(
         Task.campaign_id == item.campaign_id, Task.episode_number == item.episode_number))
     if task is not None:
-        task.status = TaskStatus.PENDING_QUEUE  # the publish job drives it to PUBLISHING
+        task.status = TaskStatus.SCHEDULED  # the publish job drives it to PUBLISHING → COMPLETED
         task.error_message = None
-        db.commit()
+    db.commit()
     enqueue_publish(item.id)
 
 

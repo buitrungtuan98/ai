@@ -1259,6 +1259,28 @@ The top-down view the per-campaign pages cannot give (ADR-062), as one dashboard
 - Verified: 362 tests (12 new), ruff clean, docs guard green; the chart checked in a real browser at
   1280px and 375px against 14 seeded days of uneven publishing.
 
+## UX consolidation R1 — one truth for counts, names and stages `DONE`
+A five-persona UX audit (first-time owner, phone operator, power operator, strategist, plus a
+structural code audit) found one root problem behind most complaints: **the same fact is stated in
+many places with different numbers and different words.** R1 fixes the foundation (ADR-064):
+- **One attention count**: `_attention_count` (failed + awaiting review + open proposals) computed
+  once server-side, served on `/api/summary` and `/api/alerts`, rendered by the hamburger, rail badge,
+  bell and triage pill. Previously four badges showed 4 / 5 / 3 / 2 for one situation.
+- **One stage vocabulary** — Queued · Writing · Rendering · Review · Scheduled · Published · Failed ·
+  Cancelled — applied to `app.js`'s labels too, retiring the synonyms ("Pending Queue", "Completed",
+  "Audio Synced") that made one episode read differently per page.
+- **`TaskStatus.CANCELLED`**: an operator's cancel is no longer a FAILED. It is neutral-grey, out of
+  the failure KPI and the alert feed, skipped by autopilot's auto-retry (which previously queued the
+  cancelled episode straight back), a finished outcome for hydration, and still retryable.
+- **Approve releases the episode at once**: `apply_approve` sets the buffer row `ready` and the Task
+  `SCHEDULED`, so it leaves the review queue immediately (it used to read as approved AND awaiting
+  review simultaneously, invite a double submit, and count as a queued *render*).
+- **Honest counters**: "Episode 0 / 30" → "0 of 30 published".
+- **Dead weight removed**: `ui.js` writes to `#hv-buffer` / `#banner-failed` / `#banner-review` (no
+  such elements), tasks.html's second content-flow breadcrumb (ADR-061 says once), and the "re-render
+  from Task Logs → Retry" advice that pointed at a button that is never offered for a rejected item.
+- Verified: 376 tests (13 new), ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

@@ -1772,8 +1772,11 @@ def test_api_summary_snapshot(client):
     db.close()
 
     d = client.get("/api/summary").json()
-    assert set(d) == {"health", "counts", "channels", "active_campaigns", "autopilot_proposed"}
+    assert set(d) == {"health", "counts", "channels", "active_campaigns", "autopilot_proposed",
+                      "attention"}
     assert d["autopilot_proposed"] == 0  # no open proposals seeded
     assert d["counts"]["failed"] == 1 and d["counts"]["awaiting_review"] == 1
+    # ONE attention number every badge renders: failed + awaiting review + open proposals.
+    assert d["attention"] == 2
     assert d["channels"] == 1  # _seed_campaign creates one channel
     assert set(d["health"]) >= {"redis", "worker", "buffer_ready", "ai_budget"}

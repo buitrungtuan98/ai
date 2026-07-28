@@ -1288,3 +1288,31 @@ did nothing — so both report `None` and the UI says the curve appears tomorrow
 followers but no lifetime page-view total comparable to YouTube's, so `views` stays `None` rather than
 substituting a similar-sounding metric. The chart is hand-rolled from numeric server values (no chart
 library, XSS-safe by construction), consistent with the no-CDN rule.
+
+### ADR-064 — One attention count, one stage vocabulary, and CANCELLED as a first-class state
+**Decision:** three related unifications, all driven by a persona-based UX audit. (1) `_attention_count`
+= failed + awaiting-review + open proposals is computed **once** server-side and served on both
+`/api/summary` and `/api/alerts`; the hamburger, the Dashboard rail item, the bell badge and the triage
+pill all render that one number, even though the bell's *panel* still groups backlogs into single rows.
+(2) One word per stage: `Queued · Writing · Rendering · Review · Scheduled · Published · Failed ·
+Cancelled`, applied to `app.js`'s label map so the polled table and the server-rendered chips agree.
+(3) `TaskStatus.CANCELLED` — an operator dropping a queued render gets its own neutral-grey state,
+excluded from the failure KPI and the alert feed, skipped by autopilot's auto-retry, and treated as a
+finished outcome by hydration, while staying retryable. Alongside: `apply_approve` now releases the
+buffer row to `ready` and marks the Task `SCHEDULED`.
+**Why:** four simulated users (a first-time owner, a phone operator, a power operator, a strategist)
+independently reported the same root problem: *the app states the same fact in many places with
+different numbers and different words*, which teaches the operator to trust none of them. Concretely,
+four badges showed 4 / 5 / 3 / 2 for one situation, because each had invented its own counting rule —
+the bell counted its grouped rows, the hamburger counted failed+review, the triage card counted its own
+list which is capped at 8 per kind. One server-side rule is the only fix that cannot drift. The
+vocabulary split was the same disease in words: "Pending Queue" vs "Queued", "Completed" vs
+"Published", "Asset Pool" vs "Review" — synonyms for stages that already had names, so an episode read
+differently depending on the page. On CANCELLED: reusing FAILED made a deliberate choice look like a
+fault (the vitals card jumped to "25% failed" after one cancel), raised a red alert about it, and — the
+worst part — autopilot's retry sweep, which skips rejects and quota errors but not failures, would
+queue the episode straight back; the operator's action silently did not stick. Finally, `apply_approve`
+left the buffer row `awaiting_review` until the upload completed, so one episode was simultaneously
+"approved" and "still waiting for review" across surfaces, the review counter did not move, and the
+still-live Approve button invited a double submit; moving it to `ready` + `SCHEDULED` also stops
+approved uploads from being counted as queued *renders*.

@@ -31,7 +31,7 @@
     <p class="meta"><a href="/campaigns?channel={{ c.channel_id }}">{{ channels[c.channel_id].channel_name if c.channel_id in channels else '—' }}</a></p>
     {{ ui.sched_facts(c.config_json) }}
     <div class="flex between mt-sm">
-      <span class="meta">Episode {{ c.current_episode }} / {{ c.total_episodes }}</span>
+      <span class="meta">{{ c.current_episode }} of {{ c.total_episodes }} published</span>
       <span class="meta mono">{{ pct }}%</span>
     </div>
     {{ ui.progress(pct, 'done' if c.status.value == 'completed' else ('work' if c.status.value == 'active' else '')) }}

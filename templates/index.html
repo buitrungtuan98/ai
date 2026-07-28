@@ -30,9 +30,11 @@
    {{ '' if degraded else 'hidden' }}>⚠ The factory is degraded — rendering and publishing are paused until the worker and Redis are back.</p>
 
 {# ── Triage inbox: what needs a human, in order ─────────────────────────────── #}
-{% set need = (attention_failed|length) + (attention_review|length) + (autopilot_proposed or 0) %}
+{# The pill renders the SHARED attention count (ADR-064), not this list's length: the list is capped
+   at 8 per kind, so counting rows disagreed with the bell and the rail badges. #}
+{% set need = attention %}
 <div class="card triage" id="triage-card" {{ '' if need else 'hidden' }}>
-  <div class="card-head"><h3>Needs your attention</h3><span class="pill failed">{{ need }}</span></div>
+  <div class="card-head"><h3>Needs your attention</h3><span class="pill failed" id="triage-count">{{ need }}</span></div>
   <ul class="triage-list" id="triage-list">
     {% if autopilot_proposed %}
     <li>
