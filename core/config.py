@@ -85,6 +85,12 @@ class Settings(BaseSettings):
     DEFAULT_BUFFER_SIZE: int = 3
     JOB_TIMEOUT_SECONDS: int = 2700
     ORPHAN_MAX_AGE_MINUTES: int = 60
+    # Watchdog (ADR-057): a render whose progress has not moved for JOB_TIMEOUT + this grace has
+    # outlived its own RQ timeout without being killed — proof the worker loop is no longer
+    # executing. The grace keeps the watchdog strictly BEHIND RQ's own timeout, so a legitimately
+    # slow-but-alive render is always failed by RQ (clean) rather than restarted (blunt).
+    WORKER_STALL_GRACE_SECONDS: int = 600
+    WATCHDOG_INTERVAL_SECONDS: int = 60     # how often the stall check runs (cheap: 2 Redis reads)
 
     # --- Scheduler / automation tick ---
     TIMEZONE: str = "UTC"                   # IANA name (e.g. Asia/Ho_Chi_Minh); posting slots use it

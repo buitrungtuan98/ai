@@ -1116,3 +1116,34 @@ slice of it on mobile — the exact "navigation overlap / bloat / lost context" 
 Collapsing to destinations-only, demoting lenses into their parent, and lighting the parent on child
 routes makes "where am I / how do I get back" answerable at a glance, and gives mobile a single,
 predictable menu instead of two competing ones.
+
+### ADR-057 — Wedged-render recovery is an in-process watchdog, not a healthcheck or a Docker socket
+**Decision:** the worker recovers itself. `set_progress` now change-stamps a companion Redis hash
+(`task:progress-ts`) — only a *moved* percentage refreshes the stamp — which makes "this render
+stopped progressing" measurable without touching the render. A daemon thread (`workers/watchdog.py`)
+checks that stamp every `WATCHDOG_INTERVAL_SECONDS` (60) and, when a render has not moved for
+`JOB_TIMEOUT_SECONDS + WORKER_STALL_GRACE_SECONDS` (45 min + 10 min), marks the Task FAILED with an
+actionable message, releases its progress entry and the global render lock, alerts the operator, then
+`os._exit(1)`s so compose's existing `restart: unless-stopped` recreates the container. The container
+healthcheck moves from `worker_alive()` to `worker_healthy()` (registered **and** not wedged) so the
+fault is *visible* in `docker compose ps`, and the web container gets a Redis restart flag
+(`worker:restart-requested`, TTL 5 min) that the same thread honours — an operator "Restart worker"
+click with **no Docker socket**. `run_worker.py` clears the lock, all progress entries and any stale
+restart flag at boot (at that instant nothing is rendering, so each is a crash artifact).
+**Why:** an episode sat at "Rendering 10%" for two hours. Three safety nets existed and none fired,
+because *all of them live inside the worker process that died*: RQ's own 45-min job timeout, the
+scheduler's 90-min stuck-task reaper, and the orphan-lock sweep. Worse, the healthcheck tested only
+whether a worker was *registered* — a worker hung mid-job still registers, so Docker never saw a
+problem. Three design constraints shaped the fix. (1) **Not the healthcheck alone**: a plain
+`restart:` policy reacts to a container *exiting*, not to `unhealthy` (only Swarm restarts on health),
+so a failing probe can report but never recover. (2) **Not the Docker socket**: mounting it into the
+internet-facing web container to run `docker restart` would trade a web vulnerability for host root —
+unacceptable against the "nothing privileged reachable through the tunnel" constraint. (3) **A thread
+works**: a render blocked in ffmpeg, a socket read or a subprocess wait holds the main thread with
+the GIL *released*, so a daemon thread keeps running and can end the process. The stall limit sits
+deliberately **behind** RQ's own timeout: under that line a slow-but-alive render is RQ's to fail
+cleanly, so only a render that outlived its own timeout — proof the loop stopped executing — is
+restarted. Because silent stages exist (image generation, concat, Auto-QC upload report no progress),
+a shorter limit would kill healthy renders. Remaining honest gap: a process frozen so hard that even
+its threads cannot run is reachable only by the healthcheck's `(unhealthy)` signal or SSH — no
+in-app button can reach code that cannot execute.

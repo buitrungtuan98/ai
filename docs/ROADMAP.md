@@ -1117,6 +1117,27 @@ so an operator can pause a catchphrase without losing it (default on = unchanged
 through `_build_campaign_config`, `_campaign_form`, the script preview, and the worker (only an
 enabled catchphrase reaches `generate_script`). 281 tests (1 new), ruff clean, docs green.
 
+## Worker self-recovery — wedged-render watchdog `DONE`
+An episode stuck at "Rendering 10%" for two hours exposed that every safety net (RQ's 45-min job
+timeout, the 90-min stuck-task reaper, the orphan-lock sweep) lives *inside* the worker process that
+died — and that the container healthcheck only asked whether a worker was *registered*, which a
+hung worker still is. Fixed at the mechanism level (ADR-057):
+- `set_progress` change-stamps `task:progress-ts` (only a moved value refreshes it), so progress
+  staleness is measurable: `stalled_render()` / `stall_limit_seconds()` / `worker_healthy()`.
+- New `workers/watchdog.py` daemon thread (60s): a render idle past `JOB_TIMEOUT + 10 min` is failed
+  with an actionable message, its progress + render lock released, the operator alerted, then the
+  process exits so compose recreates the container. A thread can do this because a blocked render
+  holds the main thread with the GIL released.
+- The stall limit sits deliberately behind RQ's own timeout, so a slow-but-alive render is still
+  failed cleanly by RQ rather than blunt-restarted (silent stages — image gen, concat, Auto-QC —
+  legitimately report no progress for minutes).
+- Operator restart flag (`worker:restart-requested`, TTL 5 min) honoured by the same thread — the
+  groundwork for the Operations page's "Restart worker" button with **no Docker socket** (the
+  internet-facing web container must never reach the Docker daemon).
+- `run_worker.py` clears the lock, all progress entries and any stale restart flag at boot.
+- Healthcheck: `worker_alive()` → `worker_healthy()` so a wedged worker shows as `(unhealthy)`.
+- Verified: 293 tests (12 new), ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

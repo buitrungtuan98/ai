@@ -77,7 +77,10 @@ services:
       - db_data:/data/db
       - media_data:/data/media
     healthcheck:
-      test: ["CMD", "python", "-c", "from workers.task_queue import worker_alive; import sys; sys.exit(0 if worker_alive() else 1)"]
+      # Registered AND progressing: a worker that hung mid-render still registers, so liveness alone
+      # reported a frozen worker as healthy for hours. This only *surfaces* the fault (compose does
+      # not restart on `unhealthy` — only Swarm does); the in-process watchdog does the recovery.
+      test: ["CMD", "python", "-c", "from workers.task_queue import worker_healthy; import sys; sys.exit(0 if worker_healthy() else 1)"]
       interval: 30s
       timeout: 5s
       retries: 3
