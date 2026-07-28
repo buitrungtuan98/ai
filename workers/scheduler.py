@@ -147,11 +147,41 @@ def _recently_published(db, campaign_id: int, window_minutes: int) -> bool:
     return latest is not None and latest >= cutoff
 
 
+def due_override_item(db, campaign: Campaign, now_utc: datetime | None = None):
+    """A ready buffer item whose operator-set `publish_at` has arrived (ADR-059), earliest first.
+
+    An override REPLACES the slot schedule for that one episode, so it deliberately skips the
+    posting-day / slot-window / one-per-slot gates: the operator named an exact time and that time
+    is now. It still respects `auto_publish` — a review-first campaign publishes on approval only."""
+    if not (campaign.config_json or {}).get("auto_publish", True):
+        return None
+    now_utc = now_utc or datetime.utcnow()
+    return db.scalar(
+        select(BufferPoolItem)
+        .where(BufferPoolItem.campaign_id == campaign.id,
+               BufferPoolItem.status == BufferStatus.ready,
+               BufferPoolItem.publish_at.isnot(None),
+               BufferPoolItem.publish_at <= now_utc)
+        .order_by(BufferPoolItem.publish_at)
+        .limit(1)
+    )
+
+
 def publish_due_campaign(db, campaign: Campaign, now: datetime | None = None,
                          enqueue=None) -> int | None:
-    """Publish exactly ONE ready buffer item if the campaign's posting slot is current (in the
+    """Publish exactly ONE buffer item if something is due: an operator-rescheduled episode whose
+    time has come, else the next ready episode when the campaign's posting slot is current (in the
     campaign's own timezone). Returns the buffer id queued, or None."""
     cfg = campaign.config_json or {}
+    enqueue = enqueue or task_queue.enqueue_publish
+    # A per-episode override outranks the slot schedule and works even for a campaign with no slots
+    # (the operator picked a time for this one episode; nothing else needs to be configured).
+    override = due_override_item(db, campaign)
+    if override is not None:
+        enqueue(override.id)
+        logger.info("Rescheduled publish: campaign %s episode %s queued",
+                    campaign.id, override.episode_number)
+        return override.id
     slots = cfg.get("posting_slots") or []
     if not slots or not cfg.get("auto_publish", True):
         return None  # continuous mode publishes at render time; review mode publishes on approval
@@ -165,13 +195,16 @@ def publish_due_campaign(db, campaign: Campaign, now: datetime | None = None,
     buf = db.scalar(
         select(BufferPoolItem)
         .where(BufferPoolItem.campaign_id == campaign.id,
-               BufferPoolItem.status == BufferStatus.ready)
+               BufferPoolItem.status == BufferStatus.ready,
+               # An episode moved to a future time must not be grabbed by the normal slot path —
+               # that would undo the operator's reschedule.
+               BufferPoolItem.publish_at.is_(None))
         .order_by(BufferPoolItem.episode_number)
         .limit(1)
     )
     if buf is None:
         return None
-    (enqueue or task_queue.enqueue_publish)(buf.id)
+    enqueue(buf.id)
     logger.info("Slot publish: campaign %s episode %s queued", campaign.id, buf.episode_number)
     return buf.id
 
@@ -595,7 +628,10 @@ def catch_up_due(db, campaign: Campaign, now: datetime | None = None):
         return None  # nothing missed yet today
     return db.scalar(
         select(BufferPoolItem).where(
-            BufferPoolItem.campaign_id == campaign.id, BufferPoolItem.status == BufferStatus.ready)
+            BufferPoolItem.campaign_id == campaign.id, BufferPoolItem.status == BufferStatus.ready,
+            # Never catch up an episode the operator moved to a specific time (ADR-059) — its own
+            # override is what publishes it.
+            BufferPoolItem.publish_at.is_(None))
         .order_by(BufferPoolItem.episode_number).limit(1))
 
 

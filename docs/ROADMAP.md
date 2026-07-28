@@ -1160,6 +1160,31 @@ group in the rail:
 - Verified: 312 tests (19 new), ruff clean, docs guard green; queue + worker tabs checked in a real
   browser at 1280px and 375px against a seeded wedged render.
 
+## Publish queue + per-episode reschedule `DONE`
+The Operations page's third tab, and the "shift one video without moving the whole campaign" control
+the operator asked for (ADR-059):
+- 🚀 **Publish queue** — every rendered episode with WHEN it goes out and why: an operator override,
+  a projected slot (ready episodes assigned to the campaign's next free slots lowest-first — the
+  scheduler's own rule, via a shared `_upcoming_slots` that `_next_slot` now reads too, so the
+  dashboard chip and this projection can never disagree), or "after you approve it". Rows whose video
+  file left the disk are flagged, because Publish now would fail on them.
+- **⚡ Now** reuses the existing publish-now route (the shared action now bounces back to Operations
+  via an allow-listed `return_to`, never an open redirect) and **✏ Reschedule** writes a new nullable
+  `BufferPoolItem.publish_at`.
+- The scheduler checks the override FIRST and lets it outrank the posting-day / slot-window /
+  one-per-slot gates — an operator who names a time means it — while a FUTURE override is excluded
+  from the slot pick, from missed-slot catch-up, and from the calendar projection, so the logic that
+  was overridden can never race ahead and undo the reschedule. `auto_publish` still wins: a
+  review-first campaign publishes on approval only.
+- Times are read and shown in the CAMPAIGN's timezone (the clock its slots already use) and stored
+  as naive UTC — interpreting a `datetime-local` value as UTC would have shifted every reschedule by
+  the operator's offset.
+- Deferred: drawing overridden episodes on the week-planner calendar (they correctly leave the slot
+  grid now; placing them at their own time needs a non-slot-aligned cell).
+- Verified: 325 tests (13 new), ruff clean, docs guard green; all four row states (slot / your time /
+  needs review / file missing) plus the open reschedule panel checked in a real browser at 1280px
+  and 375px.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

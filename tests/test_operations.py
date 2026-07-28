@@ -320,3 +320,281 @@ def test_health_reports_a_wedged_worker_separately(client, session, user, monkey
     health = main._system_health(session, user)
     assert health["worker"] is True and health["worker_stalled"] is True
     assert client.get("/api/summary").json()["health"]["worker_stalled"] is True
+
+
+# ── Publish queue + per-episode reschedule (ADR-059) ─────────────────────────
+def _ready(session, campaign, channel, episode, tmp_path=None, publish_at=None):
+    from database.models import BufferPoolItem
+    from database.types import BufferStatus
+
+    path = "/no/such/v.mp4"
+    if tmp_path is not None:
+        f = tmp_path / f"ep{episode}.mp4"
+        f.write_bytes(b"x")
+        path = str(f)
+    item = BufferPoolItem(campaign_id=campaign.id, channel_id=channel.id, episode_number=episode,
+                          video_path=path, status=BufferStatus.ready,
+                          metadata_json={"title": "T"}, publish_at=publish_at)
+    session.add(item)
+    session.commit()
+    session.refresh(item)
+    return item
+
+
+def test_publish_tab_projects_ready_episodes_onto_upcoming_slots(client, session, user, channel):
+    """Two ready episodes must map to the NEXT TWO slots, lowest episode first — the scheduler's rule."""
+    from database.models import Campaign
+    from database.types import CampaignStatus
+
+    camp = Campaign(user_id=user.id, channel_id=channel.id, topic_name="Slotted", total_episodes=9,
+                    status=CampaignStatus.active,
+                    config_json={"posting_slots": ["07:00", "21:00"], "timezone": "Asia/Ho_Chi_Minh"})
+    session.add(camp)
+    session.commit()
+    session.refresh(camp)
+    _ready(session, camp, channel, 1)
+    _ready(session, camp, channel, 2)
+
+    import main
+    rows = main._ops_publish_rows(session, user.id)
+    assert [r["state"] for r in rows] == ["slot", "slot"]
+    assert rows[0]["when"] < rows[1]["when"]          # distinct, ordered slots
+    assert rows[0]["tz"] == "Asia/Ho_Chi_Minh"
+    assert "Publish queue" in client.get("/operations?tab=publish").text
+
+
+def test_reschedule_stores_the_operators_wall_clock_as_utc(client, session, user, channel):
+    """A datetime-local value is the operator's clock — the campaign's zone, not the server's."""
+    from datetime import datetime
+
+    from database.models import Campaign
+    from database.types import CampaignStatus
+
+    camp = Campaign(user_id=user.id, channel_id=channel.id, topic_name="TZ", total_episodes=9,
+                    status=CampaignStatus.active,
+                    config_json={"timezone": "Asia/Ho_Chi_Minh"})  # UTC+7, no DST
+    session.add(camp)
+    session.commit()
+    session.refresh(camp)
+    item = _ready(session, camp, channel, 1)
+
+    r = client.post(f"/operations/buffer/{item.id}/reschedule",
+                    data={"publish_at": "2026-08-01T21:30"}, follow_redirects=False)
+    assert r.status_code == 303 and "flash=rescheduled" in r.headers["location"]
+    session.refresh(item)
+    assert item.publish_at == datetime(2026, 8, 1, 14, 30)      # 21:30 ICT == 14:30 UTC
+
+    # ...and it round-trips back to the operator's clock in the form.
+    import main
+    row = main._ops_publish_rows(session, user.id)[0]
+    assert row["state"] == "override" and row["input_value"] == "2026-08-01T21:30"
+
+
+def test_reschedule_can_be_cleared_and_rejects_garbage(client, session, user, channel):
+    from datetime import datetime
+
+    from database.models import Campaign
+    from database.types import CampaignStatus
+
+    camp = Campaign(user_id=user.id, channel_id=channel.id, topic_name="Clear", total_episodes=9,
+                    status=CampaignStatus.active, config_json={"posting_slots": ["21:00"]})
+    session.add(camp)
+    session.commit()
+    session.refresh(camp)
+    item = _ready(session, camp, channel, 1, publish_at=datetime(2026, 8, 1, 12, 0))
+
+    r = client.post(f"/operations/buffer/{item.id}/reschedule", data={"publish_at": "not-a-date"},
+                    follow_redirects=False)
+    assert "flash=resched_bad" in r.headers["location"]
+    session.refresh(item)
+    assert item.publish_at == datetime(2026, 8, 1, 12, 0)       # unchanged
+
+    r = client.post(f"/operations/buffer/{item.id}/reschedule", data={"publish_at": ""},
+                    follow_redirects=False)
+    assert "flash=resched_cleared" in r.headers["location"]
+    session.refresh(item)
+    assert item.publish_at is None                              # back on the campaign's slots
+
+
+def test_only_ready_episodes_can_be_rescheduled(client, session, user, channel):
+    """An episode awaiting review has no publish time yet — approval is what schedules it."""
+    from database.models import Campaign
+    from database.types import BufferStatus, CampaignStatus
+
+    camp = Campaign(user_id=user.id, channel_id=channel.id, topic_name="Review", total_episodes=9,
+                    status=CampaignStatus.active, config_json={"auto_publish": False})
+    session.add(camp)
+    session.commit()
+    session.refresh(camp)
+    item = _ready(session, camp, channel, 1)
+    item.status = BufferStatus.awaiting_review
+    session.commit()
+
+    r = client.post(f"/operations/buffer/{item.id}/reschedule", data={"publish_at": "2026-08-01T10:00"})
+    assert r.status_code == 400
+
+
+def test_publish_tab_flags_an_episode_whose_file_vanished(client, session, user, channel, tmp_path):
+    from database.models import Campaign
+    from database.types import CampaignStatus
+
+    camp = Campaign(user_id=user.id, channel_id=channel.id, topic_name="Gone", total_episodes=9,
+                    status=CampaignStatus.active, config_json={"posting_slots": ["21:00"]})
+    session.add(camp)
+    session.commit()
+    session.refresh(camp)
+    _ready(session, camp, channel, 1)                    # path that does not exist
+    _ready(session, camp, channel, 2, tmp_path=tmp_path)  # real file
+
+    import main
+    rows = main._ops_publish_rows(session, user.id)
+    assert [r["missing"] for r in rows] == [True, False]
+    assert "no longer on disk" in client.get("/operations?tab=publish").text
+
+
+def test_publish_action_from_operations_returns_to_operations(client, session, user, channel, tmp_path):
+    """The shared asset action must bounce back to Operations, not dump the operator on /assets."""
+    from database.models import Campaign
+    from database.types import CampaignStatus
+
+    camp = Campaign(user_id=user.id, channel_id=channel.id, topic_name="Ret", total_episodes=9,
+                    status=CampaignStatus.active, config_json={"posting_slots": ["21:00"]})
+    session.add(camp)
+    session.commit()
+    session.refresh(camp)
+    item = _ready(session, camp, channel, 1, tmp_path=tmp_path)
+
+    r = client.post(f"/assets/{item.id}/publish-now",
+                    data={"return_to": "/operations?tab=publish"}, follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/operations?tab=publish&flash=publish"
+
+
+def test_return_to_is_allow_listed_not_an_open_redirect():
+    import main
+
+    assert main._safe_return("/operations?tab=publish") == "/operations?tab=publish"
+    assert main._safe_return("/episodes/12") == "/episodes/12"
+    assert main._safe_return("https://evil.example/steal") is None
+    assert main._safe_return("//evil.example") is None
+    assert main._safe_return("/credentials") is None
+
+
+# ── Scheduler honours the override ───────────────────────────────────────────
+def test_scheduler_publishes_a_due_override_ignoring_slot_gates(session, user, channel):
+    """The operator named an exact time: posting-day and slot-window gates must not veto it."""
+    from datetime import datetime, timedelta
+
+    from database.models import Campaign
+    from database.types import CampaignStatus
+    from workers import scheduler as sch
+
+    camp = Campaign(user_id=user.id, channel_id=channel.id, topic_name="Override", total_episodes=9,
+                    status=CampaignStatus.active,
+                    config_json={"posting_slots": ["21:00"], "posting_days": ["mon"]})
+    session.add(camp)
+    session.commit()
+    session.refresh(camp)
+    due = _ready(session, camp, channel, 1,
+                 publish_at=datetime.utcnow() - timedelta(minutes=1))
+
+    queued = []
+    got = sch.publish_due_campaign(session, camp, now=datetime(2026, 7, 29, 3, 0),  # far from any slot
+                                   enqueue=queued.append)
+    assert got == due.id and queued == [due.id]
+
+
+def test_a_future_override_is_not_published_early_by_the_slot_path(session, user, channel):
+    """Moving an episode later must not let the normal slot logic grab it anyway."""
+    from datetime import datetime, timedelta
+
+    from database.models import Campaign
+    from database.types import CampaignStatus
+    from workers import scheduler as sch
+
+    camp = Campaign(user_id=user.id, channel_id=channel.id, topic_name="Later", total_episodes=9,
+                    status=CampaignStatus.active, config_json={"posting_slots": ["21:00"]})
+    session.add(camp)
+    session.commit()
+    session.refresh(camp)
+    _ready(session, camp, channel, 1, publish_at=datetime.utcnow() + timedelta(days=2))
+
+    queued = []
+    assert sch.publish_due_campaign(session, camp, now=datetime(2026, 7, 29, 21, 0),
+                                    enqueue=queued.append) is None
+    assert queued == []
+
+
+def test_an_override_reaches_a_campaign_with_no_slots_at_all(session, user, channel):
+    from datetime import datetime, timedelta
+
+    from database.models import Campaign
+    from database.types import CampaignStatus
+    from workers import scheduler as sch
+
+    camp = Campaign(user_id=user.id, channel_id=channel.id, topic_name="Continuous",
+                    total_episodes=9, status=CampaignStatus.active, config_json={})
+    session.add(camp)
+    session.commit()
+    session.refresh(camp)
+    due = _ready(session, camp, channel, 1, publish_at=datetime.utcnow() - timedelta(minutes=1))
+
+    queued = []
+    assert sch.publish_due_campaign(session, camp, enqueue=queued.append) == due.id
+
+
+def test_a_review_first_campaign_never_auto_publishes_an_override(session, user, channel):
+    from datetime import datetime, timedelta
+
+    from database.models import Campaign
+    from database.types import CampaignStatus
+    from workers import scheduler as sch
+
+    camp = Campaign(user_id=user.id, channel_id=channel.id, topic_name="Manual", total_episodes=9,
+                    status=CampaignStatus.active, config_json={"auto_publish": False})
+    session.add(camp)
+    session.commit()
+    session.refresh(camp)
+    _ready(session, camp, channel, 1, publish_at=datetime.utcnow() - timedelta(minutes=1))
+
+    queued = []
+    assert sch.publish_due_campaign(session, camp, enqueue=queued.append) is None
+    assert queued == []
+
+
+def test_catchup_skips_a_rescheduled_episode(session, user, channel):
+    from datetime import datetime, timedelta
+
+    from database.models import Campaign
+    from database.types import CampaignStatus
+    from workers import scheduler as sch
+
+    camp = Campaign(user_id=user.id, channel_id=channel.id, topic_name="Catchup", total_episodes=9,
+                    status=CampaignStatus.active,
+                    config_json={"posting_slots": ["07:00"], "timezone": "UTC"})
+    session.add(camp)
+    session.commit()
+    session.refresh(camp)
+    _ready(session, camp, channel, 1, publish_at=datetime.utcnow() + timedelta(days=1))
+
+    # Late in the day, well past the 07:00 slot → catch-up would normally fire.
+    assert sch.catch_up_due(session, camp, now=datetime(2026, 7, 29, 18, 0)) is None
+
+
+def test_calendar_projection_ignores_rescheduled_episodes(client, session, user, channel):
+    """A moved episode no longer competes for a slot, so it must not be drawn into one."""
+    from datetime import datetime, timedelta
+
+    from database.models import Campaign
+    from database.types import CampaignStatus
+
+    camp = Campaign(user_id=user.id, channel_id=channel.id, topic_name="CalProj", total_episodes=9,
+                    status=CampaignStatus.active,
+                    config_json={"posting_slots": ["21:00"], "timezone": "UTC"})
+    session.add(camp)
+    session.commit()
+    session.refresh(camp)
+    _ready(session, camp, channel, 7, publish_at=datetime.utcnow() + timedelta(days=1))
+
+    body = client.get("/calendar").text
+    assert "Ep 7" not in body

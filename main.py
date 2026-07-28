@@ -400,22 +400,50 @@ def _scorecard(db, user_id: int) -> dict:
     }
 
 
-def _next_slot(campaign) -> dict | None:
-    """The soonest upcoming posting slot for ONE active auto-publish campaign, in its own timezone.
-    Returns {in_hours, slot, when} or None (continuous / review / no slots / no upcoming day)."""
+def _campaign_tz_name(campaign) -> str:
+    """The clock a campaign's operator thinks in — its configured zone, else the server default.
+    One definition, so posting slots, the calendar and a publish-time override all agree."""
+    if campaign is None:
+        return settings.TIMEZONE
+    return (campaign.config_json or {}).get("timezone") or settings.TIMEZONE
+
+
+def _campaign_tz(campaign):
+    from zoneinfo import ZoneInfo
+
+    try:
+        return ZoneInfo(_campaign_tz_name(campaign))
+    except Exception:  # noqa: BLE001 — a bad stored zone must never break a page or an action
+        return ZoneInfo("UTC")
+
+
+def _to_campaign_tz(naive_utc, campaign):
+    """A stored naive-UTC timestamp as an aware datetime on the campaign's own clock."""
+    from zoneinfo import ZoneInfo
+
+    return naive_utc.replace(tzinfo=ZoneInfo("UTC")).astimezone(_campaign_tz(campaign))
+
+
+def _upcoming_slots(campaign, count: int = 1, now=None) -> list:
+    """The next `count` posting-slot datetimes for an auto-publish campaign, in its own timezone
+    (weekday gate applied). Empty for continuous / review-first / slot-less campaigns.
+
+    ONE definition of "when will this campaign post next", so the dashboard's next-slot chip and the
+    Operations publish queue's per-episode projection can never disagree."""
     from datetime import timedelta
 
     from workers.scheduler import WEEKDAY_KEYS, local_now
 
     cfg = campaign.config_json or {}
     if not cfg.get("auto_publish", True):
-        return None
+        return []
     slots = sorted(cfg.get("posting_slots") or [])
     if not slots:
-        return None
+        return []
     allowed = cfg.get("posting_days") or []
-    now_local = local_now(cfg.get("timezone"))
-    for dd in range(0, 8):
+    now_local = now or local_now(cfg.get("timezone"))
+    out = []
+    for dd in range(0, 60):  # a horizon long enough for any weekday-gated pattern
         day = now_local + timedelta(days=dd)
         if allowed and WEEKDAY_KEYS[day.weekday()] not in allowed:
             continue
@@ -426,9 +454,24 @@ def _next_slot(campaign) -> dict | None:
                 continue
             cand = day.replace(hour=hh, minute=mm, second=0, microsecond=0)
             if cand > now_local:
-                return {"in_hours": round((cand - now_local).total_seconds() / 3600, 1),
-                        "slot": s, "when": cand.strftime("%a %H:%M")}
-    return None
+                out.append(cand)
+                if len(out) >= count:
+                    return out
+    return out
+
+
+def _next_slot(campaign) -> dict | None:
+    """The soonest upcoming posting slot for ONE active auto-publish campaign, in its own timezone.
+    Returns {in_hours, slot, when} or None (continuous / review / no slots / no upcoming day)."""
+    from workers.scheduler import local_now
+
+    upcoming = _upcoming_slots(campaign, 1)
+    if not upcoming:
+        return None
+    cand = upcoming[0]
+    now_local = local_now((campaign.config_json or {}).get("timezone"))
+    return {"in_hours": round((cand - now_local).total_seconds() / 3600, 1),
+            "slot": cand.strftime("%H:%M"), "when": cand.strftime("%a %H:%M")}
 
 
 def _next_publish(db, user_id: int):
@@ -2139,7 +2182,10 @@ def calendar_page(request: Request, user: CurrentUser, db: DbDep, week: int = 0,
     ready_by_camp: dict[int, list[int]] = {}
     for cid, epn in db.execute(
             select(BufferPoolItem.campaign_id, BufferPoolItem.episode_number)
-            .where(BufferPoolItem.status == BufferStatus.ready)
+            .where(BufferPoolItem.status == BufferStatus.ready,
+                   # An episode with an operator-set publish time no longer competes for a slot
+                   # (ADR-059), so it must not be projected into one here either.
+                   BufferPoolItem.publish_at.is_(None))
             .order_by(BufferPoolItem.episode_number)).all():
         ready_by_camp.setdefault(cid, []).append(epn)
     slotted, unslotted = [], []
@@ -2347,7 +2393,7 @@ def retry_task(task_id: int, user: CurrentUser, db: DbDep, return_to: str = Form
 # operator intervene from the browser instead of SSHing into the box (ADR-058). Everything here
 # reads live queue/worker state, so every lookup fails soft: a dead Redis renders an empty,
 # explained page rather than a 500.
-_OPS_TABS = ("queue", "worker")
+_OPS_TABS = ("queue", "worker", "publish")
 
 
 def _ops_job_rows(db, user_id: int) -> tuple[list[dict], int]:
@@ -2417,6 +2463,66 @@ def _ops_worker_card(db, user_id: int) -> dict:
             "queue_depth": len(task_queue.queued_jobs())}
 
 
+def _ops_publish_rows(db, user_id: int) -> list[dict]:
+    """Rendered episodes waiting to go out, with WHEN each will publish.
+
+    Three states an operator must be able to tell apart: `override` (a time they set — ADR-059),
+    `slot` (projected onto the campaign's next free slots, lowest episode first, exactly the rule the
+    scheduler follows), and `review` (waiting for approval, so no time exists yet). `missing` flags a
+    row whose file left the disk, because Publish now would fail on it."""
+    items = db.scalars(
+        select(BufferPoolItem)
+        .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
+        .where(Campaign.user_id == user_id,
+               BufferPoolItem.status.in_([BufferStatus.ready, BufferStatus.awaiting_review]))
+        .order_by(BufferPoolItem.campaign_id, BufferPoolItem.episode_number)).all()
+    if not items:
+        return []
+    campaigns = {c.id: c for c in db.scalars(
+        select(Campaign).where(Campaign.user_id == user_id)).all()}
+    channels = {c.id: c for c in db.scalars(
+        select(Channel).where(Channel.user_id == user_id)).all()}
+    # Project slot times per campaign: only un-overridden ready items queue for slots, so the Nth
+    # such episode lands in the Nth upcoming slot.
+    slot_queue: dict[int, list] = {}
+    for cid, campaign in campaigns.items():
+        waiting = [i for i in items if i.campaign_id == cid
+                   and i.status == BufferStatus.ready and i.publish_at is None]
+        if waiting:
+            slot_queue[cid] = _upcoming_slots(campaign, len(waiting))
+    slot_cursor: dict[int, int] = {}
+    rows = []
+    for item in items:
+        campaign = campaigns.get(item.campaign_id)
+        when, state = None, "review"
+        if item.status == BufferStatus.awaiting_review:
+            state = "review"
+        elif item.publish_at is not None:
+            # Stored naive UTC → the campaign's own clock, so every row below is comparable.
+            when, state = _to_campaign_tz(item.publish_at, campaign), "override"
+        else:
+            taken = slot_cursor.get(item.campaign_id, 0)
+            upcoming = slot_queue.get(item.campaign_id) or []
+            if taken < len(upcoming):
+                when = upcoming[taken]
+            slot_cursor[item.campaign_id] = taken + 1
+            # No slots configured → continuous mode already published at render time, so anything
+            # still ready here is simply waiting for the next tick.
+            state = "slot" if when is not None else "now"
+        rows.append({
+            "item": item, "campaign": campaign,
+            "channel": channels.get(item.channel_id),
+            "when": when, "state": state,
+            # Both rendered in the campaign's timezone: a human label, and the value a browser
+            # `datetime-local` field expects when the operator opens the reschedule form.
+            "when_label": when.strftime("%a %d/%m %H:%M") if when else None,
+            "input_value": when.strftime("%Y-%m-%dT%H:%M") if when else "",
+            "tz": _campaign_tz_name(campaign),
+            "missing": not (item.video_path and os.path.exists(item.video_path)),
+        })
+    return rows
+
+
 @app.get("/operations", response_class=HTMLResponse)
 def operations_page(request: Request, user: CurrentUser, db: DbDep, tab: str = "queue",
                     flash: str = ""):
@@ -2425,6 +2531,8 @@ def operations_page(request: Request, user: CurrentUser, db: DbDep, tab: str = "
            "worker": _ops_worker_card(db, user.id)}
     if tab == "queue":
         ctx["job_rows"], ctx["publish_queued"] = _ops_job_rows(db, user.id)
+    elif tab == "publish":
+        ctx["publish_rows"] = _ops_publish_rows(db, user.id)
     return templates.TemplateResponse(request, "operations.html", ctx)
 
 
@@ -2491,3 +2599,32 @@ def ops_restart_worker(user: CurrentUser, db: DbDep):
     flag within a minute and leaves cleanly."""
     task_queue.request_worker_restart()
     return _ops_redirect("worker", "restarting")
+
+
+@app.post("/operations/buffer/{item_id}/reschedule")
+def ops_reschedule(db: DbDep, item=Depends(get_owned_buffer_item), publish_at: str = Form("")):
+    """Set (or clear) THIS episode's publish time — dodge another channel's peak hour without moving
+    the whole campaign's slots (ADR-059).
+
+    The input is a browser `datetime-local` value, i.e. the operator's own wall clock, so it is
+    interpreted in the CAMPAIGN's timezone (the same clock its posting slots use) and stored as naive
+    UTC like every other timestamp. An empty value clears the override and the episode rejoins the
+    normal slot queue."""
+    if item.status != BufferStatus.ready:
+        raise HTTPException(400, "Only pre-rendered (ready) episodes can be rescheduled")
+    raw = (publish_at or "").strip()
+    if not raw:
+        item.publish_at = None
+        db.commit()
+        return _ops_redirect("publish", "resched_cleared")
+    try:
+        naive_local = datetime.fromisoformat(raw)
+    except ValueError:
+        return _ops_redirect("publish", "resched_bad")
+    from zoneinfo import ZoneInfo
+
+    campaign = db.get(Campaign, item.campaign_id)
+    item.publish_at = (naive_local.replace(tzinfo=_campaign_tz(campaign))
+                       .astimezone(ZoneInfo("UTC")).replace(tzinfo=None))
+    db.commit()
+    return _ops_redirect("publish", "rescheduled")

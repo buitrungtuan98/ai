@@ -221,6 +221,10 @@ class BufferPoolItem(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # Operator override for THIS episode's publish time (naive UTC, like every timestamp here).
+    # Set from the Operations page to dodge another channel's peak hour without moving the whole
+    # campaign's slots; when set it replaces the slot schedule for this item only (ADR-059).
+    publish_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     campaign: Mapped["Campaign"] = relationship(back_populates="buffer_items")
 

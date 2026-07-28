@@ -80,6 +80,9 @@ _COLUMN_UPGRADES: dict[str, dict[str, str]] = {
     "campaigns": {
         "learning_json": "TEXT",
     },
+    "buffer_pool": {
+        "publish_at": "DATETIME",  # per-episode publish-time override (ADR-059)
+    },
     "channels": {
         "autopilot_json": "TEXT",
         "profile_json": "TEXT",

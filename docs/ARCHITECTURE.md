@@ -1174,3 +1174,28 @@ lives only in Redis while the DB row freezes, so the UI showed a number that cou
 "last moved N min ago" next to the percentage makes the difference between slow and wedged legible,
 and the three-layer explainer (RQ timeout → watchdog → housekeeping) tells the operator which one
 will fix it and when, instead of leaving them to guess whether to wait or intervene.
+
+### ADR-059 — Per-episode publish time: an override column, not a second scheduler
+**Decision:** `BufferPoolItem.publish_at` (nullable naive UTC, additive column upgrade) lets an
+operator move ONE rendered episode to an exact time without touching the campaign's posting slots.
+The scheduler checks it first: `due_override_item` publishes a ready episode whose `publish_at` has
+arrived, deliberately skipping the posting-day, slot-window and one-per-slot gates (the operator
+named a time and that time is now), and it works even for a campaign with no slots at all. Symmetric-
+ally, an episode with a FUTURE override is excluded from the normal slot pick, from missed-slot
+catch-up, and from the calendar's slot projection — otherwise the very logic the operator overrode
+would publish it early and silently undo the reschedule. `auto_publish` still wins: a review-first
+campaign publishes on approval only. The UI reads and writes the time in the CAMPAIGN's timezone —
+the same clock its posting slots already use — and stores naive UTC like every other timestamp.
+**Why:** the operator's need was "shift one video to dodge another channel's peak hour". The
+alternative (edit the campaign's slots) moves *every* future episode, which is the wrong blast
+radius, and a general per-episode scheduler would duplicate slot logic that already works. One
+nullable column expresses "this episode is special" precisely, needs no new table or job type, and
+degrades to today's behaviour when NULL. Making the override *outrank* the gates rather than
+compose with them is the key call: an operator who picks 23:30 on a Tuesday for a Mon-only campaign
+means it, and a schedule that silently refuses would be worse than no feature. The mirror-image
+exclusions matter as much as the publish path — without them the feature would appear to work while
+the slot path raced it. Timezone handling is the other trap: a `datetime-local` field carries no
+zone, so interpreting it as UTC would silently shift every reschedule by the operator's offset (7
+hours, in this deployment). Deferred: showing overridden episodes on the week-planner calendar —
+they now correctly vanish from the slot grid (they no longer compete for a slot), but drawing them at
+their own time needs a calendar cell that is not slot-aligned.

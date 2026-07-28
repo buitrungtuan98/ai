@@ -351,6 +351,21 @@ tbody tr:last-child td { border-bottom: none; }
 .slot-key.filled { color: var(--st-working); }
 .slot-key.missed { color: var(--st-review); }
 
+/* Per-episode reschedule disclosure (Operations → Publish queue). The summary IS the button, so the
+   default marker is removed; the panel drops below the row's action cluster. */
+/* Rows here can grow (an open reschedule panel, a file-missing warning), so align to the top —
+   centred cells would leave the short columns floating beside a tall one. */
+.ops-table td { vertical-align: top; }
+.resched > summary { list-style: none; cursor: pointer; display: inline-flex; }
+.resched > summary::-webkit-details-marker { display: none; }
+/* Open, the panel takes the whole action cell so it drops BELOW the buttons instead of squeezing
+   them onto separate lines (the row-actions flex would otherwise treat it as a wide sibling). */
+.resched[open] { flex-basis: 100%; }
+.resched-form { margin-top: var(--sp-2); padding: var(--sp-3); background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: var(--radius-sm); min-width: 240px; }
+.resched-form input[type="datetime-local"] { width: auto; min-width: 150px; }
+.resched-form .hint { margin-top: var(--sp-2); }
+
 /* ── 14. Media ─────────────────────────────────────────────────────────────── */
 video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm); background: #000;
   margin-top: var(--sp-3); display: block; }
