@@ -2628,3 +2628,173 @@ def ops_reschedule(db: DbDep, item=Depends(get_owned_buffer_item), publish_at: s
                        .astimezone(ZoneInfo("UTC")).replace(tzinfo=None))
     db.commit()
     return _ops_redirect("publish", "rescheduled")
+
+
+# ── Cross-channel alert feed (the header bell) ────────────────────────────────
+# ONE inbox for "what is wrong across all my channels", derived from live state rather than stored as
+# events (ADR-060): every row is recomputed from the same helpers the pages render, so an alert can
+# never disagree with reality or linger after the problem is fixed. Levels: red (nothing is moving /
+# something needs a decision), amber (heading for trouble), green (it worked).
+_ALERT_ORDER = {"red": 0, "amber": 1, "green": 2}
+_ALERT_FAILED_LIMIT = 8      # per-episode failures listed individually before it stops being useful
+_ALERT_GREEN_LIMIT = 3       # a little "it's working" evidence, not a publish log
+_QUOTA_WARN_RATIO = 0.8
+_SLOT_RISK_HOURS = 6         # a slot this close with an empty buffer is an actionable warning
+
+
+def _alert(level: str, key: str, text: str, *, channel: str = "", campaign: str = "",
+           href: str = "", action: str = "", at=None) -> dict:
+    """One alert row. `key` is stable for the same underlying problem so the client can de-dupe
+    across polls; `at` is an ISO string when the row has a real timestamp."""
+    return {"level": level, "key": key, "channel": channel, "campaign": campaign,
+            "text": text, "href": href, "action": action,
+            "at": at.isoformat() + "Z" if at is not None else None}
+
+
+def _infra_alerts(db, user) -> list[dict]:
+    """Faults that stop the whole factory, plus the two resource limits that quietly stop it later."""
+    health = _system_health(db, user)
+    out = []
+    if not health["redis"]:
+        out.append(_alert("red", "redis-down",
+                          "Redis is unreachable — nothing can be queued, rendered or published.",
+                          href="/operations?tab=worker", action="Operations"))
+    if not health["worker"]:
+        out.append(_alert("red", "worker-down",
+                          "No render worker is registered — renders and uploads are both paused.",
+                          href="/operations?tab=worker", action="Operations"))
+    elif health["worker_stalled"]:
+        out.append(_alert("red", "worker-stalled",
+                          "The render worker is wedged — it has stopped making progress and will "
+                          "restart itself.", href="/operations?tab=worker", action="Operations"))
+    disk = health["disk_pct"]
+    if disk is not None and disk >= settings.DISK_PRESSURE_PCT:
+        out.append(_alert("amber", "disk", f"Disk is {disk}% full — old renders are being swept "
+                                          "aggressively to make room.",
+                          href="/operations?tab=publish", action="Publish queue"))
+    budget, calls = health["ai_budget"], health["ai_calls"]
+    if budget and calls >= budget * _QUOTA_WARN_RATIO:
+        out.append(_alert("amber", "quota",
+                          f"AI calls today: {calls}/{budget}. Renders start failing when the daily "
+                          "quota runs out.", href="/settings", action="Settings"))
+    return out
+
+
+def _work_alerts(db, user) -> list[dict]:
+    """Things that need a human: failed episodes, a campaign the breaker stopped, review, proposals."""
+    campaigns = {c.id: c for c in db.scalars(
+        select(Campaign).where(Campaign.user_id == user.id)).all()}
+    channels = {c.id: c for c in db.scalars(
+        select(Channel).where(Channel.user_id == user.id)).all()}
+
+    def names(campaign):
+        channel = channels.get(campaign.channel_id) if campaign else None
+        return (channel.channel_name if channel else ""), (campaign.topic_name if campaign else "")
+
+    out = []
+    for task in db.scalars(
+            select(Task).where(Task.user_id == user.id, Task.status == TaskStatus.FAILED)
+            .order_by(Task.finished_at.desc().nullslast(), Task.id.desc())
+            .limit(_ALERT_FAILED_LIMIT)).all():
+        campaign = campaigns.get(task.campaign_id)
+        chan, camp = names(campaign)
+        # The stack trace's LAST line is the actual error; the rest is noise in a one-line alert.
+        reason = ((task.error_message or "").strip().splitlines() or ["failed"])[-1][:120]
+        out.append(_alert("red", f"task-failed:{task.id}", f"Ep {task.episode_number} failed — {reason}",
+                          channel=chan, campaign=camp, href=f"/episodes/{task.id}", action="Open",
+                          at=task.finished_at or task.updated_at))
+    for campaign in campaigns.values():
+        if campaign.status == CampaignStatus.failed:
+            chan, camp = names(campaign)
+            out.append(_alert("red", f"campaign-paused:{campaign.id}",
+                              "Campaign stopped after repeated failures — no new episodes will "
+                              "render until you start it again.",
+                              channel=chan, campaign=camp,
+                              href=f"/campaigns/{campaign.id}", action="Open"))
+    review = _task_counts(db, user.id)["awaiting_review"]
+    if review:
+        out.append(_alert("amber", "review",
+                          f"{review} episode{'s' if review != 1 else ''} waiting for your review.",
+                          href="/assets", action="Review"))
+    proposed = _autopilot_proposed_count(db, user.id)
+    if proposed:
+        out.append(_alert("amber", "autopilot",
+                          f"{proposed} autopilot proposal{'s' if proposed != 1 else ''} awaiting a "
+                          "decision.", href="/autopilot", action="Autopilot"))
+    return out
+
+
+def _schedule_alerts(db, user) -> list[dict]:
+    """A posting slot about to be missed because nothing is ready — the failure you want to hear
+    about BEFORE it happens, since a missed slot cannot be recovered after the fact."""
+    ready = dict(db.execute(
+        select(BufferPoolItem.campaign_id, func.count())
+        .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
+        .where(Campaign.user_id == user.id, BufferPoolItem.status == BufferStatus.ready)
+        .group_by(BufferPoolItem.campaign_id)).all())
+    channels = {c.id: c for c in db.scalars(
+        select(Channel).where(Channel.user_id == user.id)).all()}
+    out = []
+    for campaign in db.scalars(select(Campaign).where(
+            Campaign.user_id == user.id, Campaign.status == CampaignStatus.active)).all():
+        if ready.get(campaign.id):
+            continue  # something is ready to go out
+        nxt = _next_slot(campaign)
+        if nxt is None or nxt["in_hours"] > _SLOT_RISK_HOURS:
+            continue
+        channel = channels.get(campaign.channel_id)
+        out.append(_alert("amber", f"slot-risk:{campaign.id}",
+                          f"Next post is {nxt['when']} but nothing is rendered yet — that slot will "
+                          "be missed.", channel=channel.channel_name if channel else "",
+                          campaign=campaign.topic_name, href="/operations?tab=queue",
+                          action="Render queue"))
+    return out
+
+
+def _success_alerts(db, user) -> list[dict]:
+    """A little evidence the factory is working, so a quiet bell means "healthy", not "broken feed"."""
+    from datetime import timedelta
+
+    cutoff = datetime.utcnow() - timedelta(hours=24)
+    campaigns = {c.id: c for c in db.scalars(
+        select(Campaign).where(Campaign.user_id == user.id)).all()}
+    channels = {c.id: c for c in db.scalars(
+        select(Channel).where(Channel.user_id == user.id)).all()}
+    out = []
+    for task in db.scalars(
+            select(Task).where(Task.user_id == user.id, Task.status == TaskStatus.COMPLETED,
+                               Task.finished_at.isnot(None), Task.finished_at >= cutoff)
+            .order_by(Task.finished_at.desc()).limit(_ALERT_GREEN_LIMIT)).all():
+        campaign = campaigns.get(task.campaign_id)
+        channel = channels.get(campaign.channel_id) if campaign else None
+        out.append(_alert("green", f"published:{task.id}",
+                          f"Ep {task.episode_number} published.",
+                          channel=channel.channel_name if channel else "",
+                          campaign=campaign.topic_name if campaign else "",
+                          href=task.published_url or f"/episodes/{task.id}",
+                          action="View", at=task.finished_at))
+    return out
+
+
+def _alerts(db, user) -> list[dict]:
+    """The whole feed, most urgent first. Fail-soft per source: one broken query must not empty the
+    bell, because an empty bell reads as "everything is fine"."""
+    rows: list[dict] = []
+    for source in (_infra_alerts, _work_alerts, _schedule_alerts, _success_alerts):
+        try:
+            rows += source(db, user)
+        except Exception:  # noqa: BLE001
+            logger.warning("alert source %s failed", source.__name__, exc_info=True)
+    rows.sort(key=lambda a: (_ALERT_ORDER.get(a["level"], 9), a["at"] or "", a["key"]))
+    return rows
+
+
+@app.get("/api/alerts")
+def api_alerts(user: CurrentUser, db: DbDep):
+    """Feed for the header bell. `actionable` counts red+amber — the badge number, so it can never
+    disagree with the list length."""
+    rows = _alerts(db, user)
+    return {"alerts": rows,
+            "actionable": sum(1 for a in rows if a["level"] in ("red", "amber")),
+            "worst": ("red" if any(a["level"] == "red" for a in rows)
+                      else "amber" if any(a["level"] == "amber" for a in rows) else "")}

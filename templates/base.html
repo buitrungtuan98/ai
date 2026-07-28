@@ -14,11 +14,28 @@
   {% set scope_cid = request.query_params.get('channel') %}
   {% set _channels = nav_channels(request) %}
   {% set scope_q = ('?channel=' ~ scope_cid) if scope_cid else '' %}
+  {# App bar — present at every width. On the phone it also carries the drawer toggle; the sidebar
+     sits below it and drops its duplicate brand on desktop. #}
   <header class="topbar">
     <button class="nav-toggle" id="nav-toggle" aria-label="Open navigation"
             aria-controls="sidebar" aria-expanded="false">☰<span class="nav-badge" data-badge="attn" hidden></span></button>
     <div class="brand"><span class="dot"></span> AI Video Factory</div>
-    <button class="icon-btn" id="theme-toggle" aria-label="Toggle light / dark theme" title="Toggle theme">◐</button>
+    <div class="topbar-right">
+      {# Cross-channel alert inbox. The count is the number of things actually wrong right now
+         (red + amber), so it clears itself when they are fixed — nothing to mark as read. #}
+      <div class="bell-wrap">
+        <button class="icon-btn" id="bell" aria-label="Alerts" title="Alerts across all channels"
+                aria-expanded="false" aria-controls="bell-panel">🔔<span class="bell-count" id="bell-count" hidden></span></button>
+        <div class="bell-panel" id="bell-panel" role="dialog" aria-label="Alerts" hidden>
+          <div class="bell-head"><b>Alerts</b> <span class="meta" id="bell-summary"></span></div>
+          <ul class="bell-list" id="bell-list" aria-live="polite"></ul>
+        </div>
+      </div>
+      <button class="icon-btn" id="theme-toggle" aria-label="Toggle light / dark theme" title="Toggle theme">◐</button>
+      {% if settings.MULTI_TENANT_MODE %}
+      <span class="who topbar-who" title="{{ request.session.get('email') or '' }}">{{ request.session.get('email') or 'Signed in' }}</span>
+      {% endif %}
+    </div>
   </header>
   <div class="layout">
     <div class="nav-backdrop" id="nav-backdrop"></div>

@@ -1185,6 +1185,28 @@ the operator asked for (ADR-059):
   needs review / file missing) plus the open reschedule panel checked in a real browser at 1280px
   and 375px.
 
+## Alert bell — one cross-channel inbox `DONE`
+The operator's `[Channel] ➔ [Campaign] ➔ problem ➔ [action]` bell, colour-coded red/amber/green
+(ADR-060):
+- `GET /api/alerts` derives the whole feed from live state — no `Notification` table, no read/unread.
+  The badge is the count of red+amber rows present right now, so it clears itself when the problems
+  are fixed and can never disagree with the list it opens.
+- Four fail-soft sources: infrastructure (Redis/worker down or wedged, disk pressure, AI quota ≥80%),
+  work needing a human (per-episode failures showing the LAST stack-trace line — the actual error —
+  plus breaker-paused campaigns and counted review/autopilot backlogs), an imminent missed slot (a
+  slot within 6h with an empty buffer: the only predictive row, because a passed slot cannot be
+  recovered), and recent publishes as green evidence the factory works.
+- One broken source can never empty the bell — an empty bell reads as "everything is fine".
+- The app bar now exists at EVERY width (it was phone-only), hosting brand + bell + theme + the
+  signed-in address; the sidebar sticks below it and drops its duplicate brand/email outside the
+  phone drawer. The panel is viewport-anchored on the phone, where a bell-anchored 420px dropdown
+  hung off the left edge.
+- Rows are built with createElement/textContent — channel, campaign and error text are user/AI data.
+- Deviation from the approved plan: localStorage read-watermarking was dropped. With a live count
+  there is nothing to mark as read, and an ops panel should keep showing what is still broken.
+- Verified: 339 tests (14 new), ruff clean, docs guard green; 12 pages checked in a real browser at
+  1280px and 375px with zero page errors and no horizontal overflow.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

@@ -225,6 +225,101 @@
       });
   }
 
+  // ── Alert bell: one cross-channel inbox of what is wrong right now ────────
+  // The badge is a live count (red + amber), not an unread counter: fix the problem and it clears
+  // itself. Rows are built with createElement/textContent — channel, campaign and error text are
+  // user/AI data and must never be interpolated as HTML.
+  var alertTimer = null;
+  function renderAlerts(data) {
+    var list = document.getElementById("bell-list");
+    var count = document.getElementById("bell-count");
+    var summary = document.getElementById("bell-summary");
+    if (!list || !count) return;
+    var rows = (data && data.alerts) || [];
+    var n = (data && data.actionable) || 0;
+    count.textContent = n > 99 ? "99+" : n;
+    count.hidden = n === 0;
+    count.className = "bell-count" + (data && data.worst === "amber" ? " amber" : "");
+    if (summary) {
+      summary.textContent = n ? n + " need" + (n === 1 ? "s" : "") + " attention"
+                              : "Nothing needs attention";
+    }
+    list.textContent = "";
+    if (!rows.length) {
+      var empty = document.createElement("li");
+      empty.className = "bell-empty";
+      empty.textContent = "All clear — no failures, nothing waiting.";
+      list.appendChild(empty);
+      return;
+    }
+    rows.forEach(function (a) {
+      var li = document.createElement("li");
+      li.className = "bell-item";
+      var dot = document.createElement("span");
+      dot.className = "bell-dot " + (a.level || "");
+      var body = document.createElement("div");
+      body.className = "bell-body";
+      var chain = [a.channel, a.campaign].filter(Boolean);
+      if (chain.length) {
+        var ch = document.createElement("span");
+        ch.className = "bell-chain";
+        ch.textContent = chain.join(" › ");
+        body.appendChild(ch);
+      }
+      var text = document.createElement("span");
+      text.className = "bell-text";
+      text.textContent = a.text || "";
+      body.appendChild(text);
+      if (a.at) {
+        var when = document.createElement("span");
+        when.className = "bell-when";
+        when.textContent = relTime(a.at);
+        body.appendChild(when);
+      }
+      li.appendChild(dot);
+      li.appendChild(body);
+      if (a.href && a.action) {
+        var link = document.createElement("a");
+        link.className = "btn ghost sm";
+        link.href = a.href;
+        link.textContent = a.action;
+        li.appendChild(link);
+      }
+      list.appendChild(li);
+    });
+  }
+  function pollAlerts() {
+    fetch("/api/alerts", { headers: { Accept: "application/json" } })
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error(r.status)); })
+      .then(renderAlerts)
+      .catch(function () { /* transient — the summary poller owns the offline toast */ });
+  }
+  function stopAlerts() { clearTimeout(alertTimer); alertTimer = null; }
+  function startAlerts() {
+    stopAlerts();
+    (function loop() { alertTimer = setTimeout(function () { pollAlerts(); loop(); }, 30000); })();
+  }
+  function initBell() {
+    var btn = document.getElementById("bell");
+    var panel = document.getElementById("bell-panel");
+    if (!btn || !panel) return;
+    function setOpen(open) {
+      panel.hidden = !open;
+      btn.setAttribute("aria-expanded", open ? "true" : "false");
+      if (open) pollAlerts();                       // always current the moment it is opened
+    }
+    btn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      setOpen(panel.hidden);
+    });
+    document.addEventListener("click", function (e) {
+      if (!panel.hidden && !panel.contains(e.target) && e.target !== btn) setOpen(false);
+    });
+    document.addEventListener("keydown", function (e) { if (e.key === "Escape") setOpen(false); });
+    pollAlerts();
+    startAlerts();
+  }
+
   // ── Mobile drawer navigation ──────────────────────────────────────────────
   function initNav() {
     var active = document.querySelector(".sidebar .nav a.active");
@@ -393,11 +488,12 @@
     initCmdK();
     initConfirmForms();
     initRelTimes();
+    initBell();
     pollSummary();
     startSummary();
     document.addEventListener("visibilitychange", function () {
-      if (document.hidden) stopSummary();
-      else { pollSummary(); startSummary(); }
+      if (document.hidden) { stopSummary(); stopAlerts(); }
+      else { pollSummary(); startSummary(); pollAlerts(); startAlerts(); }
     });
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);

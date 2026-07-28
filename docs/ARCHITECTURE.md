@@ -1199,3 +1199,27 @@ zone, so interpreting it as UTC would silently shift every reschedule by the ope
 hours, in this deployment). Deferred: showing overridden episodes on the week-planner calendar —
 they now correctly vanish from the slot grid (they no longer compete for a slot), but drawing them at
 their own time needs a calendar cell that is not slot-aligned.
+
+### ADR-060 — The alert bell is derived state with a live count, not an event log with unread marks
+**Decision:** `GET /api/alerts` recomputes the whole cross-channel incident feed on every poll from the
+same helpers the pages render — four fail-soft sources (infrastructure, work needing a human, an
+imminent missed slot, recent successes) merged and sorted red → amber → green. There is **no**
+`Notification` table and **no** read/unread state: the bell's badge is the number of red+amber rows
+present *right now*, so fixing a problem clears it and the count can never disagree with the list it
+opens. Backlogs (review queue, autopilot proposals) are single counted rows; per-episode failures are
+listed individually but capped. The app bar that hosts the bell is now rendered at every width, with
+the sidebar sticking below it.
+**Why:** the operator asked for one bell that gathers failures across channels, colour-coded, in the
+form `[Channel] ➔ [Campaign] ➔ problem ➔ [action]`. A stored-event table was the obvious design and
+the wrong one here: events are written at one moment and then drift from the world, so a resolved
+failure keeps its row and a fixed campaign still shows red until someone marks it read — the operator
+would be maintaining an inbox instead of reading a status. Deriving from state costs a handful of
+indexed queries (a single-operator box, WAL reads never block the writer), gives a feed that is
+correct by construction, and needs no migration, retention policy or read-state sync. It also makes
+"acknowledge" meaningless in the right way: for an ops panel, a problem you cannot fix yet is exactly
+what you want to keep seeing. Telegram already provides the durable history a stored table would add.
+Two details earn their complexity: the last line of a stack trace is the actual error (the rest is
+noise in a one-line alert), and the imminent-missed-slot warning is the only *predictive* row — a slot
+that passes with an empty buffer cannot be recovered afterwards, so warning at publish time would be
+useless. Deviation from the plan: read-watermarking in localStorage was proposed and dropped, because
+with a live count there is nothing to mark.
