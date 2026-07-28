@@ -1239,10 +1239,31 @@ The top-down view the per-campaign pages cannot give (ADR-062), as one dashboard
 - Verified: 350 tests (11 new), ruff clean, docs guard green; checked in a real browser at 1280px and
   375px in both the empty and populated states.
 
+## Micro analytics — channel growth vs publishing `DONE`
+"Does publishing this much actually grow the channel?" — answered per channel (ADR-063):
+- New `ChannelSnapshot` table: one row per channel per LOCAL day (subscribers / views / videos) from
+  the platform's own totals. Per-episode stats cannot answer this — a channel's totals are not the sum
+  of the episodes we made — and the APIs expose only the CURRENT total, so if we don't sample daily the
+  past is permanently unavailable.
+- `collect_channel_snapshots` rides the hourly stats pass and self-throttles: the day row is checked
+  before fetching, so extra ticks spend no API quota; one revoked token never blocks other channels.
+- `channel_growth` serves the correlation view — per-day sub/view deltas beside episodes published
+  that day — drawn on each Channels card as CSS bars (episodes) under an inline-SVG polyline (subs
+  gained). Hand-rolled from numeric server values: no chart library, XSS-safe by construction.
+- Two "unknown vs zero" distinctions kept deliberately: a hidden subscriber count is None, never 0
+  (otherwise a hidden channel reads as "0 subs, no growth" forever), and the first sample yields None
+  deltas with a "the curve appears tomorrow" note rather than a flat line at zero implying publishing
+  did nothing.
+- Facebook contributes followers only; it has no lifetime page-view total comparable to YouTube's, so
+  views stays None instead of substituting a similar-sounding metric.
+- Verified: 362 tests (12 new), ruff clean, docs guard green; the chart checked in a real browser at
+  1280px and 375px against 14 seeded days of uneven publishing.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download
 - YouTube OAuth refresh + real upload
+- Live channel-totals sampling (YouTube channels.list / Facebook Page followers → ChannelSnapshot)
 - Facebook Page upload
 - Telegram delivery
 - Cloudflare Tunnel public exposure

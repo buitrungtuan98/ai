@@ -9,10 +9,11 @@ main normalization trade-off and is deliberate (see the backend design notes).
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import (
     Boolean,
+    Date,
     DateTime,
     Enum,
     ForeignKey,
@@ -254,6 +255,37 @@ class AutopilotAction(Base):
     status: Mapped[str] = mapped_column(String(16), default="proposed", index=True)  # proposed|applied|dismissed|failed
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class ChannelSnapshot(Base):
+    """One row per channel per day: the channel's own totals (subscribers / views / public videos)
+    straight from the platform.
+
+    This is the ONLY place the factory records channel-level growth over time. Per-episode
+    `Task.stats_json` answers "did this video work?"; it can never answer "is publishing this much
+    actually growing the channel?", because platform totals are not the sum of the episodes we made
+    (older videos, shorts feed spillover, unlisted content). A daily series makes that correlation
+    measurable (ADR-063).
+
+    A brand-new table, so `create_all` adds it to existing DBs with no column migration needed.
+    `day` is the channel's local calendar day, and the unique constraint makes collection idempotent —
+    an hourly tick can call the collector freely and only the first call each day writes.
+    """
+
+    __tablename__ = "channel_snapshots"
+    __table_args__ = (
+        UniqueConstraint("channel_id", "day", name="uq_channel_snapshot_day"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[int] = mapped_column(
+        ForeignKey("channels.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    day: Mapped[date] = mapped_column(Date, nullable=False)
+    subscribers: Mapped[int | None] = mapped_column(Integer)   # None where a platform hides it
+    views: Mapped[int | None] = mapped_column(Integer)
+    videos: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
 class ChannelClipUsage(Base):

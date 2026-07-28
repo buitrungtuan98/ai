@@ -629,6 +629,22 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 .spark-bars { display: flex; align-items: flex-end; gap: 3px; height: 34px; margin-top: 8px; }
 .spark-bars .sb { flex: 1; min-height: 3px; background: var(--st-working); border-radius: 2px; }
 
+/* Channel growth (Channels page): the totals, then two series on one axis — bars for episodes
+   published per day, a line for subscribers gained per day. Hand-rolled; no chart library. */
+.growth { border-top: 1px solid var(--border); padding-top: var(--sp-3); }
+.growth-nums { display: flex; flex-wrap: wrap; gap: var(--sp-4); }
+.gn { font-size: var(--fs-md); font-weight: var(--fw-bold); color: var(--text); }
+.gn small { display: block; font-size: var(--fs-xs); font-weight: var(--fw-normal); color: var(--muted); }
+.gn small b.up { color: var(--st-success); }
+.gn small b.down { color: var(--st-failed); }
+.growth-chart { position: relative; height: 54px; margin-top: var(--sp-3); }
+.gc-bars { display: flex; align-items: flex-end; gap: 2px; height: 100%; }
+.gc-bar { flex: 1; min-height: 2px; background: var(--st-working-bg); border: 1px solid var(--st-working-bd);
+  border-bottom: none; border-radius: 2px 2px 0 0; }
+.gc-line { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.gc-line polyline { fill: none; stroke: var(--st-success); stroke-width: 2; vector-effect: non-scaling-stroke;
+  stroke-linejoin: round; stroke-linecap: round; }
+
 /* Activity feed (dashboard) */
 .feed { list-style: none; margin: 0; padding: 0; }
 .feed-item { display: flex; align-items: center; gap: var(--sp-3); padding: 10px 0;

@@ -461,10 +461,17 @@ def hourly_stats_pass(db, now: datetime | None = None) -> dict:
     mature ones. Each internally throttles per-episode work (early ~55 min, retention 24 h), so
     running this hourly is cheap; it just makes fresh data appear within the hour instead of the
     next daily tick. Best-effort — a fetch failure never breaks the tick."""
-    from services.analytics_service import collect_early_stats, collect_stats
+    from services.analytics_service import (
+        collect_channel_snapshots,
+        collect_early_stats,
+        collect_stats,
+    )
 
     return {"early_stats": collect_early_stats(db, now=now),
-            "stats_updated": collect_stats(db, now=now)}
+            "stats_updated": collect_stats(db, now=now),
+            # Channel growth series (ADR-063). Self-throttling to one row per channel per local day,
+            # so riding the hourly pass just means the sample lands early in the operator's day.
+            "channel_snapshots": collect_channel_snapshots(db, now=now)}
 
 
 # ── Autopilot: the "hands" — AI review / auto-reject / retry / catch-up publish (ADR-044) ──

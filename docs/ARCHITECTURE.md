@@ -1265,3 +1265,26 @@ as the whole catalogue when it may cover three of thirty episodes; showing "acro
 of 30 published" makes the number honest instead of flattering. Memory deliberately excludes
 reclaimable page cache: Total−Free would show this 24 GB box at ~95% while it is perfectly healthy,
 training the operator to ignore the one number that should mean something.
+
+### ADR-063 — Channel growth is a daily snapshot table, because per-episode stats cannot answer it
+**Decision:** a new `ChannelSnapshot` table stores one row per channel per **local** day — subscribers,
+views, video count — sampled by `collect_channel_snapshots` riding the existing hourly stats pass. The
+day row is checked before fetching, so extra ticks cost a cheap SELECT and no API quota, and
+`unique(channel, day)` is the backstop. `channel_growth` then serves the correlation the operator
+asked for: per-day subscriber/view deltas beside how many episodes that channel published that day,
+rendered on each Channels card as CSS bars (episodes) under an inline-SVG polyline (subscribers
+gained). A hidden subscriber count is `None`, never `0`; a first sample yields `None` deltas, never `0`.
+**Why:** the request was "videos published vs real View/Sub growth from the API", and the existing
+per-episode `Task.stats_json` structurally cannot supply it. A channel's totals are *not* the sum of
+the episodes this factory made — older videos, Shorts-feed spillover and content published outside the
+tool all move them — so summing episode views would answer a different question and quietly
+under-report growth. Platform APIs also only expose the **current** total, never history, which forces
+the design: if we don't sample daily, the past is simply unavailable, and no later feature can
+reconstruct it. One `channels.list` call per channel per day is negligible against the Data API quota
+that per-episode collection already spends. Two "unknown vs zero" distinctions are load-bearing and
+easy to get wrong: a channel that hides its subscriber count would otherwise render as "0 subscribers,
+no growth" forever, and the first day of collection would draw a flat line at zero implying publishing
+did nothing — so both report `None` and the UI says the curve appears tomorrow. Facebook reports
+followers but no lifetime page-view total comparable to YouTube's, so `views` stays `None` rather than
+substituting a similar-sounding metric. The chart is hand-rolled from numeric server values (no chart
+library, XSS-safe by construction), consistent with the no-CDN rule.

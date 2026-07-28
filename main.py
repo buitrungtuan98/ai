@@ -46,6 +46,7 @@ from core.tts import VOICE_CHOICES
 from database.db_session import get_db, init_db
 from database.models import AutopilotAction, BufferPoolItem, Campaign, Channel, Task
 from database.types import BufferStatus, CampaignStatus, ChannelStatus, Platform, TaskStatus
+from services import analytics_service
 from workers import task_queue, video_worker
 
 logging.basicConfig(level=settings.LOG_LEVEL)
@@ -663,6 +664,8 @@ def channels_page(request: Request, user: CurrentUser, db: DbDep, status: str = 
         {"request": request, "user": user, "channels": channels, "nav": "channels",
          "camp_counts": camp_counts, "chips": chips, "status": status, "q": q, "total_all": total_all,
          "ap": {c.id: (c.autopilot_json or {}) for c in channels},
+         # Growth series per channel (ADR-063): does publishing this much actually move subs/views?
+         "growth": {c.id: analytics_service.channel_growth(db, c.id) for c in channels},
          "characters": {c.id: _sanitize_characters(c.characters_json) for c in channels},
          "flash": flash if flash in ("profile", "autopilot", "character",
                                      "char_img_ok", "char_img_fail") else ""},
