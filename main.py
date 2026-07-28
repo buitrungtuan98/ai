@@ -27,7 +27,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
-from sqlalchemy import String, cast, func, or_, select
+from sqlalchemy import String, cast, false, func, or_, select
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -1971,6 +1971,51 @@ _STATUS_TO_STAGE = {st: stage for stage, sts in _STAGE_STATUSES.items() for st i
 _EPISODES_LIST_PER_PAGE = 25
 
 
+def _review_episode_keys(db, user_id: int, *, campaign: int | None = None,
+                         channel: int | None = None) -> set[tuple[int, int]]:
+    """(campaign_id, episode_number) for every episode whose rendered video is waiting for approval.
+
+    The BUFFER is the review queue — the same source the attention badge already used — so deriving
+    the Review stage from it makes the chip and the badge agree by construction (ADR-065). Reading it
+    from `Task.status` instead is what produced the audit's worst finding: the chip said "Review (0)"
+    while two videos sat waiting, because a Retry had moved one task on while its buffer row stayed
+    `awaiting_review`. A task status can drift from the queue; the queue cannot drift from itself."""
+    stmt = (select(BufferPoolItem.campaign_id, BufferPoolItem.episode_number)
+            .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
+            .where(Campaign.user_id == user_id,
+                   BufferPoolItem.status == BufferStatus.awaiting_review))
+    if campaign:
+        stmt = stmt.where(BufferPoolItem.campaign_id == campaign)
+    elif channel:
+        stmt = stmt.where(Campaign.channel_id == channel)
+    return {(cid, ep) for cid, ep in db.execute(stmt).all()}
+
+
+def _apply_stage_filter(stmt, stage: str, review_keys: set[tuple[int, int]]):
+    """Restrict an episode query to ONE stage, with Review taken from the buffer.
+
+    Review membership WINS over the task status, and every other stage excludes those episodes — so
+    an episode belongs to exactly one stage and can never be listed as both "Queued" and "Review"
+    (the audit found one episode reading as three different stages across surfaces)."""
+    from sqlalchemy import tuple_
+
+    key = tuple_(Task.campaign_id, Task.episode_number)
+    if stage == "review":
+        return stmt.where(key.in_(review_keys)) if review_keys else stmt.where(false())
+    stmt = stmt.where(Task.status.in_([TaskStatus(st) for st in _STAGE_STATUSES[stage]]))
+    return stmt.where(key.notin_(review_keys)) if review_keys else stmt
+
+
+def _stage_counts_from(raw: dict, review_keys: set, review_by_stage: dict) -> dict:
+    """Fold raw {status: n} into stage counts, with Review buffer-derived and its episodes removed
+    from the stage their task status would otherwise put them in (so the totals still add up)."""
+    counts = {stage: sum(raw.get(st, 0) for st in sts) for stage, sts in _STAGE_STATUSES.items()}
+    for stage, n in review_by_stage.items():
+        counts[stage] = max(0, counts.get(stage, 0) - n)
+    counts["review"] = len(review_keys)
+    return counts
+
+
 def _episode_stage_counts(db, user, *, campaign: int | None = None,
                           channel: int | None = None) -> dict:
     """{stage: count} (+ 'all') across the user's episodes in scope. Powers the unified stage-tab bar
@@ -1984,7 +2029,20 @@ def _episode_stage_counts(db, user, *, campaign: int | None = None,
         conds.append(Task.campaign_id.in_(camp_ids or [-1]))
     raw = {s.value: n for s, n in db.execute(
         select(Task.status, func.count()).where(*conds).group_by(Task.status)).all()}
-    counts = {stage: sum(raw.get(st, 0) for st in sts) for stage, sts in _STAGE_STATUSES.items()}
+    review_keys = _review_episode_keys(db, user.id, campaign=campaign, channel=channel)
+    # Which stage each review episode WOULD have landed in, so removing them keeps the totals honest.
+    review_by_stage: dict[str, int] = {}
+    if review_keys:
+        from sqlalchemy import tuple_
+
+        for status, n in db.execute(
+                select(Task.status, func.count()).where(
+                    *conds, tuple_(Task.campaign_id, Task.episode_number).in_(review_keys))
+                .group_by(Task.status)).all():
+            stage = _STATUS_TO_STAGE.get(status.value)
+            if stage and stage != "review":
+                review_by_stage[stage] = review_by_stage.get(stage, 0) + n
+    counts = _stage_counts_from(raw, review_keys, review_by_stage)
     counts["all"] = sum(raw.values())
     return counts
 
@@ -2008,25 +2066,38 @@ def _episode_list_ctx(db, user, *, campaign: int | None = None, channel: int | N
     # Per-stage counts over the scope (search-independent, like the other chip bars).
     raw_counts = {s.value: n for s, n in db.execute(
         joined(select(Task.status, func.count()), scope_conds).group_by(Task.status)).all()}
-    stage_counts = {stage: sum(raw_counts.get(st, 0) for st in sts)
-                    for stage, sts in _STAGE_STATUSES.items()}
+    review_keys = _review_episode_keys(db, user.id, campaign=campaign, channel=channel)
+    review_by_stage: dict[str, int] = {}
+    if review_keys:
+        from sqlalchemy import tuple_
+
+        for st_val, n in db.execute(joined(
+                select(Task.status, func.count()),
+                scope_conds + [tuple_(Task.campaign_id, Task.episode_number).in_(review_keys)])
+                .group_by(Task.status)).all():
+            st_stage = _STATUS_TO_STAGE.get(st_val.value)
+            if st_stage and st_stage != "review":
+                review_by_stage[st_stage] = review_by_stage.get(st_stage, 0) + n
+    stage_counts = _stage_counts_from(raw_counts, review_keys, review_by_stage)
     total_all = sum(raw_counts.values())
 
     stage = status if status in _STAGE_STATUSES else ""
     q = q.strip()
     item_conds = list(scope_conds)
-    if stage:
-        item_conds.append(Task.status.in_([TaskStatus(st) for st in _STAGE_STATUSES[stage]]))
     if q:
         item_conds.append(or_(Campaign.topic_name.ilike(f"%{q}%"),
                               Task.synopsis.ilike(f"%{q}%"),
                               cast(Task.episode_number, String).ilike(f"%{q}%"),
                               cast(Task.status, String).ilike(f"%{q}%")))
-    total = db.scalar(joined(select(func.count()), item_conds)) or 0
+    def staged(stmt):
+        stmt = joined(stmt, item_conds)
+        return _apply_stage_filter(stmt, stage, review_keys) if stage else stmt
+
+    total = db.scalar(staged(select(func.count()))) or 0
     pages = max(1, -(-total // _EPISODES_LIST_PER_PAGE))
     page = min(max(page, 1), pages)
-    episodes = db.scalars(joined(select(Task), item_conds)
-                          .order_by(Task.id.desc())
+    episodes = db.scalars(staged(select(Task))
+                          .order_by(Task.updated_at.desc(), Task.id.desc())
                           .limit(_EPISODES_LIST_PER_PAGE)
                           .offset((page - 1) * _EPISODES_LIST_PER_PAGE)).all()
 
@@ -2047,6 +2118,7 @@ def episodes_list(request: Request, user: CurrentUser, db: DbDep,
     merges what used to be split between Task Logs (render) and Asset Pool (review). Row → the
     Episode detail page. Server-rendered + stage tabs + search + scope + pagination (one grammar)."""
     ctx = _episode_list_ctx(db, user, campaign=campaign, channel=channel, status=status, q=q, page=page)
+    ctx["worker_ok"] = task_queue.worker_alive()  # the render-log warning follows the filter (ADR-065)
     scope_hidden = {"campaign": campaign} if campaign else ({"channel": channel} if channel else {})
     scope_qs = _query_string(**scope_hidden, status=ctx["status"], q=ctx["q"])
     return templates.TemplateResponse(
@@ -2289,36 +2361,33 @@ def calendar_page(request: Request, user: CurrentUser, db: DbDep, week: int = 0,
 
 
 # ── Real-Time Task Logs ──────────────────────────────────────────────────────
-@app.get("/tasks", response_class=HTMLResponse)
-def tasks_page(request: Request, user: CurrentUser, db: DbDep,
-               campaign: int | None = None, channel: int | None = None):
-    scope = None
-    if campaign:  # drill-down scope from a campaign
-        scope = db.get(Campaign, campaign)
-        if scope is not None and scope.user_id != user.id:
-            scope = None
-    scope_channel = None
-    if channel:  # scope the live feed to one channel (its api/tasks poll is filtered server-side)
-        scope_channel = db.get(Channel, channel)
-        if scope_channel is not None and scope_channel.user_id != user.id:
-            scope_channel = None
-    return templates.TemplateResponse(
-        request, "tasks.html",
-        {"request": request, "user": user, "nav": "tasks",
-         "scope_campaign": scope, "scope_channel": scope_channel,
-         "worker_ok": task_queue.worker_alive(),  # F3: surface a dead worker unmistakably
-         "stage_counts": _episode_stage_counts(db, user, campaign=campaign, channel=channel)})
+@app.get("/tasks")
+def tasks_redirect(campaign: int | None = None, channel: int | None = None):
+    """Gone: the render log is now the Rendering filter of the one episode list (ADR-065).
+
+    It used to be a second table over the same episodes — its own layout, its own search grammar and
+    its own status words ("Pending Queue" where the rest of the app said "Queued") — reached from
+    chips that looked like filters. A permanent redirect keeps every old link and bookmark working.
+    `/api/tasks` is unchanged: it is still the data source, now for the live rows inside that list."""
+    scope = _query_string(status="rendering", campaign=campaign, channel=channel)
+    return RedirectResponse("/episodes?" + scope, status_code=301)
 
 
 _TASKS_PER_PAGE = 25
 
 
 @app.get("/api/tasks")
-def api_tasks(user: CurrentUser, db: DbDep,
-              page: int = 1, q: str = "", campaign: int | None = None, channel: int | None = None):
+def api_tasks(user: CurrentUser, db: DbDep, page: int = 1, q: str = "",
+              campaign: int | None = None, channel: int | None = None, live: bool = False):
     # Full task history, newest first, paginated — page 1 carries the live/active jobs. Scope
     # (?campaign / ?channel) and search (?q) run in SQL so they span ALL history, not just the page.
+    #
+    # `live=1` narrows to episodes still in a working stage (ADR-065). The episode table polls that:
+    # a rendering episode can sit behind hundreds of published ones, so paging the history to find it
+    # was both wasteful and unreliable.
     base = select(Task).where(Task.user_id == user.id)
+    if live:
+        base = base.where(Task.status.in_(_WORKING_STATUSES))
     if campaign:
         base = base.where(Task.campaign_id == campaign)
     if channel:  # scope by the episode's campaign's channel

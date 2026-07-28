@@ -355,7 +355,7 @@
   // resetting page). The choice is remembered in localStorage so it survives visits to unscoped
   // pages (Dashboard/Channels/Credentials) — on load the remembered channel is reflected in the
   // dropdown and carried onto the scope-aware nav links. An explicit ?channel in the URL always wins.
-  var SCOPED_PATHS = ["/episodes", "/campaigns", "/assets", "/tasks", "/calendar"];
+  var SCOPED_PATHS = ["/episodes", "/campaigns", "/assets", "/calendar"];
   var SCOPE_KEY = "scopeChannel";
 
   function initScopeSwitcher() {

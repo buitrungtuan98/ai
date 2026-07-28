@@ -472,14 +472,24 @@ def test_retry_clears_ghost_progress(client):
     assert task_queue.get_progress(tid) == 0.0    # ghost cleared on retry
 
 
-def test_tasks_page_warns_when_worker_down(client, monkeypatch):
-    """The render log shows an unmistakable banner when the worker isn't running (nothing renders)."""
+def test_render_log_redirects_into_the_one_episode_list(client):
+    """/tasks was a second table over the same episodes. It is the Rendering filter now (ADR-065),
+    and the old URL keeps working for every bookmark and old link."""
+    r = client.get("/tasks", follow_redirects=False)
+    assert r.status_code == 301
+    assert r.headers["location"] == "/episodes?status=rendering"
+    r = client.get("/tasks?channel=7", follow_redirects=False)
+    assert "status=rendering" in r.headers["location"] and "channel=7" in r.headers["location"]
+
+
+def test_the_rendering_filter_warns_when_the_worker_is_down(client, monkeypatch):
+    """The warning follows the filter that needs it, instead of living on its own page."""
     from workers import task_queue
 
     monkeypatch.setattr(task_queue, "worker_alive", lambda: False)
-    assert "Nothing will render or publish until" in client.get("/tasks").text
+    assert "Nothing will render or publish until" in client.get("/episodes?status=rendering").text
     monkeypatch.setattr(task_queue, "worker_alive", lambda: True)
-    assert "Nothing will render or publish until" not in client.get("/tasks").text
+    assert "Nothing will render or publish until" not in client.get("/episodes?status=rendering").text
 
 
 def test_nav_facets_link_to_their_owner(client):
@@ -491,10 +501,13 @@ def test_nav_facets_link_to_their_owner(client):
     assert 'href="/calendar"' in campaigns                         # Campaigns → Calendar view toggle
     cal = client.get("/calendar").text
     assert 'href="/campaigns"' in cal                              # Calendar → back to the list
-    assert 'href="/episodes"' in client.get("/tasks").text         # render log → up to Episodes
     assert 'href="/episodes"' in client.get("/assets").text        # Review → up to Episodes
+    # Episodes is the one list: EVERY stage chip filters it in place (ADR-065), so no chip navigates
+    # away to a differently-shaped page any more.
     eps = client.get("/episodes").text
-    assert 'href="/tasks"' in eps and 'href="/assets"' in eps      # Episodes surfaces both facets
+    assert 'href="/tasks"' not in eps
+    for stage in ("queued", "rendering", "review", "scheduled", "published", "failed"):
+        assert f'href="/episodes?status={stage}"' in eps
 
 
 def test_api_search_across_types(client):
@@ -1720,9 +1733,10 @@ def test_tasks_channel_scope(client):
     assert client.get("/api/tasks").json()["total"] == 2
     scoped = client.get(f"/api/tasks?channel={cha_id}").json()
     assert scoped["total"] == 1 and scoped["tasks"][0]["topic"] == "CampA"
-    # The page carries the scope so the poller sends it, and shows a channel scope note.
-    page = client.get(f"/tasks?channel={cha_id}").text
-    assert f'data-scope-channel="{cha_id}"' in page and "Render jobs for channel" in page
+    # The scoped episode list shows only that channel's episodes and says so.
+    page = client.get(f"/episodes?channel={cha_id}").text
+    assert "CampA" in page and "CampB" not in page
+    assert "Episodes for channel" in page
 
 
 def test_calendar_channel_scope(client):

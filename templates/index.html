@@ -100,9 +100,9 @@
   {{ ui.stat(channels|length, 'Connected channels', href='/channels', live='channels') }}
   {{ ui.stat(campaigns|selectattr('status.value','equalto','active')|list|length, 'Active campaigns', tone='work', href='/campaigns', live='active_campaigns') }}
   {{ ui.stat(counts.published, 'Videos published', tone='ok', live='published') }}
-  {{ ui.stat(counts.working, 'In pipeline', tone='work', href='/tasks', live='working') }}
+  {{ ui.stat(counts.working, 'In pipeline', tone='work', href='/episodes?status=rendering', live='working') }}
   {{ ui.stat(counts.awaiting_review, 'Awaiting review', tone='warn' if counts.awaiting_review else '', href='/assets', live='awaiting_review') }}
-  {{ ui.stat(counts.failed, 'Failed', tone='bad' if counts.failed else '', href='/tasks', live='failed') }}
+  {{ ui.stat(counts.failed, 'Failed', tone='bad' if counts.failed else '', href='/episodes?status=failed', live='failed') }}
 </div>
 
 {# ── Factory scorecard: trajectory, not just current counts ─────────────────── #}
@@ -191,7 +191,7 @@
 <div class="card">
   <div class="flex between">
     <h3>Activity <span class="meta" id="since-note"></span></h3>
-    <a href="/tasks">Task Logs →</a>
+    <a href="/episodes">All episodes →</a>
   </div>
   {% if tasks %}
   {% set FK = {'COMPLETED': ('done', 'Published'), 'FAILED': ('failed', 'Failed'),
@@ -246,7 +246,7 @@
                 if (tc) tc.hidden = true; if (ac) ac.hidden = false;
               }
             })
-            .catch(function () { window.ui.toast("Couldn't retry — open Task Logs.", "danger"); });
+            .catch(function () { window.ui.toast("Couldn't retry — open the episode for details.", "danger"); });
         });
       });
     });

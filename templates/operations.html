@@ -7,13 +7,13 @@
 {% block content %}
 {% set w = worker %}
 {% call ui.page_head('Operations', 'Render queue, worker health and recovery — the factory floor.') %}
-  <a class="btn ghost sm" href="/tasks">≣ Render log</a>
+  <a class="btn ghost sm" href="/episodes?status=rendering">≣ Rendering</a>
   <a class="btn ghost sm" href="/episodes">🎬 Episodes</a>
 {% endcall %}
 
 {% set _flash = {
   'prioritised': ('success', 'Moved to the front of the queue — it renders next.'),
-  'cancelled': ('info', 'Queued render cancelled. It is marked failed; use Retry to queue it again.'),
+  'cancelled': ('info', 'Queued render cancelled — marked cancelled, not failed, so it stays out of your failure stats. Use Retry to queue it again.'),
   'gone': ('info', 'That job already left the queue — nothing to do.'),
   'recovered': ('success', 'Recovery done — stranded episodes were failed and any orphaned render lock was released.'),
   'nothing': ('info', 'Nothing to recover: no stranded episode and no orphaned render lock.'),
@@ -78,7 +78,7 @@
                 <button class="btn ghost sm" type="submit" title="Render this episode next">🔼 Next</button></form>
               {% endif %}
               <form method="post" action="/operations/jobs/{{ r.job_id }}/cancel"
-                    data-confirm="Cancel the queued render of Ep {{ r.task.episode_number }}? It is marked failed and can be retried later.">
+                    data-confirm="Cancel the queued render of Ep {{ r.task.episode_number }}{% if r.campaign %} — {{ r.campaign.topic_name }}{% endif %}? It is marked cancelled (not failed) and you can Retry it any time.">
                 <button class="btn danger sm" type="submit" title="Remove from the queue">✕ Cancel</button></form>
             </div>
           </td>

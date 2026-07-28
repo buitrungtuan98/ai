@@ -92,11 +92,12 @@
 </div>
 {%- endmacro %}
 
-{# THE single episode navigation — one stage-tab bar shared by /episodes, /assets and /tasks, so
-   there is ONE control (not a switcher + a duplicate chip bar). Rendering→/tasks and Review→/assets
-   open the richer workbench layouts; the other stages filter /episodes in place. `active` ∈
-   ''|queued|rendering|review|scheduled|published|failed. `counts` = {stage: n, 'all': n}. When
-   `search`, an episode search box is appended (used on /episodes; the workbench pages keep their own). #}
+{# THE single episode filter bar. EVERY chip filters /episodes in place (ADR-065): two of them used
+   to navigate to differently-shaped pages (/tasks, /assets) while looking identical to the filters
+   beside them, so clicking a "filter" silently changed page, layout and vocabulary — testers
+   reported losing their place and their search box. `active` ∈
+   ''|queued|rendering|review|scheduled|published|failed|cancelled. `counts` = {stage: n, 'all': n}.
+   When `search`, an episode search box is appended. #}
 {% macro stage_tabs(counts, active, scope_cid=None, search=false, q='', scope_hidden={}) -%}
 {% set c = counts or {} %}
 {% set base = ('?channel=' ~ scope_cid) if scope_cid else '' %}
@@ -104,8 +105,8 @@
 <div class="filter-bar" role="tablist" aria-label="Episode stages">
   <a class="chip {{ 'active' if active in ['', 'all'] }}" href="/episodes{{ base }}">All ({{ c.get('all', 0) }})</a>
   <a class="chip {{ 'active' if active == 'queued' }}" href="/episodes?status=queued{{ sq }}">Queued ({{ c.get('queued', 0) }})</a>
-  <a class="chip {{ 'active' if active == 'rendering' }}" href="/tasks{{ base }}" title="Live render log">≣ Rendering ({{ c.get('rendering', 0) }})</a>
-  <a class="chip {{ 'active' if active == 'review' }}" href="/assets{{ base }}" title="Video review workbench">▦ Review ({{ c.get('review', 0) }})</a>
+  <a class="chip {{ 'active' if active == 'rendering' }}" href="/episodes?status=rendering{{ sq }}">Rendering ({{ c.get('rendering', 0) }})</a>
+  <a class="chip {{ 'active' if active == 'review' }}" href="/episodes?status=review{{ sq }}">Review ({{ c.get('review', 0) }})</a>
   <a class="chip {{ 'active' if active == 'scheduled' }}" href="/episodes?status=scheduled{{ sq }}">Scheduled ({{ c.get('scheduled', 0) }})</a>
   <a class="chip {{ 'active' if active == 'published' }}" href="/episodes?status=published{{ sq }}">Published ({{ c.get('published', 0) }})</a>
   <a class="chip {{ 'active' if active == 'failed' }}" href="/episodes?status=failed{{ sq }}">Failed ({{ c.get('failed', 0) }})</a>

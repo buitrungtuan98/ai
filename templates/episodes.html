@@ -12,6 +12,20 @@
 {% set _ch = scope_hidden.get('channel') if scope_hidden else None %}
 {% call ui.page_head('Episodes', 'Every episode from queued to published — click one for its full lifecycle, preview and actions.') %}{% endcall %}
 {{ ui.stage_tabs(stage_counts, status, _ch, search=true, q=q, scope_hidden=scope_hidden) }}
+
+{# The render log lived on its own page and carried this warning; it is a filter here now, so the
+   warning follows the filter (ADR-065). Polled live by ui.js, unlike the static banner it replaces. #}
+{% if status in ('', 'queued', 'rendering') and worker_ok is defined and not worker_ok %}
+{% call ui.banner('danger') %}⚠ <b>The render worker isn’t running.</b> Nothing will render or publish until it’s back — queued episodes just wait (they are not lost). <a href="/operations?tab=worker">Check the worker →</a>{% endcall %}
+{% endif %}
+
+{# Watching video is a different job from scanning a list, so the review workbench stays — but it is
+   now a destination you choose, not somewhere a "filter" chip drops you (ADR-065). #}
+{% if status == 'review' and episodes %}
+<p class="scope-note">Watching and approving is easier in the review workbench — one video at a time,
+  with keyboard shortcuts. <a href="/assets{{ ('?channel=' ~ _ch) if _ch else '' }}">Open review workbench →</a></p>
+{% endif %}
+
 {% if scope_campaign %}
 {{ ui.scope_note('Episodes for', scope_campaign.topic_name, '/episodes') }}
 {% elif scope_channel %}
@@ -30,3 +44,5 @@
 {% call ui.empty('🎬', 'No episodes yet', 'Start a campaign and episodes will appear here as they render, wait for review, and publish.', '/campaigns', 'View campaigns') %}{% endcall %}
 {% endif %}
 {% endblock %}
+{# Keeps the moving rows moving — the live render log is a filter of this table now. #}
+{% block scripts %}<script src="{{ static_url('app.js') }}" defer></script>{% endblock %}

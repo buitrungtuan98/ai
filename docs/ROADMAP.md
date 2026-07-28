@@ -1281,6 +1281,31 @@ many places with different numbers and different words.** R1 fixes the foundatio
   from Task Logs → Retry" advice that pointed at a button that is never offered for a rejected item.
 - Verified: 376 tests (13 new), ruff clean, docs guard green.
 
+## UX consolidation R2 — one episode list `DONE`
+Three of four simulated operators lost their place the same way: the stage-chip row looked like one
+control, but two chips silently changed page, layout and vocabulary. Two tables over one object was
+the duplication; the chips were how you noticed (ADR-065):
+- The `/tasks` **page** is retired → 301 into `/episodes?status=rendering`. `/api/tasks` stays (every
+  pagination/search/scope test still applies) and gains `live=1` for working stages only.
+- Every stage chip filters `/episodes` in place. Rows in a working stage carry `data-live-task`, and a
+  much smaller `app.js` moves their pill + progress in place — the live render log is a filter now.
+  Gone with the page: a second search grammar, a second pager, dead Time/Result columns, and progress
+  bars showing 0% on published episodes.
+- **The Review chip was wrong, not just duplicated**: it read "Review (0)" while two videos waited,
+  because it counted `Task.status` while the review queue IS the buffer and a Retry had moved one task
+  on. The stage is now buffer-derived (`_review_episode_keys`), so it equals the attention badge by
+  construction, and review membership overrides the task status — an episode can no longer be both
+  "Queued" and "Review" (testers hit that on three surfaces).
+- The `/assets` review workbench stays (watching video is a different job) but is now *offered* by a
+  link on the Review filter instead of being where a chip dumps you.
+- One ordering (`updated_at` desc) for both episode surfaces, so actionable work is never buried under
+  hundreds of published rows — the campaign hub tab did exactly that.
+- Dense 2-line mobile rows: 38 episodes went from ~8.9 phone screens to ~3.5.
+- Fixed a latent CSS bug found while verifying: `.banner` was `display:flex`, so every inline child of
+  a sentence became its own narrow column — unreadable at 375px, on every banner in the app.
+- Verified: 382 tests (5 new), ruff clean, docs guard green; chips, live row movement, the redirect and
+  both breakpoints checked in a real browser.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

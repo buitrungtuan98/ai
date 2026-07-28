@@ -309,9 +309,12 @@ details.disclosure > summary > .sum { flex: 1; min-width: 0; display: flex; flex
 .meter.warn > span { background: var(--st-review); }
 .meter.crit > span { background: var(--st-failed); }
 
+/* Banners are PROSE. As a flex container every inline child (<b>, a link, a bare text node) became
+   its own flex item, so a sentence rendered as narrow side-by-side columns — invisible on a wide
+   screen, unreadable at 375px. `display: block` lets the sentence simply wrap. */
 .banner { border-radius: var(--radius); padding: var(--sp-3) var(--sp-4); margin-bottom: var(--sp-4);
-  font-size: var(--fs-sm); border: 1px solid var(--border); background: var(--surface); display: flex;
-  align-items: flex-start; gap: var(--sp-2); box-shadow: var(--shadow-1); }
+  font-size: var(--fs-sm); border: 1px solid var(--border); background: var(--surface); display: block;
+  box-shadow: var(--shadow-1); line-height: 1.5; }
 .banner a { font-weight: var(--fw-semibold); margin-left: 4px; }
 .banner.danger { background: var(--st-failed-bg); border-color: var(--st-failed-bd); color: var(--st-failed); }
 .banner.info { background: var(--st-review-bg); border-color: var(--st-review-bd); color: var(--st-review); }
@@ -709,7 +712,7 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 
 /* Pagination controls */
 .pager { display: flex; align-items: center; justify-content: center; gap: var(--sp-4); margin-top: var(--sp-6); }
-.pager:empty { display: none; }  /* the JS-driven Task Logs pager renders empty on a single page */
+.pager:empty { display: none; }  /* a single-page pager renders empty */
 .pager-off { opacity: .4; pointer-events: none; }
 
 /* Search box */
@@ -738,6 +741,27 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
     text-transform: uppercase; letter-spacing: .4px; font-weight: var(--fw-semibold); flex-shrink: 0; }
   .stack-table tbody td:empty { display: none; }
   .stack-table .progress { min-width: 100px; }
+
+  /* The episode list is the one long list in the app, so it gets a denser mobile row than the
+     generic label-per-field stacking: two lines instead of six (ADR-065). 38 episodes went from
+     ~8.9 phone screens of scrolling to about a third of that — morning triage is meant to be
+     seeing, not scrolling. */
+  .ep-table thead { display: none; }
+  .ep-table tbody tr { display: grid; grid-template-columns: 1fr auto; gap: 2px var(--sp-3);
+    align-items: center; margin: 0; padding: var(--sp-2) 0; background: none;
+    border: none; border-bottom: 1px solid var(--border); border-radius: 0; }
+  .ep-table tbody td { display: block; border: none; padding: 0; }
+  .ep-table tbody td::before { display: none; }          /* the values speak for themselves here */
+  .ep-table tbody td[data-label="Episode"] { grid-column: 1; grid-row: 1; }
+  .ep-table tbody td[data-label="Episode"] a { display: inline-block; padding: 5px 0; }
+  .ep-table tbody td[data-label="Stage"] { grid-column: 2; grid-row: 1; text-align: right; }
+  .ep-table tbody td[data-label="Campaign"] { grid-column: 1; grid-row: 2; font-size: var(--fs-xs);
+    color: var(--muted); }
+  .ep-table tbody td[data-label="Updated"] { grid-column: 2; grid-row: 2; text-align: right; }
+  /* The episode title in column 1 is already the link — a second "Open →" button is dead weight. */
+  .ep-table tbody td:last-child { display: none; }
+  .ep-table tbody td[data-label="Episode"] .meta,
+  .ep-table tbody td[data-label="Campaign"] .meta { display: inline; }
 }
 
 @media (max-width: 900px) {

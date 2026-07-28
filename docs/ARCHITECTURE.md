@@ -1316,3 +1316,29 @@ left the buffer row `awaiting_review` until the upload completed, so one episode
 "approved" and "still waiting for review" across surfaces, the review counter did not move, and the
 still-live Approve button invited a double submit; moving it to `ready` + `SCHEDULED` also stops
 approved uploads from being counted as queued *renders*.
+
+### ADR-065 — One episode list: retire the /tasks page, derive the Review stage from the buffer
+**Decision:** `/episodes` is the single list of episodes. The `/tasks` **page** is retired to a 301
+into `/episodes?status=rendering`; `/api/tasks` stays as the data source and gains `live=1`
+(working stages only). Every stage chip now filters that one list **in place** — none navigates away.
+`_episodes_table.html` marks rows in a working stage with `data-live-task`, and a much smaller
+`app.js` moves their stage pill and progress with `textContent`/class changes, so "the live render
+log" is a filter rather than a destination. The **Review stage is derived from the buffer**
+(`_review_episode_keys`), review membership overrides the task status, and every other stage excludes
+those episodes — one episode, exactly one stage. Watching video stays a separate job, so the `/assets`
+workbench remains, offered by a link on the Review filter instead of a chip that teleports. Both
+episode surfaces order by `updated_at desc`, and the mobile row is a dense two-line block.
+**Why:** three of four simulated operators independently lost their place in the same way: the chip
+row looked like one control but two of its chips silently changed page, layout and vocabulary
+(`/tasks` titled "Render log", `<title>` "Task Logs", nav highlighting "Episodes"), and the page they
+landed on had a different search box, a different pager and different status words for the same
+episodes. Two tables over one object is the duplication; the chips were only how you noticed. The
+Review count was worse than duplication — it was *wrong*: the chip read "Review (0)" while two videos
+sat waiting, because it counted `Task.status` while the review queue itself is the buffer, and a Retry
+had moved one task on while its buffer row still said `awaiting_review`. Deriving the stage from the
+buffer makes the chip equal the attention badge by construction (same source, ADR-064) and removes the
+possibility of an episode appearing as both "Queued" and "Review", which testers hit on three separate
+surfaces. Retiring the page also deleted a whole parallel implementation — a second search grammar, a
+second pager, dead Time/Result columns, and progress bars that showed 0% on published episodes.
+Keeping `/api/tasks` intact means every existing test of pagination, search and scope still applies to
+the code that still exists.

@@ -1,25 +1,21 @@
-// AJAX driver for the Real-Time Task Logs panel (no external libs, CSP-friendly).
-// Server-side paginated + searched + scoped: page 1 carries the live jobs; older pages walk the
-// full history. Search and scope run in SQL, so they cover every task, not just the current page.
+// Live episode rows — the last piece of the old /tasks page (ADR-065).
+//
+// It used to be a whole second table: its own AJAX driver, its own search grammar, its own pager and
+// its own status words, rendering the same episodes as /episodes in a different shape. Now there is
+// ONE server-rendered episode table and this script only keeps the moving parts moving: a row in a
+// working stage gets its stage pill and progress updated in place, so "the live render log" is a
+// filter of the list rather than a separate destination.
+//
+// Rows are matched by task id and updated with textContent / class changes only — nothing is built
+// from server strings, so there is no HTML-injection surface here at all.
 (function () {
-  var tbody = document.getElementById("task-rows");
+  "use strict";
+
+  var tbody = document.getElementById("episode-rows");
   if (!tbody) return;
-  var filterEl = document.getElementById("task-filter");
-  var pagerEl = document.getElementById("task-pager");
-  var scopeCampaign = tbody.dataset.scopeCampaign || "";
-  var scopeChannel = tbody.dataset.scopeChannel || "";
 
-  var page = 1;
-  var query = "";
-  var meta = { page: 1, pages: 1, total: 0 };
-  var lastTasks = [];
-  var seq = 0;              // request token — ignore responses that arrive out of order
-  var searchTimer = null;
-
-  // ONE vocabulary, shared with the server-rendered stage chips (ADR-064). The old labels invented
-  // synonyms ("Pending Queue" vs "Queued", "Completed" vs "Published") for stages the rest of the app
-  // already had names for, so the same episode read differently depending on which page you were on.
-  var STATUS_LABELS = {
+  // Same vocabulary as the server-rendered pills (ADR-064) — one word per stage, everywhere.
+  var STAGE_LABELS = {
     PENDING_QUEUE: "Queued",
     AI_GENERATION: "Writing",
     AUDIO_SYNCED: "Rendering",
@@ -31,159 +27,83 @@
     FAILED: "Failed",
     CANCELLED: "Cancelled",
   };
+  var HAS_PROGRESS = { AI_GENERATION: 1, AUDIO_SYNCED: 1, RENDERING: 1 };
+  // Stages that can still change on their own. Once a row reaches anything else, polling it is waste.
+  var MOVING = { PENDING_QUEUE: 1, AI_GENERATION: 1, AUDIO_SYNCED: 1, RENDERING: 1, PUBLISHING: 1 };
 
-  function esc(s) {
-    var d = document.createElement("div");
-    d.textContent = s == null ? "" : String(s);
-    return d.innerHTML;
+  var timer = null;
+  var seq = 0;
+
+  function liveRows() {
+    return Array.prototype.slice.call(tbody.querySelectorAll("[data-live-task]"));
   }
 
-  function fmtDuration(s) {
-    if (s == null) return "—";
-    var m = Math.floor(s / 60), sec = s % 60;
-    return m > 0 ? m + "m " + sec + "s" : sec + "s";
-  }
-
-  function resultCell(t) {
-    if (t.published_url) {
-      return '<a href="' + esc(t.published_url) + '" target="_blank" rel="noopener">View ↗</a>';
+  function applyTask(row, t) {
+    var pillHost = row.querySelector('[data-live="pill"]');
+    var pill = pillHost && pillHost.querySelector(".pill");
+    if (pill) {
+      pill.className = "pill " + t.status;                       // status value IS the class (CSS/tests)
+      pill.textContent = STAGE_LABELS[t.status] || t.status;
     }
-    if (t.status === "AWAITING_REVIEW") {
-      return '<a href="/episodes/' + t.id + '">Open episode →</a>';
+    var progHost = row.querySelector('[data-live="progress"]');
+    if (progHost) {
+      if (HAS_PROGRESS[t.status]) {
+        var pct = progHost.querySelector(".ep-pct");
+        if (!pct) {
+          pct = document.createElement("span");
+          pct.className = "meta ep-pct";
+          progHost.appendChild(pct);
+        }
+        pct.textContent = Math.round(t.progress || 0) + "%";
+      } else {
+        progHost.textContent = "";                               // settled: no bar, no stale number
+      }
     }
-    if (t.status === "SCHEDULED") {
-      return '<span class="meta">Rendered — publishing at the next posting slot</span>';
-    }
-    if (t.error) {
-      return '<div class="err">' + esc(t.error.slice(0, 300)) + "</div>";
-    }
-    return "";
+    // A row that has stopped moving stops being polled; it keeps whatever it last showed until the
+    // operator reloads (a page reload is the only thing that can re-sort or re-filter the list).
+    if (!MOVING[t.status]) row.removeAttribute("data-live-task");
   }
 
-  function actionCell(t) {
-    if (!t.can_retry) return "";
-    return '<button class="btn ghost sm" data-retry="' + t.id + '">↻ Retry</button>';
-  }
-
-  function renderRows(tasks) {
-    if (!tasks.length) {
-      tbody.innerHTML = '<tr><td colspan="7"><div class="empty">' +
-        (query
-          ? '<span class="empty-ico">🔎</span><h3>No matching tasks</h3><p>No task matches “' + esc(query) + '”.</p>'
-          : '<span class="empty-ico">≣</span><h3>No tasks yet</h3>' +
-            '<p>Start a campaign to begin rendering — episodes will stream in here live.</p>') +
-        "</div></td></tr>";
-      return;
-    }
-    tbody.innerHTML = tasks
-      .map(function (t) {
-        var label = STATUS_LABELS[t.status] || t.status;
-        var retries = t.retry_count > 0 ? ' <span class="meta">(retry ' + t.retry_count + ")</span>" : "";
-        var ptone = t.status === "COMPLETED" ? " done" : (t.status === "FAILED" ? "" : " work");
-        return (
-          "<tr>" +
-          '<td data-label="Task"><a href="/episodes/' + t.id + '">#' + t.id + "</a></td>" +
-          '<td data-label="Episode">' + esc(t.topic) + " · Ep " + t.episode +
-            '<div class="meta">' + esc(t.channel) + "</div></td>" +
-          '<td data-label="Status"><span class="pill ' + esc(t.status) + '">' + esc(label) + "</span>" + retries + "</td>" +
-          '<td data-label="Progress"><div class="progress' + ptone + '"><span style="width:' + (t.progress || 0) + '%"></span></div>' +
-            '<span class="meta">' + (t.progress || 0) + "%</span></td>" +
-          '<td data-label="Time">' + fmtDuration(t.duration_s) + "</td>" +
-          '<td data-label="Result">' + resultCell(t) + "</td>" +
-          '<td data-label="">' + actionCell(t) + "</td>" +
-          "</tr>"
-        );
-      })
-      .join("");
-  }
-
-  function renderPager() {
-    if (!pagerEl) return;
-    if (meta.pages <= 1) { pagerEl.innerHTML = ""; return; }
-    var newer = meta.page > 1
-      ? '<button class="btn ghost sm" data-page="' + (meta.page - 1) + '">← Newer</button>'
-      : '<span class="btn ghost sm pager-off">← Newer</span>';
-    var older = meta.page < meta.pages
-      ? '<button class="btn ghost sm" data-page="' + (meta.page + 1) + '">Older →</button>'
-      : '<span class="btn ghost sm pager-off">Older →</span>';
-    pagerEl.innerHTML = newer +
-      '<span class="meta">Page ' + meta.page + " of " + meta.pages +
-      " · " + meta.total + (meta.total === 1 ? " task" : " tasks") + "</span>" + older;
-  }
-
-  tbody.addEventListener("click", function (e) {
-    var btn = e.target.closest("[data-retry]");
-    if (!btn) return;
-    btn.disabled = true;
-    btn.textContent = "Retrying…";
-    fetch("/api/tasks/" + btn.dataset.retry + "/retry", { method: "POST" })
-      .then(function (r) { if (!r.ok) throw new Error(); return r.json(); })
-      .then(function () { poll(); })
-      .catch(function () { btn.disabled = false; btn.textContent = "↻ Retry"; });
-  });
-
-  if (pagerEl) {
-    pagerEl.addEventListener("click", function (e) {
-      var btn = e.target.closest("[data-page]");
-      if (!btn) return;
-      page = Number(btn.dataset.page) || 1;
-      poll();  // server clamps + returns the true page; jump immediately
-    });
-  }
-
-  var TERMINAL = { COMPLETED: 1, FAILED: 1, AWAITING_REVIEW: 1, SCHEDULED: 1 };
-  var pollTimer = null;
   function nextDelay() {
-    // Fast only while an episode is actually in flight on THIS page (page 1 in practice); relaxed
-    // when everything visible is settled — so browsing history doesn't hammer the box.
-    var active = lastTasks.some(function (t) { return !TERMINAL[t.status]; });
-    return active ? 3000 : 15000;
+    return liveRows().length ? 4000 : 20000;
   }
-  function scheduleNext() {
-    clearTimeout(pollTimer);
-    if (!document.hidden) pollTimer = setTimeout(poll, nextDelay());  // pause when backgrounded
+
+  function schedule() {
+    clearTimeout(timer);
+    if (!document.hidden) timer = setTimeout(poll, nextDelay());
   }
-  function url() {
-    var p = ["page=" + page];
-    if (query) p.push("q=" + encodeURIComponent(query));
-    if (scopeCampaign) p.push("campaign=" + encodeURIComponent(scopeCampaign));
-    if (scopeChannel) p.push("channel=" + encodeURIComponent(scopeChannel));
-    return "/api/tasks?" + p.join("&");
-  }
+
   function poll() {
-    clearTimeout(pollTimer);
+    clearTimeout(timer);
+    var rows = liveRows();
+    if (!rows.length) { schedule(); return; }                    // nothing in flight — idle cheaply
     var mine = ++seq;
-    fetch(url(), { headers: { "Accept": "application/json" } })
+    // `live=1` returns only episodes in a working stage: a handful, whatever the history size, so
+    // this never pages through hundreds of settled rows to find the one that is rendering.
+    fetch("/api/tasks?live=1", { headers: { Accept: "application/json" } })
       .then(function (r) {
         if (r.status === 401) { window.location.href = "/login"; throw new Error("unauthenticated"); }
         return r.json();
       })
       .then(function (d) {
-        if (mine !== seq) return;                       // a newer request superseded this one
-        lastTasks = d.tasks || [];
-        meta = { page: d.page || 1, pages: d.pages || 1, total: d.total || 0 };
-        page = meta.page;                               // adopt the server's clamped page
-        renderRows(lastTasks);
-        renderPager();
+        if (mine !== seq) return;                                // superseded by a newer request
+        var byId = {};
+        (d.tasks || []).forEach(function (t) { byId[t.id] = t; });
+        rows.forEach(function (row) {
+          var t = byId[row.dataset.liveTask];
+          // Absent from the live set = it left the working stages. Ask the server what it became
+          // rather than guessing, but only once per row.
+          if (t) applyTask(row, t);
+          else row.removeAttribute("data-live-task");
+        });
       })
-      .catch(function () { /* transient — try again next tick */ })
-      .finally(function () { if (mine === seq) scheduleNext(); });
+      .catch(function () { /* transient — the next tick tries again */ })
+      .finally(function () { if (mine === seq) schedule(); });
   }
-
-  if (filterEl) {
-    filterEl.addEventListener("input", function () {
-      clearTimeout(searchTimer);
-      searchTimer = setTimeout(function () {
-        query = filterEl.value.trim();
-        page = 1;            // a new search always starts at the newest match
-        poll();
-      }, 300);               // debounce — search now hits the server
-    });
-  }
-  document.addEventListener("visibilitychange", function () {
-    if (document.hidden) clearTimeout(pollTimer);
-    else poll();   // immediate refresh + resume on return to foreground
-  });
 
   poll();
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) clearTimeout(timer);
+    else poll();
+  });
 })();
