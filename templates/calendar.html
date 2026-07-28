@@ -1,8 +1,10 @@
 {% extends "base.html" %}
 {% import "macros.html" as ui %}
 {% block title %}Calendar · AI Video Factory{% endblock %}
-{% block content %}
+{% block crumbs %}
 {{ ui.breadcrumb([{'label': 'Campaigns', 'href': '/campaigns' ~ ('?channel=' ~ scope_cid if scope_cid else '')}, {'label': 'Calendar'}]) }}
+{% endblock %}
+{% block content %}
 {% call ui.page_head('Content Calendar', 'Posting slots per week. Each row is computed in its own campaign timezone; header dates use the server timezone.') %}
   {% set cq = ('&channel=' ~ scope_cid) if scope_cid else '' %}
   <a class="btn ghost sm" href="/campaigns{{ '?channel=' ~ scope_cid if scope_cid else '' }}" title="Back to the campaigns list">▤ List</a>

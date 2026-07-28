@@ -1207,6 +1207,21 @@ The operator's `[Channel] ➔ [Campaign] ➔ problem ➔ [action]` bell, colour-
 - Verified: 339 tests (14 new), ruff clean, docs guard green; 12 pages checked in a real browser at
   1280px and 375px with zero page errors and no horizontal overflow.
 
+## Header: breadcrumb in the app bar `DONE`
+Completes the operator's header layout — breadcrumb left, bell/theme/profile right (ADR-061):
+- Every breadcrumb moved from the content flow into a `{% block crumbs %}` rendered by the app bar,
+  so "where am I / go back one level" is in one fixed place on every page instead of being a per-page
+  accident tucked under the `<h1>` with a negative margin.
+- `_campaign_crumbs.html` holds the campaign-hub trail, included by the three hub pages: a template
+  block cannot be filled from inside an include, so the shared hub partial could no longer own it.
+- On the phone the brand yields to the trail (via `:has()`, so a crumb-less page like the Dashboard
+  still shows a title), and the trail scrolls sideways instead of truncating each crumb to a letter —
+  every parent stays readable and tappable.
+- `.crumbs` lost its content-flow margins; `.topbar-crumbs` truncates on desktop, scrolls on phone.
+- Verified: 339 tests, ruff clean, docs guard green; 15 pages × 2 breakpoints checked in a real
+  browser — the trail is in the app bar exactly where expected, never left behind in the content, and
+  a long Vietnamese campaign name never pushes the bell off screen.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

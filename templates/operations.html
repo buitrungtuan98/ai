@@ -3,8 +3,8 @@
 {% block title %}Operations · AI Video Factory{% endblock %}
 {# The factory floor: what the machine is doing right now, and the controls to unstick it without
    SSHing into the box. Tabs are URL-driven (?tab=) so a state is linkable and needs no JS. #}
+{% block crumbs %}{{ ui.breadcrumb([{'label': 'System'}, {'label': 'Operations'}]) }}{% endblock %}
 {% block content %}
-{{ ui.breadcrumb([{'label': 'System'}, {'label': 'Operations'}]) }}
 {% set w = worker %}
 {% call ui.page_head('Operations', 'Render queue, worker health and recovery — the factory floor.') %}
   <a class="btn ghost sm" href="/tasks">≣ Render log</a>

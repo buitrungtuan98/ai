@@ -20,6 +20,9 @@
     <button class="nav-toggle" id="nav-toggle" aria-label="Open navigation"
             aria-controls="sidebar" aria-expanded="false">☰<span class="nav-badge" data-badge="attn" hidden></span></button>
     <div class="brand"><span class="dot"></span> AI Video Factory</div>
+    {# Where am I — rendered ONCE, here. On the phone this replaces the brand: the trail is worth the
+       space, the product name isn't. Pages fill it via {% block crumbs %}. #}
+    <div class="topbar-crumbs">{% block crumbs %}{% endblock %}</div>
     <div class="topbar-right">
       {# Cross-channel alert inbox. The count is the number of things actually wrong right now
          (red + amber), so it clears itself when they are fixed — nothing to mark as read. #}

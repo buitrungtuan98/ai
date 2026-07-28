@@ -1,12 +1,15 @@
 {% extends "base.html" %}
 {% import "macros.html" as ui %}
 {% block title %}Episodes · AI Video Factory{% endblock %}
+{% block crumbs %}
+{%- if scope_campaign %}{% set sc = chan_by_id.get(scope_campaign.channel_id) %}
+{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': sc.channel_name if sc else 'Channel', 'href': '/campaigns?channel=' ~ scope_campaign.channel_id}, {'label': scope_campaign.topic_name, 'href': '/campaigns/' ~ scope_campaign.id}, {'label': 'Episodes'}]) }}
+{%- elif scope_channel %}
+{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': scope_channel.channel_name}, {'label': 'Episodes'}]) }}
+{%- endif %}
+{% endblock %}
 {% block content %}
 {% set _ch = scope_hidden.get('channel') if scope_hidden else None %}
-{% if scope_campaign %}
-{% set sc = chan_by_id.get(scope_campaign.channel_id) %}
-{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': sc.channel_name if sc else 'Channel', 'href': '/campaigns?channel=' ~ scope_campaign.channel_id}, {'label': scope_campaign.topic_name, 'href': '/campaigns/' ~ scope_campaign.id}, {'label': 'Episodes'}]) }}
-{% endif %}
 {% call ui.page_head('Episodes', 'Every episode from queued to published — click one for its full lifecycle, preview and actions.') %}{% endcall %}
 {{ ui.stage_tabs(stage_counts, status, _ch, search=true, q=q, scope_hidden=scope_hidden) }}
 {% if scope_campaign %}

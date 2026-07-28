@@ -1223,3 +1223,23 @@ noise in a one-line alert), and the imminent-missed-slot warning is the only *pr
 that passes with an empty buffer cannot be recovered afterwards, so warning at publish time would be
 useless. Deviation from the plan: read-watermarking in localStorage was proposed and dropped, because
 with a live count there is nothing to mark.
+
+### ADR-061 — The breadcrumb lives in the app bar, filled by a template block
+**Decision:** every page's breadcrumb moved out of the content flow into `{% block crumbs %}`, which
+`base.html` renders inside the app bar — once, at every width. On the phone the brand yields to the
+trail (`:has()`), because the current location is worth the space and the product name is not, and the
+trail scrolls horizontally rather than truncating each crumb, so every parent stays readable and
+tappable. The campaign-hub trail lives in `_campaign_crumbs.html`, included by each of the three hub
+pages: a template block cannot be filled from inside an include, so the shared `_campaign_hub.html`
+partial could no longer own it, and one tiny include keeps the trail defined once.
+**Why:** the operator asked for a header with the breadcrumb on the left and the bell/theme/profile on
+the right. The trail was previously rendered per page at the top of the content, with a negative top
+margin to tuck it under the page heading — which meant its position was a per-page accident and it
+competed with the `<h1>`. Hoisting it into the app bar makes "where am I / go back one level" a fixed,
+predictable location on every page. Two alternatives were rejected: passing trails as route context
+(it would move breadcrumb-building into Python for eight routes and duplicate the hub trail across
+three of them) and rendering the block twice via `self.crumbs()` so the phone could keep an in-content
+copy (double-rendering a block is a subtle trap once a block contains `{% set %}`, and the phone
+solution turned out to be simpler — drop the brand instead). Verified across fifteen pages at 1280px
+and 375px that the trail appears in the app bar exactly where expected, never in the content, and that
+a long Vietnamese campaign name never pushes the bell off screen.

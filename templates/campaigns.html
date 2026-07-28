@@ -1,6 +1,11 @@
 {% extends "base.html" %}
 {% import "macros.html" as ui %}
 {% block title %}Campaigns · AI Video Factory{% endblock %}
+{% block crumbs %}
+{%- if scope_channel %}
+{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': scope_channel.channel_name}]) }}
+{%- endif %}
+{% endblock %}
 {% block content %}
 {% call ui.page_head('Campaigns', 'Each campaign is mapped to a connected channel and runs episodic content.') %}
   <a class="btn ghost" href="/calendar{{ '?channel=' ~ scope_channel.id if scope_channel else '' }}" title="See these campaigns' posting slots on a week grid">📅 Calendar</a>
@@ -8,7 +13,6 @@
 {% endcall %}
 
 {% if scope_channel %}
-{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': scope_channel.channel_name}]) }}
 {{ ui.scope_note('Campaigns for', scope_channel.channel_name, '/campaigns') }}
 {% endif %}
 

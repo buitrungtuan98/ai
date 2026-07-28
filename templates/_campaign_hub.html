@@ -1,10 +1,6 @@
 {% import "macros.html" as ui %}
 {# Shared campaign-hub header + tab bar — one home per campaign, tabs keep you in place.
    Context expected: campaign, channel, asset_count, hub_active ∈ 'overview'|'episodes'|'settings'. #}
-{{ ui.breadcrumb([
-   {'label': 'Channels', 'href': '/channels'},
-   {'label': channel.channel_name if channel else 'Channel', 'href': '/campaigns?channel=' ~ campaign.channel_id},
-   {'label': campaign.topic_name}]) }}
 {% call ui.page_head(campaign.topic_name,
    (channel.channel_name ~ ' · ' if channel else '') ~ (campaign.config_json.get('language','en')|upper)
    ~ ' · Episode ' ~ campaign.current_episode ~ ' / ' ~ campaign.total_episodes) %}

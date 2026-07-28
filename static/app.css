@@ -133,6 +133,10 @@ code { font-family: var(--font-mono); font-size: .92em; background: var(--surfac
   height: var(--topbar-h); z-index: var(--z-topbar); background: var(--surface);
   border-bottom: 1px solid var(--border); padding: 0 var(--main-pad); }
 .topbar .brand { margin: 0; font-size: var(--fs-md); }
+/* Breadcrumb lives in the app bar. It shrinks and truncates rather than pushing the controls off. */
+.topbar-crumbs { min-width: 0; flex: 1; overflow: hidden; }
+.topbar-crumbs .crumbs { flex-wrap: nowrap; overflow: hidden; }
+.topbar-crumbs .crumbs > * { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .topbar-right { margin-left: auto; display: flex; align-items: center; gap: var(--sp-2); }
 .topbar-who { max-width: 22ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -546,8 +550,9 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 .kbd-active { outline: 2px solid var(--primary); outline-offset: 2px; }
 
 /* Breadcrumbs + scope note (drill-down orientation) */
+/* The trail renders in the app bar (never in the content flow), so it carries no page margins. */
 .crumbs { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: var(--fs-sm);
-  color: var(--muted); margin: calc(-1 * var(--sp-3)) 0 var(--sp-3); }
+  color: var(--muted); margin: 0; }
 .crumbs .sep { color: var(--text-subtle); }
 .crumbs .current { color: var(--text); font-weight: var(--fw-semibold); }
 .scope-note { font-size: var(--fs-sm); color: var(--muted); background: var(--surface-2);
@@ -738,6 +743,16 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 @media (max-width: 720px) {
   .topbar { padding: 0 var(--sp-4); }
   .topbar-who { display: none; }                 /* no room beside the drawer toggle + bell */
+  /* The trail earns the space the product name was using — but only when there IS a trail, so a
+     crumb-less page (Dashboard) still shows a title. Without :has() support both render: crowded,
+     never broken. The brand returns inside the drawer either way. */
+  .topbar:has(.topbar-crumbs .crumbs) .brand { display: none; }
+  /* Truncating every crumb to a letter or two would keep the trail visible but useless. Let it
+     scroll instead, so each parent stays readable and tappable. */
+  .topbar-crumbs { overflow-x: auto; scrollbar-width: none; }
+  .topbar-crumbs::-webkit-scrollbar { display: none; }
+  .topbar-crumbs .crumbs { font-size: var(--fs-xs); }
+  .topbar-crumbs .crumbs > * { overflow: visible; text-overflow: clip; }
   /* Anchored to the bell, a 420px panel would hang off the left edge of a 375px screen — so on the
      phone it spans the viewport instead. */
   .bell-panel { position: fixed; top: var(--topbar-h); left: var(--sp-2); right: var(--sp-2);

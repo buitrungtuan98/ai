@@ -5,6 +5,7 @@
 {% set dup = source is defined and source %}
 {% set branding = cfg.get('branding') or {} %}
 {% block title %}{{ 'Edit' if editing else ('Duplicate' if dup else 'New') }} Campaign · AI Video Factory{% endblock %}
+{% block crumbs %}{% if campaign %}{% set hub_leaf = 'Settings' %}{% include "_campaign_crumbs.html" %}{% endif %}{% endblock %}
 {% block content %}
 {% if editing %}
 {% set hub_active = 'settings' %}

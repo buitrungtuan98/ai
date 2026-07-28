@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% import "macros.html" as ui %}
 {% block title %}Episodes · {{ campaign.topic_name }} · AI Video Factory{% endblock %}
+{% block crumbs %}{% if campaign %}{% set hub_leaf = 'Episodes' %}{% include "_campaign_crumbs.html" %}{% endif %}{% endblock %}
 {% block content %}
 {% set hub_active = 'episodes' %}
 {% include "_campaign_hub.html" %}
