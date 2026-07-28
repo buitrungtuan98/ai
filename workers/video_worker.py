@@ -597,6 +597,8 @@ def render_task(task_id: int) -> None:
                 studio_sheet_dir=os.path.join(settings.MEDIA_ROOT, "studio", "sheets", str(channel.id)),
                 gen_image=image_gen,
                 title_overlay=cfg.get("title_overlay") == "on",
+                content_style=content_style,
+                signature=cfg.get("signature"),
                 vet_batch=vet_batch,
                 on_progress=lambda p: set_progress(task_id, 10 + p * 0.8),
             )

@@ -142,6 +142,11 @@ COLOR_GRADES: dict[str, str] = {
     "cool": "eq=contrast=1.05:saturation=0.95,colorbalance=bs=0.07:bm=0.04:rs=-0.03",
     "vivid": "eq=contrast=1.08:saturation=1.25",
     "noir": "hue=s=0,eq=contrast=1.15:brightness=-0.02",
+    # Vintage (ADR-056): muted film look for the aesthetic quote style — soft desaturation, warm
+    # shadows, a vignette and light grain so drawn stills feel like scanned illustrations.
+    "vintage": ("eq=contrast=1.02:saturation=0.82:brightness=-0.01,"
+                "colorbalance=rs=0.04:rm=0.02:bs=-0.05:bh=-0.03,vignette,"
+                "noise=alls=7:allf=t"),
 }
 
 # Loudness normalization to the -14 LUFS short-form platform target (EBU R128 single pass).
@@ -499,6 +504,8 @@ def produce(
     studio_sheet_dir: str | None = None,
     gen_image=None,
     title_overlay: bool = False,
+    content_style: str = "story",
+    signature: str | None = None,
     vet_batch=None,
     on_progress=None,
 ) -> RenderResult:
@@ -513,19 +520,24 @@ def produce(
     # prerequisites up front so the episode fails clearly rather than silently rendering stock — the
     # operator chose Studio, so falling back would be dishonest (config-truth rule).
     studio_mode = visual_source == "studio"
+    # Quote content style (ADR-056): aesthetic poem-per-video — drawn atmosphere with NO cast (each
+    # line's illustration comes from its brief + the campaign art style), centered quote captions, a
+    # scribble-word cover. It rides the Studio render path but skips the character machinery.
+    quote_mode = content_style == "quote"
     studio_character = None
     if studio_mode:
         from core import studio
 
-        studio_character = studio.pick_character(characters, seed=episode_number)
-        if studio_character is None:
-            raise RuntimeError(
-                "Studio Mode is on but this channel has no characters defined — add a character on "
-                "the Channels page, or switch the campaign's visual source back to stock footage."
-            )
+        if not quote_mode:
+            studio_character = studio.pick_character(characters, seed=episode_number)
+            if studio_character is None:
+                raise RuntimeError(
+                    "Studio Mode is on but this channel has no characters defined — add a character "
+                    "on the Channels page, or switch the campaign's visual source back to stock.")
+            logger.info("Studio Mode: episode %d cast as %r", episode_number,
+                        studio_character.get("name"))
         if not image_api_key:
             raise RuntimeError("Studio Mode needs a Gemini image API key (set it on Credentials).")
-        logger.info("Studio Mode: episode %d cast as %r", episode_number, studio_character.get("name"))
 
     if music_path and not os.path.exists(music_path):
         # Explicit failure beats a silently music-less video (config-truth rule).
@@ -591,7 +603,9 @@ def produce(
                 # rest of the pipeline treats exactly like a Pexels clip (one clip per scene, no cut
                 # rhythm — a drawn scene is one continuous shot). The scene's English visual keywords
                 # make the drawing subject; a narration snippet gives mood/context.
-                if studio_sheet_path is None:
+                # Cast character (story-style Studio) gets a reference sheet drawn/cached once; quote
+                # mode has NO character, so its consistency is the fixed art style + the previous frame.
+                if studio_character is not None and studio_sheet_path is None:
                     ref = (studio_character.get("ref_image") or "").strip()
                     if ref and os.path.exists(ref):
                         # Operator-uploaded reference image (W4): use it directly as the identity
@@ -613,11 +627,12 @@ def produce(
                             studio_character, api_key=image_api_key, out_path=studio_sheet_path,
                             style_override=visual_style, model=image_model, gen_image=gen_image)
                 still_path = ws.path(f"scene_{si}_still.png")
-                refs = [studio_sheet_path] + ([studio_prev_still] if studio_prev_still else [])
+                refs = ([studio_sheet_path] if studio_sheet_path else []) \
+                    + ([studio_prev_still] if studio_prev_still else [])
                 studio.scene_visual(
                     character=studio_character, subject=", ".join(scene.pexels_keywords),
                     mood=clean, api_key=image_api_key, out_path=still_path, reference_paths=refs,
-                    reference_url=studio_character.get("ref_url"),
+                    reference_url=(studio_character.get("ref_url") if studio_character else None),
                     style_override=visual_style, model=image_model, gen_image=gen_image)
                 studio_prev_still = still_path
                 studio_clip = still_to_clip(still_path, ws.path(f"scene_{si}_studio.mp4"), d_i, profile)
@@ -665,8 +680,11 @@ def produce(
         metadata = pick_metadata(script, episode_number, ab_testing=ab_testing,
                                  title_prefix=title_prefix,
                                  affiliate_url=affiliate_url, affiliate_label=affiliate_label)
-        headline = (metadata.get("hook_title") or metadata["title"]) if title_overlay else None
+        # Quote mode shows ONLY the centered line (no top billboard); story mode may burn the title.
+        headline = (metadata.get("hook_title") or metadata["title"]) if (title_overlay and not quote_mode) else None
         headline_accent = branding.tint_color  # brand colour as the accent; None → default warm yellow
+        # Quote captions are the whole line, centered + faded (not karaoke); story keeps its style.
+        effective_caption_style = "quote" if quote_mode else subtitle_style
 
         # Phase C — render each scene (multi-shot cut rhythm + captions + motion + grade in one pass).
         for si, plan in enumerate(plans):
@@ -695,10 +713,10 @@ def produce(
                 used_clip_ids += [plan["found"][idx].id for idx in dict.fromkeys(picks)]
 
             ass_path = ws.path(f"scene_{si}.ass")
-            build_ass(plan["timings"], ass_path, clip_duration=d_i, style=subtitle_style,
+            build_ass(plan["timings"], ass_path, clip_duration=d_i, style=effective_caption_style,
                       theme=caption_theme, accent_hex=branding.tint_color,
                       width=profile.width, height=profile.height,
-                      headline=headline, headline_accent_hex=headline_accent)
+                      headline=headline, headline_accent_hex=headline_accent, signature=signature)
             scene_out = ws.path(f"scene_{si}.mp4")
             # Motion effect seeded by episode so different episodes don't share an identical rhythm.
             effect = MOTION_EFFECTS[(motion_seed + si) % len(MOTION_EFFECTS)] if motion else None
@@ -732,14 +750,16 @@ def produce(
             if chapters:
                 metadata["description"] = "\n".join(chapters) + "\n\n" + metadata.get("description", "")
         thumb = os.path.join(output_dir, f"episode_{episode_number}.jpg")
-        # With the billboard on, the thumbnail draws the SAME hook title as the in-video headline (top,
-        # two-tone), so the two match; otherwise the standard bottom-title thumbnail.
+        # Quote mode: "scribble cover" — the one-word cover on the illustration. Billboard mode: the
+        # SAME hook title as the in-video headline (top, two-tone). Otherwise the standard thumbnail.
+        scribble = (getattr(script, "cover_word", None) or "").strip() if quote_mode else None
         generate_thumbnail(master, thumb,
                            (metadata.get("hook_title") or metadata["title"]) if title_overlay else metadata["title"],
                            duration=sum(durations),  # sample across the video for the best frame
                            logo_path=branding.watermark_path,
                            width=profile.width, height=profile.height,
-                           poster=title_overlay, accent_hex=branding.tint_color)
+                           poster=title_overlay, accent_hex=branding.tint_color,
+                           scribble_word=scribble or None)
         report("thumb", 100)
 
     # Scene map (absolute-timed spans + caption-hook labels) so a retention curve fetched days later

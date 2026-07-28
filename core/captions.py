@@ -194,6 +194,7 @@ def build_ass(
     height: int = VIDEO_H,
     headline: str | None = None,
     headline_accent_hex: str | None = None,
+    signature: str | None = None,
 ) -> str:
     """Write an ASS file with one Dialogue per word (or per phrase in "line" style), styled by a
     caption theme (classic / highlight / boxed / neon). `width`/`height` set PlayRes so captions
@@ -201,7 +202,9 @@ def build_ass(
 
     When `headline` is given, a bold two-tone UPPERCASE billboard title is anchored to the TOP of the
     frame for the whole clip (word captions still live in the lower third — no collision), matching
-    the reference-channel poster look."""
+    the reference-channel poster look. `style="quote"` (ADR-056) shows the whole line ONCE, centered
+    mid-screen in soft italic with a gentle fade — the aesthetic quote look, not karaoke. `signature`
+    draws a small italic mark (the channel name) lower-centre on every frame."""
     if style == "line":
         timings = group_words_into_lines(timings)
     spec = CAPTION_THEMES.get(theme, CAPTION_THEMES["classic"])
@@ -226,14 +229,31 @@ ScaledBorderAndShadow: yes
 Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Word,{font_name},{font_px},{primary},{spec['outline']},{spec['back']},1,0,{spec['border_style']},{spec['outline_w']},2,2,{MARGIN_PX},{MARGIN_PX},{margin_v},1
 """
+    clip_end = clip_duration if clip_duration else (timings[-1].end if timings else 3600.0)
+
+    # "quote" style: one centered, softly-faded italic caption spanning the clip (ADR-056).
+    if style == "quote":
+        qpx = round(height * 0.036)
+        # Alignment 5 = middle-centre; italic; soft outline+shadow so it reads over any illustration.
+        header += (f"Style: Quote,{font_name},{qpx},&H00FFFFFF,&H64101820,&H80000000,"
+                   f"0,1,1,2,2,5,{MARGIN_PX},{MARGIN_PX},0,1\n")
     # Optional top billboard headline (drawn for the whole clip, above the word captions).
     headline_event = ""
     if headline and headline.strip():
-        hl_end = clip_duration if clip_duration else (timings[-1].end if timings else 3600.0)
         style_line, headline_event = _headline_style_and_event(
             headline.strip(), width=width, height=height, font_name=font_name,
-            accent_hex=headline_accent_hex, end_s=hl_end)
+            accent_hex=headline_accent_hex, end_s=clip_end)
         header += style_line + "\n"
+    # Optional signature (channel name) lower-centre on every frame.
+    signature_event = ""
+    if signature and signature.strip():
+        spx = round(height * 0.024)
+        sig_margin = round(height * 0.085)
+        # Alignment 2 = bottom-centre; italic; semi-transparent white so it stays subtle.
+        header += (f"Style: Signature,{font_name},{spx},&H50FFFFFF,&H80000000,&H80000000,"
+                   f"0,1,1,1,1,2,{MARGIN_PX},{MARGIN_PX},{sig_margin},1\n")
+        signature_event = (f"Dialogue: 0,{_ass_time(0)},{_ass_time(clip_end)},Signature,,0,0,0,,"
+                           f"{_ass_escape(signature.strip())}")
     header += """
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -241,6 +261,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     lines = [header]
     if headline_event:
         lines.append(headline_event + "\n")
+    if signature_event:
+        lines.append(signature_event + "\n")
+
+    if style == "quote":
+        # The whole line, once, centered with a gentle fade — the aesthetic quote look.
+        text = "\\N".join(wrap_text(_ass_escape(" ".join(w.text for w in timings)), qpx, usable))
+        lines.append(f"Dialogue: 0,{_ass_time(0)},{_ass_time(clip_end)},Quote,,0,0,0,,"
+                     f"{{\\fad(450,450)}}{text}\n")
+        content = "".join(lines)
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return out_path
+
     n = len(timings)
     for i, wt in enumerate(timings):
         start = wt.start
