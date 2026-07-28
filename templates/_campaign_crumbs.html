@@ -1,0 +1,10 @@
+{% import "macros.html" as ui %}
+{# The campaign-hub breadcrumb trail. Its own file because the trail renders in the app bar (the
+   crumbs block) while the rest of the hub header renders in the content block — and a template block
+   cannot be filled from inside an include, so each hub page includes this one line itself.
+   Context: campaign, channel, plus an optional `hub_leaf` label for a tab below the hub's home. #}
+{{ ui.breadcrumb(
+   [{'label': 'Channels', 'href': '/channels'},
+    {'label': channel.channel_name if channel else 'Channel', 'href': '/campaigns?channel=' ~ campaign.channel_id}]
+   + ([{'label': campaign.topic_name, 'href': '/campaigns/' ~ campaign.id}, {'label': hub_leaf}]
+      if hub_leaf is defined and hub_leaf else [{'label': campaign.topic_name}])) }}

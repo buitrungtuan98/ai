@@ -147,11 +147,41 @@ def _recently_published(db, campaign_id: int, window_minutes: int) -> bool:
     return latest is not None and latest >= cutoff
 
 
+def due_override_item(db, campaign: Campaign, now_utc: datetime | None = None):
+    """A ready buffer item whose operator-set `publish_at` has arrived (ADR-059), earliest first.
+
+    An override REPLACES the slot schedule for that one episode, so it deliberately skips the
+    posting-day / slot-window / one-per-slot gates: the operator named an exact time and that time
+    is now. It still respects `auto_publish` — a review-first campaign publishes on approval only."""
+    if not (campaign.config_json or {}).get("auto_publish", True):
+        return None
+    now_utc = now_utc or datetime.utcnow()
+    return db.scalar(
+        select(BufferPoolItem)
+        .where(BufferPoolItem.campaign_id == campaign.id,
+               BufferPoolItem.status == BufferStatus.ready,
+               BufferPoolItem.publish_at.isnot(None),
+               BufferPoolItem.publish_at <= now_utc)
+        .order_by(BufferPoolItem.publish_at)
+        .limit(1)
+    )
+
+
 def publish_due_campaign(db, campaign: Campaign, now: datetime | None = None,
                          enqueue=None) -> int | None:
-    """Publish exactly ONE ready buffer item if the campaign's posting slot is current (in the
+    """Publish exactly ONE buffer item if something is due: an operator-rescheduled episode whose
+    time has come, else the next ready episode when the campaign's posting slot is current (in the
     campaign's own timezone). Returns the buffer id queued, or None."""
     cfg = campaign.config_json or {}
+    enqueue = enqueue or task_queue.enqueue_publish
+    # A per-episode override outranks the slot schedule and works even for a campaign with no slots
+    # (the operator picked a time for this one episode; nothing else needs to be configured).
+    override = due_override_item(db, campaign)
+    if override is not None:
+        enqueue(override.id)
+        logger.info("Rescheduled publish: campaign %s episode %s queued",
+                    campaign.id, override.episode_number)
+        return override.id
     slots = cfg.get("posting_slots") or []
     if not slots or not cfg.get("auto_publish", True):
         return None  # continuous mode publishes at render time; review mode publishes on approval
@@ -165,13 +195,16 @@ def publish_due_campaign(db, campaign: Campaign, now: datetime | None = None,
     buf = db.scalar(
         select(BufferPoolItem)
         .where(BufferPoolItem.campaign_id == campaign.id,
-               BufferPoolItem.status == BufferStatus.ready)
+               BufferPoolItem.status == BufferStatus.ready,
+               # An episode moved to a future time must not be grabbed by the normal slot path —
+               # that would undo the operator's reschedule.
+               BufferPoolItem.publish_at.is_(None))
         .order_by(BufferPoolItem.episode_number)
         .limit(1)
     )
     if buf is None:
         return None
-    (enqueue or task_queue.enqueue_publish)(buf.id)
+    enqueue(buf.id)
     logger.info("Slot publish: campaign %s episode %s queued", campaign.id, buf.episode_number)
     return buf.id
 
@@ -216,6 +249,15 @@ def reap_stuck_tasks(db, now: datetime | None = None) -> int:
 _LOCK_SUSPECT_KEY = "render:lock-suspect"
 
 
+def _render_appears_live(db) -> bool:
+    """True while anything looks like a real render in flight — a task in a working status or a live
+    Redis progress entry. THE guard for render-concurrency-1: a real render sets a working status
+    within milliseconds of acquiring the lock, so this can never be false during one."""
+    working = db.scalar(select(func.count()).select_from(Task)
+                        .where(Task.status.in_(_STUCK_STATUSES))) or 0
+    return bool(working or task_queue.active_render_task_ids())
+
+
 def clear_orphaned_render_lock(db) -> bool:
     """Free a render lock left behind by a hard-crashed worker (its release `finally` was skipped),
     so the queue doesn't have to wait out the full lock TTL (~46 min) before anything renders again.
@@ -228,9 +270,7 @@ def clear_orphaned_render_lock(db) -> bool:
         if not task_queue.conn.get(task_queue.LOCK_KEY):
             task_queue.conn.delete(_LOCK_SUSPECT_KEY)
             return False
-        working = db.scalar(select(func.count()).select_from(Task)
-                            .where(Task.status.in_(_STUCK_STATUSES))) or 0
-        if working or task_queue.active_render_task_ids():
+        if _render_appears_live(db):
             task_queue.conn.delete(_LOCK_SUSPECT_KEY)  # a render is genuinely live — not orphaned
             return False
         # Lock held but nothing is actually rendering. Require the condition to persist across two
@@ -243,6 +283,27 @@ def clear_orphaned_render_lock(db) -> bool:
     except Exception:  # noqa: BLE001 — housekeeping must never raise
         logger.debug("orphaned-lock check failed", exc_info=True)
     return False
+
+
+def recover_now(db, now: datetime | None = None) -> dict:
+    """Operator-triggered recovery, exposed as the Operations page's "Recover stuck renders" button:
+    fail definitively-dead tasks and free a render lock left behind by a crashed worker.
+
+    Same recovery the hourly tick performs — the point is not having to wait for the tick (or SSH in)
+    when an episode is already stranded. It keeps the render-concurrency-1 guard (`_render_appears
+    _live`) but skips the automatic sweep's two-tick delay, because an explicit operator click is
+    itself the confirming second signal. Returns {'reaped': n, 'lock_cleared': bool}."""
+    reaped = reap_stuck_tasks(db, now=now)
+    cleared = False
+    try:
+        if task_queue.conn.get(task_queue.LOCK_KEY) and not _render_appears_live(db):
+            task_queue.conn.delete(task_queue.LOCK_KEY)
+            task_queue.conn.delete(_LOCK_SUSPECT_KEY)
+            cleared = True
+            logger.warning("Operator cleared an orphaned render lock from the Operations page")
+    except Exception:  # noqa: BLE001 — recovery must never raise at the operator
+        logger.debug("operator lock clear failed", exc_info=True)
+    return {"reaped": reaped, "lock_cleared": cleared}
 
 
 def maybe_distill_campaign(db, campaign: Campaign, now: datetime | None = None) -> bool:
@@ -400,10 +461,17 @@ def hourly_stats_pass(db, now: datetime | None = None) -> dict:
     mature ones. Each internally throttles per-episode work (early ~55 min, retention 24 h), so
     running this hourly is cheap; it just makes fresh data appear within the hour instead of the
     next daily tick. Best-effort — a fetch failure never breaks the tick."""
-    from services.analytics_service import collect_early_stats, collect_stats
+    from services.analytics_service import (
+        collect_channel_snapshots,
+        collect_early_stats,
+        collect_stats,
+    )
 
     return {"early_stats": collect_early_stats(db, now=now),
-            "stats_updated": collect_stats(db, now=now)}
+            "stats_updated": collect_stats(db, now=now),
+            # Channel growth series (ADR-063). Self-throttling to one row per channel per local day,
+            # so riding the hourly pass just means the sample lands early in the operator's day.
+            "channel_snapshots": collect_channel_snapshots(db, now=now)}
 
 
 # ── Autopilot: the "hands" — AI review / auto-reject / retry / catch-up publish (ADR-044) ──
@@ -567,7 +635,10 @@ def catch_up_due(db, campaign: Campaign, now: datetime | None = None):
         return None  # nothing missed yet today
     return db.scalar(
         select(BufferPoolItem).where(
-            BufferPoolItem.campaign_id == campaign.id, BufferPoolItem.status == BufferStatus.ready)
+            BufferPoolItem.campaign_id == campaign.id, BufferPoolItem.status == BufferStatus.ready,
+            # Never catch up an episode the operator moved to a specific time (ADR-059) — its own
+            # override is what publishes it.
+            BufferPoolItem.publish_at.is_(None))
         .order_by(BufferPoolItem.episode_number).limit(1))
 
 

@@ -1117,10 +1117,153 @@ so an operator can pause a catchphrase without losing it (default on = unchanged
 through `_build_campaign_config`, `_campaign_form`, the script preview, and the worker (only an
 enabled catchphrase reaches `generate_script`). 281 tests (1 new), ruff clean, docs green.
 
+## Worker self-recovery — wedged-render watchdog `DONE`
+An episode stuck at "Rendering 10%" for two hours exposed that every safety net (RQ's 45-min job
+timeout, the 90-min stuck-task reaper, the orphan-lock sweep) lives *inside* the worker process that
+died — and that the container healthcheck only asked whether a worker was *registered*, which a
+hung worker still is. Fixed at the mechanism level (ADR-057):
+- `set_progress` change-stamps `task:progress-ts` (only a moved value refreshes it), so progress
+  staleness is measurable: `stalled_render()` / `stall_limit_seconds()` / `worker_healthy()`.
+- New `workers/watchdog.py` daemon thread (60s): a render idle past `JOB_TIMEOUT + 10 min` is failed
+  with an actionable message, its progress + render lock released, the operator alerted, then the
+  process exits so compose recreates the container. A thread can do this because a blocked render
+  holds the main thread with the GIL released.
+- The stall limit sits deliberately behind RQ's own timeout, so a slow-but-alive render is still
+  failed cleanly by RQ rather than blunt-restarted (silent stages — image gen, concat, Auto-QC —
+  legitimately report no progress for minutes).
+- Operator restart flag (`worker:restart-requested`, TTL 5 min) honoured by the same thread — the
+  groundwork for the Operations page's "Restart worker" button with **no Docker socket** (the
+  internet-facing web container must never reach the Docker daemon).
+- `run_worker.py` clears the lock, all progress entries and any stale restart flag at boot.
+- Healthcheck: `worker_alive()` → `worker_healthy()` so a wedged worker shows as `(unhealthy)`.
+- Verified: 293 tests (12 new), ruff clean, docs guard green.
+
+## Operations page — the factory floor (queue + worker) `DONE`
+"Can I restart the worker from the website instead of SSH?" — yes, and without ever giving the
+internet-facing web container the Docker socket (host-root). New `/operations` page (ADR-058), System
+group in the rail:
+- **⏳ Render queue** — queued jobs in true RQ order joined to their episode: `🔼 Next` (RQ
+  `at_front`, same Job so `rq_job_id` stays valid) and `✕ Cancel` (drops the job, Task→FAILED so the
+  normal Retry puts it back). Uploads share the one queue, so `#` is the real queue position and
+  queued uploads are counted, not hidden.
+- **⚙ Worker** — the single worker's verdict (down/stalled/busy/idle, liveness from the same
+  `worker_alive()` the health strip uses), the live render's progress **and how long since it last
+  moved** (the number that was missing during the 2-hour incident), render-lock state, plus
+  `🩹 Recover stuck renders` (the hourly sweep on demand — `scheduler.recover_now`, keeping the
+  render-concurrency-1 guard, dropping only the two-tick wait) and `🔄 Restart worker` (Redis flag
+  honoured by the watchdog).
+- Tenancy runs through the Task row: another operator's job id is neither listed nor controllable.
+- `_system_health` gained `worker_stalled`; the rail badges Operations when the worker is down OR
+  wedged, and the degraded note is worded for a registered-but-wedged worker.
+- A plain-language explainer of the three recovery layers (RQ timeout → watchdog → housekeeping), so
+  the operator knows whether to wait or intervene.
+- Verified: 312 tests (19 new), ruff clean, docs guard green; queue + worker tabs checked in a real
+  browser at 1280px and 375px against a seeded wedged render.
+
+## Publish queue + per-episode reschedule `DONE`
+The Operations page's third tab, and the "shift one video without moving the whole campaign" control
+the operator asked for (ADR-059):
+- 🚀 **Publish queue** — every rendered episode with WHEN it goes out and why: an operator override,
+  a projected slot (ready episodes assigned to the campaign's next free slots lowest-first — the
+  scheduler's own rule, via a shared `_upcoming_slots` that `_next_slot` now reads too, so the
+  dashboard chip and this projection can never disagree), or "after you approve it". Rows whose video
+  file left the disk are flagged, because Publish now would fail on them.
+- **⚡ Now** reuses the existing publish-now route (the shared action now bounces back to Operations
+  via an allow-listed `return_to`, never an open redirect) and **✏ Reschedule** writes a new nullable
+  `BufferPoolItem.publish_at`.
+- The scheduler checks the override FIRST and lets it outrank the posting-day / slot-window /
+  one-per-slot gates — an operator who names a time means it — while a FUTURE override is excluded
+  from the slot pick, from missed-slot catch-up, and from the calendar projection, so the logic that
+  was overridden can never race ahead and undo the reschedule. `auto_publish` still wins: a
+  review-first campaign publishes on approval only.
+- Times are read and shown in the CAMPAIGN's timezone (the clock its slots already use) and stored
+  as naive UTC — interpreting a `datetime-local` value as UTC would have shifted every reschedule by
+  the operator's offset.
+- Deferred: drawing overridden episodes on the week-planner calendar (they correctly leave the slot
+  grid now; placing them at their own time needs a non-slot-aligned cell).
+- Verified: 325 tests (13 new), ruff clean, docs guard green; all four row states (slot / your time /
+  needs review / file missing) plus the open reschedule panel checked in a real browser at 1280px
+  and 375px.
+
+## Alert bell — one cross-channel inbox `DONE`
+The operator's `[Channel] ➔ [Campaign] ➔ problem ➔ [action]` bell, colour-coded red/amber/green
+(ADR-060):
+- `GET /api/alerts` derives the whole feed from live state — no `Notification` table, no read/unread.
+  The badge is the count of red+amber rows present right now, so it clears itself when the problems
+  are fixed and can never disagree with the list it opens.
+- Four fail-soft sources: infrastructure (Redis/worker down or wedged, disk pressure, AI quota ≥80%),
+  work needing a human (per-episode failures showing the LAST stack-trace line — the actual error —
+  plus breaker-paused campaigns and counted review/autopilot backlogs), an imminent missed slot (a
+  slot within 6h with an empty buffer: the only predictive row, because a passed slot cannot be
+  recovered), and recent publishes as green evidence the factory works.
+- One broken source can never empty the bell — an empty bell reads as "everything is fine".
+- The app bar now exists at EVERY width (it was phone-only), hosting brand + bell + theme + the
+  signed-in address; the sidebar sticks below it and drops its duplicate brand/email outside the
+  phone drawer. The panel is viewport-anchored on the phone, where a bell-anchored 420px dropdown
+  hung off the left edge.
+- Rows are built with createElement/textContent — channel, campaign and error text are user/AI data.
+- Deviation from the approved plan: localStorage read-watermarking was dropped. With a live count
+  there is nothing to mark as read, and an ops panel should keep showing what is still broken.
+- Verified: 339 tests (14 new), ruff clean, docs guard green; 12 pages checked in a real browser at
+  1280px and 375px with zero page errors and no horizontal overflow.
+
+## Header: breadcrumb in the app bar `DONE`
+Completes the operator's header layout — breadcrumb left, bell/theme/profile right (ADR-061):
+- Every breadcrumb moved from the content flow into a `{% block crumbs %}` rendered by the app bar,
+  so "where am I / go back one level" is in one fixed place on every page instead of being a per-page
+  accident tucked under the `<h1>` with a negative margin.
+- `_campaign_crumbs.html` holds the campaign-hub trail, included by the three hub pages: a template
+  block cannot be filled from inside an include, so the shared hub partial could no longer own it.
+- On the phone the brand yields to the trail (via `:has()`, so a crumb-less page like the Dashboard
+  still shows a title), and the trail scrolls sideways instead of truncating each crumb to a letter —
+  every parent stays readable and tappable.
+- `.crumbs` lost its content-flow margins; `.topbar-crumbs` truncates on desktop, scrolls on phone.
+- Verified: 339 tests, ruff clean, docs guard green; 15 pages × 2 breakpoints checked in a real
+  browser — the trail is in the app bar exactly where expected, never left behind in the content, and
+  a long Vietnamese campaign name never pushes the bell off screen.
+
+## Macro analytics — factory vitals `DONE`
+The top-down view the per-campaign pages cannot give (ADR-062), as one dashboard card:
+- **Total views** across every measured episode, reported WITH how many episodes are measured out of
+  how many are published — YouTube Analytics lags ~2 days, so a bare total would read as the whole
+  catalogue when it may cover a fraction of it.
+- **Renders today**: failure rate over renders that FINISHED today (in-flight work has no outcome
+  yet), plus the machine minutes they consumed from `render_json.render_seconds`.
+- **CPU load + memory** from a new stdlib-only `core/host.py` — no psutil dependency for two numbers
+  the kernel publishes. CPU is load-average-per-core (the right question on a box running one
+  `nice -19` render: is work queueing?), memory is Total−Available so reclaimable page cache does not
+  show a healthy 24 GB box at 95%. Both fail soft to "—" off Linux.
+- Every cell has an explaining empty state; the card reuses the existing scorecard cells and the
+  progress-bar macro rather than inventing a widget.
+- GPU is deliberately absent — this deployment is CPU-only by hard constraint.
+- Verified: 350 tests (11 new), ruff clean, docs guard green; checked in a real browser at 1280px and
+  375px in both the empty and populated states.
+
+## Micro analytics — channel growth vs publishing `DONE`
+"Does publishing this much actually grow the channel?" — answered per channel (ADR-063):
+- New `ChannelSnapshot` table: one row per channel per LOCAL day (subscribers / views / videos) from
+  the platform's own totals. Per-episode stats cannot answer this — a channel's totals are not the sum
+  of the episodes we made — and the APIs expose only the CURRENT total, so if we don't sample daily the
+  past is permanently unavailable.
+- `collect_channel_snapshots` rides the hourly stats pass and self-throttles: the day row is checked
+  before fetching, so extra ticks spend no API quota; one revoked token never blocks other channels.
+- `channel_growth` serves the correlation view — per-day sub/view deltas beside episodes published
+  that day — drawn on each Channels card as CSS bars (episodes) under an inline-SVG polyline (subs
+  gained). Hand-rolled from numeric server values: no chart library, XSS-safe by construction.
+- Two "unknown vs zero" distinctions kept deliberately: a hidden subscriber count is None, never 0
+  (otherwise a hidden channel reads as "0 subs, no growth" forever), and the first sample yields None
+  deltas with a "the curve appears tomorrow" note rather than a flat line at zero implying publishing
+  did nothing.
+- Facebook contributes followers only; it has no lifetime page-view total comparable to YouTube's, so
+  views stays None instead of substituting a similar-sounding metric.
+- Verified: 362 tests (12 new), ruff clean, docs guard green; the chart checked in a real browser at
+  1280px and 375px against 14 seeded days of uneven publishing.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download
 - YouTube OAuth refresh + real upload
+- Live channel-totals sampling (YouTube channels.list / Facebook Page followers → ChannelSnapshot)
 - Facebook Page upload
 - Telegram delivery
 - Cloudflare Tunnel public exposure

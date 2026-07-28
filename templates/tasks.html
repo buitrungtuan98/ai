@@ -1,6 +1,12 @@
 {% extends "base.html" %}
 {% import "macros.html" as ui %}
 {% block title %}Task Logs · AI Video Factory{% endblock %}
+{% block crumbs %}
+{%- if scope_campaign %}
+{%- elif scope_channel %}
+{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': scope_channel.channel_name}, {'label': 'Render log'}]) }}
+{%- endif %}
+{% endblock %}
 {% block content %}
 {% call ui.page_head('Render log', 'Live render pipeline · refreshes every few seconds. Pending → AI Generation → Audio Synced → Rendering → Publishing → Completed. Retry a failed episode in one tap.') %}{% endcall %}
 {{ ui.stage_tabs(stage_counts, 'rendering', scope_channel.id if scope_channel else None) }}

@@ -142,6 +142,50 @@
   </div>
 </div>
 
+{# ── Factory vitals: reach produced, today's render success, and what the box costs ─────────── #}
+{% set v = vitals %}
+{% set h = v.host %}
+<div class="card">
+  <div class="card-head"><h3>Factory vitals</h3>
+    <span class="meta">the whole factory, and the box it runs on</span></div>
+  <div class="scorecard mt">
+    <div class="sc-cell">
+      <div class="l">Total views</div>
+      {% if v.measured %}
+      <div class="n">{{ '{:,}'.format(v.views) }}</div>
+      <div class="meta">across {{ v.measured }} measured episode{{ 's' if v.measured != 1 }} of
+        {{ v.published_total }} published — analytics lag about 2 days</div>
+      {% else %}<div class="n muted">—</div>
+      <div class="meta">{{ v.published_total }} published; no analytics collected yet</div>{% endif %}
+    </div>
+    <div class="sc-cell">
+      <div class="l">Renders today</div>
+      {% if v.renders_today %}
+      <div class="n {{ 'bad' if v.fail_pct_today and v.fail_pct_today >= 50 else '' }}">{{ v.fail_pct_today }}%<span class="u"> failed</span></div>
+      <div class="meta">{{ v.failed_today }} of {{ v.renders_today }} finished episode{{ 's' if v.renders_today != 1 }}
+        {%- if v.render_minutes_today %} · {{ v.render_minutes_today }} min of machine time{% endif %}</div>
+      {% else %}<div class="n muted">—</div><div class="meta">nothing finished today yet</div>{% endif %}
+    </div>
+    <div class="sc-cell">
+      <div class="l">CPU load</div>
+      {% if h.load_pct is not none %}
+      <div class="n">{{ h.load_pct }}%</div>
+      {{ ui.progress(h.load_pct, 'done' if h.load_pct < 80 else '') }}
+      <div class="meta">load {{ h.load }} over {{ h.cores }} core{{ 's' if h.cores != 1 }} — one
+        render at a time is by design</div>
+      {% else %}<div class="n muted">—</div><div class="meta">not readable on this host</div>{% endif %}
+    </div>
+    <div class="sc-cell">
+      <div class="l">Memory</div>
+      {% if h.ram_pct is not none %}
+      <div class="n">{{ h.ram_pct }}%</div>
+      {{ ui.progress(h.ram_pct, 'done' if h.ram_pct < 85 else '') }}
+      <div class="meta">{{ h.ram_used_mb }} of {{ h.ram_total_mb }} MB (page cache excluded)</div>
+      {% else %}<div class="n muted">—</div><div class="meta">not readable on this host</div>{% endif %}
+    </div>
+  </div>
+</div>
+
 <div class="card">
   <div class="flex between">
     <h3>Activity <span class="meta" id="since-note"></span></h3>

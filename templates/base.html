@@ -14,11 +14,31 @@
   {% set scope_cid = request.query_params.get('channel') %}
   {% set _channels = nav_channels(request) %}
   {% set scope_q = ('?channel=' ~ scope_cid) if scope_cid else '' %}
+  {# App bar — present at every width. On the phone it also carries the drawer toggle; the sidebar
+     sits below it and drops its duplicate brand on desktop. #}
   <header class="topbar">
     <button class="nav-toggle" id="nav-toggle" aria-label="Open navigation"
             aria-controls="sidebar" aria-expanded="false">☰<span class="nav-badge" data-badge="attn" hidden></span></button>
     <div class="brand"><span class="dot"></span> AI Video Factory</div>
-    <button class="icon-btn" id="theme-toggle" aria-label="Toggle light / dark theme" title="Toggle theme">◐</button>
+    {# Where am I — rendered ONCE, here. On the phone this replaces the brand: the trail is worth the
+       space, the product name isn't. Pages fill it via {% block crumbs %}. #}
+    <div class="topbar-crumbs">{% block crumbs %}{% endblock %}</div>
+    <div class="topbar-right">
+      {# Cross-channel alert inbox. The count is the number of things actually wrong right now
+         (red + amber), so it clears itself when they are fixed — nothing to mark as read. #}
+      <div class="bell-wrap">
+        <button class="icon-btn" id="bell" aria-label="Alerts" title="Alerts across all channels"
+                aria-expanded="false" aria-controls="bell-panel">🔔<span class="bell-count" id="bell-count" hidden></span></button>
+        <div class="bell-panel" id="bell-panel" role="dialog" aria-label="Alerts" hidden>
+          <div class="bell-head"><b>Alerts</b> <span class="meta" id="bell-summary"></span></div>
+          <ul class="bell-list" id="bell-list" aria-live="polite"></ul>
+        </div>
+      </div>
+      <button class="icon-btn" id="theme-toggle" aria-label="Toggle light / dark theme" title="Toggle theme">◐</button>
+      {% if settings.MULTI_TENANT_MODE %}
+      <span class="who topbar-who" title="{{ request.session.get('email') or '' }}">{{ request.session.get('email') or 'Signed in' }}</span>
+      {% endif %}
+    </div>
   </header>
   <div class="layout">
     <div class="nav-backdrop" id="nav-backdrop"></div>
@@ -42,6 +62,8 @@
         <a href="/campaigns{{ scope_q }}" title="Campaigns — build, schedule &amp; the Calendar view" class="{{ 'active' if nav in ['campaigns', 'calendar'] else '' }}"><span class="ico">▤</span> <span class="nav-text">Campaigns</span></a>
         <a href="/episodes{{ scope_q }}" title="Episodes — every video, with Review &amp; the render log" class="{{ 'active' if nav in ['episodes', 'assets', 'tasks'] else '' }}"><span class="ico">🎬</span> <span class="nav-text">Episodes</span> <span class="nav-badge review" data-badge="awaiting_review" hidden></span></a>
         <a href="/channels" title="Channels — connected YouTube / Facebook accounts" class="{{ 'active' if nav=='channels' else '' }}"><span class="ico">◉</span> <span class="nav-text">Channels</span></a>
+        <p class="nav-group">System</p>
+        <a href="/operations" title="Operations — render queue, worker health &amp; recovery" class="{{ 'active' if nav=='operations' else '' }}"><span class="ico">🛠</span> <span class="nav-text">Operations</span> <span class="nav-badge" data-badge="worker_down" hidden></span></a>
         <p class="nav-group">Setup</p>
         <a href="/credentials" title="Credentials" class="{{ 'active' if nav=='credentials' else '' }}"><span class="ico">⚿</span> <span class="nav-text">Credentials</span></a>
         <a href="/settings" title="Settings" class="{{ 'active' if nav=='settings' else '' }}"><span class="ico">⚙</span> <span class="nav-text">Settings</span></a>

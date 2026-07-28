@@ -1,6 +1,13 @@
 {% extends "base.html" %}
 {% import "macros.html" as ui %}
 {% block title %}Asset Pool · AI Video Factory{% endblock %}
+{% block crumbs %}
+{%- if scope_campaign %}{% set sc = chan_by_id.get(scope_campaign.channel_id) %}
+{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': sc.channel_name if sc else 'Channel', 'href': '/campaigns?channel=' ~ scope_campaign.channel_id}, {'label': scope_campaign.topic_name, 'href': '/campaigns/' ~ scope_campaign.id}, {'label': 'Review'}]) }}
+{%- elif scope_channel %}
+{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': scope_channel.channel_name}, {'label': 'Review'}]) }}
+{%- endif %}
+{% endblock %}
 {% block content %}
 {% call ui.page_head('Review', 'Pre-rendered episodes waiting for approval — watch each one before it publishes.') %}{% endcall %}
 {{ ui.stage_tabs(stage_counts, 'review', scope_channel.id if scope_channel else None) }}
@@ -21,11 +28,8 @@
 {% endif %}
 
 {% if scope_campaign %}
-{% set sc = chan_by_id.get(scope_campaign.channel_id) %}
-{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': sc.channel_name if sc else 'Channel', 'href': '/campaigns?channel=' ~ scope_campaign.channel_id}, {'label': scope_campaign.topic_name, 'href': '/campaigns/' ~ scope_campaign.id}, {'label': 'Review'}]) }}
 {{ ui.scope_note('Review queue for', scope_campaign.topic_name, '/assets') }}
 {% elif scope_channel %}
-{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': scope_channel.channel_name}, {'label': 'Review'}]) }}
 {{ ui.scope_note('Review queue for channel', scope_channel.channel_name, '/assets') }}
 {% endif %}
 

@@ -47,6 +47,46 @@
       {% if pr.timezone %}<span class="fact">🕑 {{ pr.timezone }}</span>{% endif %}
       {% if pr.voice %}<span class="fact">🎙 {{ voice_names.get(pr.voice, pr.voice) }}</span>{% endif %}</p>
     {% endif %}
+    {# ── Growth: does publishing this much actually move subs/views? (ADR-063) ── #}
+    {% set g = growth.get(c.id) %}
+    {% if g and g.days %}
+    <div class="growth mt-sm">
+      <div class="growth-nums">
+        <span class="gn">{% if g.subscribers is not none %}{{ '{:,}'.format(g.subscribers) }}{% else %}—{% endif %}
+          <small>subs{% if g.sub_growth %} <b class="{{ 'up' if g.sub_growth > 0 else 'down' }}">{{ '+' if g.sub_growth > 0 }}{{ '{:,}'.format(g.sub_growth) }}</b>{% endif %}</small></span>
+        <span class="gn">{% if g.views is not none %}{{ '{:,}'.format(g.views) }}{% else %}—{% endif %}
+          <small>views{% if g.view_growth %} <b class="{{ 'up' if g.view_growth > 0 else 'down' }}">{{ '+' if g.view_growth > 0 }}{{ '{:,}'.format(g.view_growth) }}</b>{% endif %}</small></span>
+        <span class="gn">{{ g.published }} <small>published</small></span>
+      </div>
+      {% if g.measurable %}
+      {# Two series on one axis: bars = episodes published that day, line = subscribers gained that
+         day. Widths/heights are computed from NUMERIC server values only (XSS-safe by construction);
+         a missing delta leaves a gap in the line rather than being drawn as zero. #}
+      {% set pub_max = (g.points|map(attribute='published')|max) or 1 %}
+      {% set deltas = g.points|map(attribute='sub_delta')|reject('none')|list %}
+      {% set d_max = (deltas|max if deltas else 0) or 1 %}
+      <div class="growth-chart" role="img"
+           aria-label="Episodes published per day compared with subscribers gained per day over the last {{ g.days }} days">
+        <div class="gc-bars">
+          {% for p in g.points %}
+          <span class="gc-bar" style="height: {{ (100 * p.published / pub_max)|round|int }}%"
+                title="{{ p.day }}: {{ p.published }} published{% if p.sub_delta is not none %}, {{ p.sub_delta }} subs{% endif %}"></span>
+          {% endfor %}
+        </div>
+        <svg class="gc-line" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+          <polyline points="
+            {%- for p in g.points -%}
+            {%- if p.sub_delta is not none %}{{ (100 * loop.index0 / (g.days - 1))|round(2) }},{{ (100 - 100 * p.sub_delta / d_max)|round(2) }} {% endif -%}
+            {%- endfor -%}"/>
+        </svg>
+      </div>
+      <p class="hint">Bars = episodes published per day · line = subscribers gained per day, last
+        {{ g.days }} day{{ 's' if g.days != 1 }}.</p>
+      {% else %}
+      <p class="hint">Growth needs two daily samples — the curve appears tomorrow.</p>
+      {% endif %}
+    </div>
+    {% endif %}
     <div class="row-actions">
       <a class="btn ghost sm" href="/campaigns?channel={{ c.id }}">Campaigns →</a>
       <a class="btn ghost sm" href="/assets?channel={{ c.id }}">Review →</a>

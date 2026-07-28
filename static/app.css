@@ -126,16 +126,28 @@ code { font-family: var(--font-mono); font-size: .92em; background: var(--surfac
 .skip-link:focus-visible { left: 0; }  /* keyboard only — never reveals on a mobile tap */
 
 /* ── 3. Shell + responsive nav ─────────────────────────────────────────────── */
-.layout { display: flex; min-height: 100vh; }
+.layout { display: flex; min-height: calc(100vh - var(--topbar-h)); }
 
-/* Mobile top bar (hidden on desktop) */
-.topbar { display: none; }
+/* App bar — at every width. The sidebar sits BELOW it, so both stick independently. */
+.topbar { display: flex; align-items: center; gap: var(--sp-3); position: sticky; top: 0;
+  height: var(--topbar-h); z-index: var(--z-topbar); background: var(--surface);
+  border-bottom: 1px solid var(--border); padding: 0 var(--main-pad); }
+.topbar .brand { margin: 0; font-size: var(--fs-md); }
+/* Breadcrumb lives in the app bar. It shrinks and truncates rather than pushing the controls off. */
+.topbar-crumbs { min-width: 0; flex: 1; overflow: hidden; }
+.topbar-crumbs .crumbs { flex-wrap: nowrap; overflow: hidden; }
+.topbar-crumbs .crumbs > * { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.topbar-right { margin-left: auto; display: flex; align-items: center; gap: var(--sp-2); }
+.topbar-who { max-width: 22ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .sidebar {
   width: var(--sidebar-w); flex-shrink: 0; background: var(--surface);
   border-right: 1px solid var(--border); padding: var(--sp-6) var(--sp-4);
-  position: sticky; top: 0; height: 100vh; overflow-y: auto;
+  position: sticky; top: var(--topbar-h); height: calc(100vh - var(--topbar-h)); overflow-y: auto;
 }
+/* The app bar carries the product name on desktop; the sidebar's copy would be a second one
+   (it returns inside the mobile drawer, where there is no app-bar brand alongside it). */
+.sidebar > .brand { display: none; }
 .brand { font-weight: var(--fw-bold); font-size: var(--fs-lg); letter-spacing: .3px;
   margin: 0 var(--sp-2) var(--sp-6); display: flex; align-items: center; gap: var(--sp-2); }
 .brand .dot { width: 10px; height: 10px; border-radius: var(--radius-round);
@@ -163,7 +175,9 @@ code { font-family: var(--font-mono); font-size: .92em; background: var(--surfac
 .grid.cols-3 { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
 .grid.cols-2 { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
 .grid-12 { display: grid; grid-template-columns: repeat(12, 1fr); gap: var(--sp-5); }
+.col-4 { grid-column: span 4; }
 .col-6 { grid-column: span 6; }
+.col-8 { grid-column: span 8; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
   padding: var(--sp-5); box-shadow: var(--shadow-1); }
 .card h3 { margin: 0 0 var(--sp-1); font-size: var(--fs-md); }
@@ -349,6 +363,21 @@ tbody tr:last-child td { border-bottom: none; }
 .slot-key.filled { color: var(--st-working); }
 .slot-key.missed { color: var(--st-review); }
 
+/* Per-episode reschedule disclosure (Operations → Publish queue). The summary IS the button, so the
+   default marker is removed; the panel drops below the row's action cluster. */
+/* Rows here can grow (an open reschedule panel, a file-missing warning), so align to the top —
+   centred cells would leave the short columns floating beside a tall one. */
+.ops-table td { vertical-align: top; }
+.resched > summary { list-style: none; cursor: pointer; display: inline-flex; }
+.resched > summary::-webkit-details-marker { display: none; }
+/* Open, the panel takes the whole action cell so it drops BELOW the buttons instead of squeezing
+   them onto separate lines (the row-actions flex would otherwise treat it as a wide sibling). */
+.resched[open] { flex-basis: 100%; }
+.resched-form { margin-top: var(--sp-2); padding: var(--sp-3); background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: var(--radius-sm); min-width: 240px; }
+.resched-form input[type="datetime-local"] { width: auto; min-width: 150px; }
+.resched-form .hint { margin-top: var(--sp-2); }
+
 /* ── 14. Media ─────────────────────────────────────────────────────────────── */
 video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm); background: #000;
   margin-top: var(--sp-3); display: block; }
@@ -389,7 +418,10 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 .grow { flex: 1; }
 .mt { margin-top: var(--sp-5); }
 .mt-sm { margin-top: var(--sp-2); }
+.mt-md { margin-top: var(--sp-4); }
 .muted { color: var(--muted); }
+.text-bad { color: var(--st-failed); }
+.row-actions.center { justify-content: center; }
 .mono { font-family: var(--font-mono); }
 .nowrap { white-space: nowrap; }
 
@@ -402,7 +434,9 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
 .sidebar-foot { margin-top: var(--sp-6); display: flex; align-items: center; justify-content: space-between;
   gap: var(--sp-2); border-top: 1px solid var(--border); padding-top: var(--sp-3); }
-.sidebar-foot .who { color: var(--muted); font-size: var(--fs-xs); overflow: hidden;
+/* Hidden by default: the signed-in address lives in the app bar. It returns inside the phone
+   drawer, where the app bar has no room for it. */
+.sidebar-foot .who { display: none; color: var(--muted); font-size: var(--fs-xs); overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── 17b. Attention badge · modal · toasts ─────────────────────────────────── */
@@ -410,8 +444,35 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
   height: 18px; padding: 0 5px; border-radius: var(--radius-pill); background: var(--st-failed);
   color: #fff; font-size: 11px; font-weight: var(--fw-bold); line-height: 1; margin-left: auto; }
 .nav-badge.review { background: var(--st-review); color: var(--primary-ink); }
-.nav-toggle { position: relative; }
+.nav-toggle { position: relative; display: none; }  /* drawer toggle is phone-only */
 .nav-toggle .nav-badge { position: absolute; top: 5px; right: 3px; margin: 0; }
+
+/* Alert bell: a live count of what is wrong right now (red + amber), so it clears itself when the
+   problems are fixed — there is nothing to mark as read. */
+.bell-wrap { position: relative; }
+.bell-count { position: absolute; top: 3px; right: 2px; min-width: 17px; height: 17px; padding: 0 4px;
+  border-radius: var(--radius-pill); background: var(--st-failed); color: #fff; font-size: 10px;
+  font-weight: var(--fw-bold); display: inline-flex; align-items: center; justify-content: center; }
+.bell-count.amber { background: var(--st-review); color: var(--primary-ink); }
+.bell-panel { position: absolute; top: calc(100% + 6px); right: 0; width: min(420px, calc(100vw - 32px));
+  max-height: min(70vh, 560px); overflow-y: auto; background: var(--surface); z-index: var(--z-modal);
+  border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: var(--shadow-3); }
+.bell-head { display: flex; align-items: baseline; gap: var(--sp-2); padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface); }
+.bell-list { list-style: none; margin: 0; padding: 0; }
+.bell-item { display: flex; gap: var(--sp-3); padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border); align-items: flex-start; }
+.bell-item:last-child { border-bottom: none; }
+.bell-dot { width: 8px; height: 8px; border-radius: var(--radius-round); margin-top: 6px; flex-shrink: 0; }
+.bell-dot.red { background: var(--st-failed); }
+.bell-dot.amber { background: var(--st-review); }
+.bell-dot.green { background: var(--st-success); }
+.bell-body { flex: 1; min-width: 0; }
+.bell-chain { font-size: var(--fs-xs); color: var(--muted); display: block; margin-bottom: 2px; }
+.bell-text { font-size: var(--fs-sm); color: var(--text); overflow-wrap: anywhere; }
+.bell-when { font-size: var(--fs-xs); color: var(--text-subtle); display: block; margin-top: 2px; }
+.bell-empty { padding: var(--sp-8) var(--sp-4); text-align: center; color: var(--muted);
+  font-size: var(--fs-sm); }
 
 .modal-backdrop { position: fixed; inset: 0; z-index: var(--z-modal); background: rgba(0, 0, 0, .6);
   display: flex; align-items: center; justify-content: center; padding: var(--sp-4); }
@@ -461,8 +522,9 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
   border-radius: var(--radius-sm); font-size: var(--fs-sm); cursor: pointer; }
 .scope-switcher:focus-visible { outline: var(--focus-ring); }
 
-.icon-btn { margin-left: auto; width: 40px; height: 40px; background: transparent; border: none;
-  color: var(--text); font-size: 18px; cursor: pointer; border-radius: var(--radius-sm); flex-shrink: 0; }
+.icon-btn { width: 40px; height: 40px; background: transparent; border: none;
+  color: var(--text); font-size: 18px; cursor: pointer; border-radius: var(--radius-sm); flex-shrink: 0;
+  position: relative; display: inline-flex; align-items: center; justify-content: center; }
 .icon-btn:hover { background: var(--surface-2); }
 .sidebar-tools { margin-top: var(--sp-5); }
 
@@ -488,8 +550,9 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 .kbd-active { outline: 2px solid var(--primary); outline-offset: 2px; }
 
 /* Breadcrumbs + scope note (drill-down orientation) */
+/* The trail renders in the app bar (never in the content flow), so it carries no page margins. */
 .crumbs { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: var(--fs-sm);
-  color: var(--muted); margin: calc(-1 * var(--sp-3)) 0 var(--sp-3); }
+  color: var(--muted); margin: 0; }
 .crumbs .sep { color: var(--text-subtle); }
 .crumbs .current { color: var(--text); font-weight: var(--fw-semibold); }
 .scope-note { font-size: var(--fs-sm); color: var(--muted); background: var(--surface-2);
@@ -558,11 +621,29 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 .sc-cell .l { color: var(--muted); font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .4px; }
 .sc-cell .n { font-size: var(--fs-xl); font-weight: var(--fw-bold); margin-top: 4px; }
 .sc-cell .n.muted { color: var(--muted); }
+.sc-cell .n.bad { color: var(--st-failed); }
+.sc-cell .progress { margin-top: 8px; min-width: 0; }   /* gauge under a vitals number */
 .sc-cell .n .u { font-size: var(--fs-sm); font-weight: var(--fw-normal); color: var(--muted); }
 .sc-cell .delta { font-size: var(--fs-sm); font-weight: var(--fw-semibold); margin-left: 4px; }
 .delta.up { color: var(--st-success); } .delta.down { color: var(--st-failed); }
 .spark-bars { display: flex; align-items: flex-end; gap: 3px; height: 34px; margin-top: 8px; }
 .spark-bars .sb { flex: 1; min-height: 3px; background: var(--st-working); border-radius: 2px; }
+
+/* Channel growth (Channels page): the totals, then two series on one axis — bars for episodes
+   published per day, a line for subscribers gained per day. Hand-rolled; no chart library. */
+.growth { border-top: 1px solid var(--border); padding-top: var(--sp-3); }
+.growth-nums { display: flex; flex-wrap: wrap; gap: var(--sp-4); }
+.gn { font-size: var(--fs-md); font-weight: var(--fw-bold); color: var(--text); }
+.gn small { display: block; font-size: var(--fs-xs); font-weight: var(--fw-normal); color: var(--muted); }
+.gn small b.up { color: var(--st-success); }
+.gn small b.down { color: var(--st-failed); }
+.growth-chart { position: relative; height: 54px; margin-top: var(--sp-3); }
+.gc-bars { display: flex; align-items: flex-end; gap: 2px; height: 100%; }
+.gc-bar { flex: 1; min-height: 2px; background: var(--st-working-bg); border: 1px solid var(--st-working-bd);
+  border-bottom: none; border-radius: 2px 2px 0 0; }
+.gc-line { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.gc-line polyline { fill: none; stroke: var(--st-success); stroke-width: 2; vector-effect: non-scaling-stroke;
+  stroke-linejoin: round; stroke-linecap: round; }
 
 /* Activity feed (dashboard) */
 .feed { list-style: none; margin: 0; padding: 0; }
@@ -657,7 +738,7 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 }
 
 @media (max-width: 900px) {
-  .grid-12 .col-6 { grid-column: span 12; }
+  .grid-12 .col-4, .grid-12 .col-6, .grid-12 .col-8 { grid-column: span 12; }
 }
 
 /* Shell tier 2 — tablet: a compact icon rail (721–1024px). Full labels return above 1024px. */
@@ -678,15 +759,30 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 
 /* Shell tier 3 — phone: top bar + off-canvas drawer + bottom tab bar (≤720px). */
 @media (max-width: 720px) {
-  .topbar { display: flex; align-items: center; gap: var(--sp-3); position: sticky; top: 0;
-    height: var(--topbar-h); z-index: var(--z-topbar); background: var(--surface);
-    border-bottom: 1px solid var(--border); padding: 0 var(--sp-4); }
-  .topbar .brand { margin: 0; font-size: var(--fs-md); }
+  .topbar { padding: 0 var(--sp-4); }
+  .topbar-who { display: none; }                 /* no room beside the drawer toggle + bell */
+  /* The trail earns the space the product name was using — but only when there IS a trail, so a
+     crumb-less page (Dashboard) still shows a title. Without :has() support both render: crowded,
+     never broken. The brand returns inside the drawer either way. */
+  .topbar:has(.topbar-crumbs .crumbs) .brand { display: none; }
+  /* Truncating every crumb to a letter or two would keep the trail visible but useless. Let it
+     scroll instead, so each parent stays readable and tappable. */
+  .topbar-crumbs { overflow-x: auto; scrollbar-width: none; }
+  .topbar-crumbs::-webkit-scrollbar { display: none; }
+  .topbar-crumbs .crumbs { font-size: var(--fs-xs); }
+  .topbar-crumbs .crumbs > * { overflow: visible; text-overflow: clip; }
+  /* Anchored to the bell, a 420px panel would hang off the left edge of a 375px screen — so on the
+     phone it spans the viewport instead. */
+  .bell-panel { position: fixed; top: var(--topbar-h); left: var(--sp-2); right: var(--sp-2);
+    width: auto; max-height: calc(100vh - var(--topbar-h) - 76px); }
   .nav-toggle { display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px;
     margin-left: -8px; background: transparent; border: none; color: var(--text); font-size: 22px; cursor: pointer;
     border-radius: var(--radius-sm); }
   .nav-toggle:hover { background: var(--surface-2); }
   .layout { display: block; }
+  /* Inside the drawer there is no app bar alongside, so the sidebar shows the brand + who again. */
+  .sidebar > .brand { display: flex; }
+  .sidebar-foot .who { display: block; }
   .sidebar { position: fixed; top: 0; left: 0; z-index: var(--z-drawer); width: 82%; max-width: 300px;
     height: 100vh; transform: translateX(-100%); transition: transform .22s ease; box-shadow: var(--shadow-3); }
   body.nav-open .sidebar { transform: translateX(0); }

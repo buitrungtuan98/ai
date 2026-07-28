@@ -287,3 +287,162 @@ def collect_stats(db, now: datetime | None = None) -> int:
         db.commit()
         logger.info("collect_stats updated %d episode(s)", updated)
     return updated
+
+
+# ── Channel-level growth series (ADR-063) ────────────────────────────────────
+# Per-episode stats answer "did this video work?". They can NEVER answer "is publishing this much
+# actually growing the channel?", because a channel's totals are not the sum of the episodes we made
+# (older videos, feed spillover, content we didn't publish). So the channel's own totals are sampled
+# once a day into `ChannelSnapshot`, and the deltas between days are the growth curve.
+def fetch_youtube_channel_totals(channel: Channel) -> dict | None:
+    """{subscribers, views, videos} for a YouTube channel via ONE Data-API call, or None.
+
+    `hiddenSubscriberCount` is honoured — a channel that hides its count reports None rather than 0,
+    so a hidden channel never renders as "0 subscribers, no growth"."""
+    from googleapiclient.discovery import build
+
+    from services.youtube_service import build_credentials
+
+    creds = build_credentials(channel)
+    youtube = build("youtube", "v3", credentials=creds, cache_discovery=False)
+    items = youtube.channels().list(part="statistics", mine=True).execute().get("items") or []
+    if not items:
+        return None
+    stats = items[0].get("statistics") or {}
+    hidden = str(stats.get("hiddenSubscriberCount", "false")).lower() == "true"
+    return {
+        "subscribers": None if hidden else int(stats.get("subscriberCount", 0)),
+        "views": int(stats.get("viewCount", 0)),
+        "videos": int(stats.get("videoCount", 0)),
+    }
+
+
+def fetch_facebook_page_totals(channel: Channel) -> dict | None:
+    """{subscribers (followers), views (None), videos (None)} for a Facebook Page, or None.
+
+    The Graph API exposes a follower count cheaply but no lifetime page view total comparable to
+    YouTube's, so `views` stays None instead of inventing a number that means something else."""
+    import requests
+
+    from services.facebook_service import _load
+
+    page_id, token = _load(channel)
+    resp = requests.get(
+        f"https://graph.facebook.com/v20.0/{page_id}",
+        params={"fields": "followers_count,fan_count", "access_token": token}, timeout=20)
+    resp.raise_for_status()
+    data = resp.json()
+    followers = data.get("followers_count", data.get("fan_count"))
+    return {"subscribers": int(followers) if followers is not None else None,
+            "views": None, "videos": None}
+
+
+def fetch_channel_totals(channel: Channel) -> dict | None:
+    if channel.platform == Platform.youtube:
+        return fetch_youtube_channel_totals(channel)
+    if channel.platform == Platform.facebook:
+        return fetch_facebook_page_totals(channel)
+    return None
+
+
+def _channel_local_day(channel: Channel, now: datetime | None = None):
+    """Today on the CHANNEL's own clock (its profile timezone, else the server default), so a
+    snapshot lands on the day the operator would call it."""
+    from zoneinfo import ZoneInfo
+
+    from core.config import settings
+
+    tz_name = (channel.profile_json or {}).get("timezone") or settings.TIMEZONE
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:  # noqa: BLE001 — a bad stored zone must not skip collection
+        tz = ZoneInfo("UTC")
+    return (now or datetime.utcnow()).replace(tzinfo=ZoneInfo("UTC")).astimezone(tz).date()
+
+
+def collect_channel_snapshots(db, now: datetime | None = None) -> int:
+    """Sample every channel's totals once per local day. Returns rows written.
+
+    Safe to call as often as the tick runs: the day row is checked first and `uq_channel_snapshot_day`
+    is the backstop, so extra calls cost one cheap SELECT and no API quota. Best-effort per channel —
+    one revoked token must not stop the others."""
+    from database.models import ChannelSnapshot
+
+    written = 0
+    for channel in db.scalars(select(Channel)).all():
+        day = _channel_local_day(channel, now)
+        if db.scalar(select(ChannelSnapshot).where(
+                ChannelSnapshot.channel_id == channel.id, ChannelSnapshot.day == day).limit(1)):
+            continue  # already sampled today — don't spend a call
+        try:
+            totals = fetch_channel_totals(channel)
+        except Exception:  # noqa: BLE001 — a dead token/quota must not break the pass
+            logger.warning("channel-totals fetch failed for channel %s", channel.id, exc_info=True)
+            continue
+        if not totals:
+            continue
+        db.add(ChannelSnapshot(channel_id=channel.id, day=day, **totals))
+        try:
+            db.commit()
+            written += 1
+        except Exception:  # noqa: BLE001 — a concurrent tick won the unique constraint; fine
+            db.rollback()
+    return written
+
+
+def channel_growth(db, channel_id: int, days: int = 30, now: datetime | None = None) -> dict:
+    """The growth series for ONE channel, ready to plot: per-day subscriber/view deltas next to how
+    many episodes that channel published that day — the correlation the operator actually wants
+    ("does publishing more move the needle?").
+
+    Deltas need two consecutive samples, so the first collected day contributes a point with no delta
+    (reported as None, never as 0 — "unknown" and "flat" must not look alike).
+    """
+    from datetime import timedelta
+
+    from database.models import ChannelSnapshot
+
+    end = (now or datetime.utcnow()).date()
+    start = end - timedelta(days=days)
+    rows = db.scalars(
+        select(ChannelSnapshot)
+        .where(ChannelSnapshot.channel_id == channel_id, ChannelSnapshot.day >= start)
+        .order_by(ChannelSnapshot.day)).all()
+    # Episodes published per day for this channel (a Task's channel comes via its campaign).
+    published: dict = {}
+    for (finished,) in db.execute(
+            select(Task.finished_at)
+            .join(Campaign, Task.campaign_id == Campaign.id)
+            .where(Campaign.channel_id == channel_id, Task.status == TaskStatus.COMPLETED,
+                   Task.finished_at.isnot(None))).all():
+        published[finished.date()] = published.get(finished.date(), 0) + 1
+    points, prev = [], None
+    for row in rows:
+        points.append({
+            "day": row.day,
+            "subscribers": row.subscribers,
+            "views": row.views,
+            "sub_delta": (row.subscribers - prev.subscribers
+                          if prev is not None and row.subscribers is not None
+                          and prev.subscribers is not None else None),
+            "view_delta": (row.views - prev.views
+                           if prev is not None and row.views is not None
+                           and prev.views is not None else None),
+            "published": published.get(row.day, 0),
+        })
+        prev = row
+    latest = rows[-1] if rows else None
+    span_subs = ([p["sub_delta"] for p in points if p["sub_delta"] is not None])
+    span_views = ([p["view_delta"] for p in points if p["view_delta"] is not None])
+    return {
+        "points": points,
+        "subscribers": latest.subscribers if latest else None,
+        "views": latest.views if latest else None,
+        "videos": latest.videos if latest else None,
+        "sub_growth": sum(span_subs) if span_subs else None,
+        "view_growth": sum(span_views) if span_views else None,
+        "published": sum(p["published"] for p in points),
+        "days": len(points),
+        # Two samples are the minimum for any delta at all — say so instead of drawing a flat line.
+        "measurable": len(points) >= 2,
+    }

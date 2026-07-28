@@ -1,0 +1,270 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block title %}Operations · AI Video Factory{% endblock %}
+{# The factory floor: what the machine is doing right now, and the controls to unstick it without
+   SSHing into the box. Tabs are URL-driven (?tab=) so a state is linkable and needs no JS. #}
+{% block crumbs %}{{ ui.breadcrumb([{'label': 'System'}, {'label': 'Operations'}]) }}{% endblock %}
+{% block content %}
+{% set w = worker %}
+{% call ui.page_head('Operations', 'Render queue, worker health and recovery — the factory floor.') %}
+  <a class="btn ghost sm" href="/tasks">≣ Render log</a>
+  <a class="btn ghost sm" href="/episodes">🎬 Episodes</a>
+{% endcall %}
+
+{% set _flash = {
+  'prioritised': ('success', 'Moved to the front of the queue — it renders next.'),
+  'cancelled': ('info', 'Queued render cancelled. It is marked failed; use Retry to queue it again.'),
+  'gone': ('info', 'That job already left the queue — nothing to do.'),
+  'recovered': ('success', 'Recovery done — stranded episodes were failed and any orphaned render lock was released.'),
+  'nothing': ('info', 'Nothing to recover: no stranded episode and no orphaned render lock.'),
+  'restarting': ('info', 'Restart requested. The worker exits within a minute and its container is recreated automatically.'),
+  'rescheduled': ('success', 'Publish time updated — this episode goes out at the time you set, and the campaign’s slots are unchanged.'),
+  'resched_cleared': ('info', 'Custom time removed — this episode rejoins the campaign’s normal posting slots.'),
+  'resched_bad': ('danger', 'That date and time could not be read — nothing was changed.'),
+  'publish': ('success', 'Publish queued.'),
+  'missing': ('danger', 'That episode’s video file is no longer on disk — re-render it before publishing.'),
+} %}
+{% if flash in _flash %}
+{% call ui.banner(_flash[flash][0]) %}{{ _flash[flash][1] }}{% endcall %}
+{% endif %}
+
+{# The worker verdict leads on EVERY tab: if the worker is down or wedged, nothing else on this page
+   matters, and a queue that "isn't moving" has exactly one explanation. #}
+{% if w.state == 'down' %}
+{% call ui.banner('danger') %}
+  ⚠ No worker is registered — nothing will render or publish. Its container is down; it should come
+  back by itself (compose restarts it). <a href="/operations?tab=worker">Worker details →</a>
+{% endcall %}
+{% elif w.state == 'stalled' %}
+{% call ui.banner('danger') %}
+  ⚠ The render has made no progress for {{ w.stalled_min }} minutes (limit {{ w.stall_limit_min }}).
+  The worker is wedged — it restarts itself automatically.
+  <a href="/operations?tab=worker">Worker details →</a>
+{% endcall %}
+{% endif %}
+
+<div class="hub-tabs">
+  <a class="hub-tab {{ 'active' if tab == 'queue' }}" href="/operations?tab=queue">⏳ Render queue{% if w.queue_depth %} <span class="pill PENDING_QUEUE">{{ w.queue_depth }}</span>{% endif %}</a>
+  <a class="hub-tab {{ 'active' if tab == 'worker' }}" href="/operations?tab=worker">⚙ Worker{% if w.state in ('down', 'stalled') %} <span class="pill FAILED">!</span>{% endif %}</a>
+  <a class="hub-tab {{ 'active' if tab == 'publish' }}" href="/operations?tab=publish">🚀 Publish queue</a>
+</div>
+
+{# ── Tab 1 · Render queue ─────────────────────────────────────────────────── #}
+{% if tab == 'queue' %}
+{% if publish_queued %}
+<p class="scope-note">{{ publish_queued }} upload job{{ 's' if publish_queued != 1 }} also in this queue —
+  uploads share the one queue so they stay sequential with renders. The <b>#</b> column is the real
+  queue position, so a gap means an upload sits there.</p>
+{% endif %}
+{% if job_rows %}
+<div class="card">
+  <div class="table-wrap">
+    <table class="stack-table">
+      <thead><tr><th>#</th><th>Episode</th><th>Campaign</th><th>Channel</th><th>Queued</th><th></th></tr></thead>
+      <tbody>
+        {% for r in job_rows %}
+        <tr>
+          <td data-label="#"><b>{{ r.position }}</b></td>
+          <td data-label="Episode"><a href="/episodes/{{ r.task.id }}"><b>Ep {{ r.task.episode_number }}</b></a>
+            {% if r.task.synopsis %}<div class="meta">{{ r.task.synopsis[:60] }}</div>{% endif %}</td>
+          <td data-label="Campaign">{{ r.campaign.topic_name if r.campaign else '—' }}</td>
+          <td data-label="Channel" class="meta">{{ r.channel.channel_name if r.channel else '—' }}</td>
+          <td data-label="Queued" class="meta">
+            <span {% if r.enqueued_at %}data-reltime="{{ r.enqueued_at.isoformat() }}Z"{% endif %}>{{ r.enqueued_at.strftime('%H:%M') if r.enqueued_at else '—' }}</span></td>
+          <td data-label="">
+            <div class="row-actions">
+              {% if not loop.first %}
+              <form method="post" action="/operations/jobs/{{ r.job_id }}/front">
+                <button class="btn ghost sm" type="submit" title="Render this episode next">🔼 Next</button></form>
+              {% endif %}
+              <form method="post" action="/operations/jobs/{{ r.job_id }}/cancel"
+                    data-confirm="Cancel the queued render of Ep {{ r.task.episode_number }}? It is marked failed and can be retried later.">
+                <button class="btn danger sm" type="submit" title="Remove from the queue">✕ Cancel</button></form>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+<p class="hint">Renders run strictly one at a time on this box, so position #1 is what starts next.
+  “Next” is for when a posting slot is close and the buffer is empty.</p>
+{% else %}
+{% call ui.empty('⏳', 'Nothing queued',
+   'Every episode is either rendering, waiting for its posting slot, or already published.') %}
+  <div class="row-actions center">
+    <a class="btn ghost sm" href="/campaigns">Campaigns</a>
+    <a class="btn ghost sm" href="/episodes">Episodes</a>
+  </div>
+{% endcall %}
+{% endif %}
+{% endif %}
+
+{# ── Tab 2 · Worker ───────────────────────────────────────────────────────── #}
+{% if tab == 'worker' %}
+{% set _state = {'busy': ('RENDERING', 'Busy — rendering'), 'idle': ('SCHEDULED', 'Idle — waiting for work'),
+                 'stalled': ('FAILED', 'Stalled — wedged'), 'down': ('FAILED', 'Down — not registered')} %}
+<div class="grid-12">
+  <div class="card col-8">
+    <div class="card-head">
+      <h3>Render worker</h3>
+      {{ ui.pill(_state[w.state][0], _state[w.state][1]) }}
+    </div>
+    <p class="meta">One worker, one render at a time, CPU-only — that is the design, not a limit to
+      raise: this box locks up if two renders share it.</p>
+
+    {% if w.live %}
+    {% for item in w.live %}
+    <div class="mt-md">
+      <p class="nownext work">▶ Ep {{ item.task.episode_number }}{% if item.campaign %} · {{ item.campaign.topic_name }}{% endif %}</p>
+      {{ ui.progress(item.pct, 'work') }}
+      <p class="meta">{{ item.pct }}% ·
+        {% if item.idle_min is none %}no progress stamp yet
+        {% elif item.idle_min < 1 %}progressing now
+        {% else %}last moved {{ item.idle_min }} min ago{% endif %}
+        {% if w.state == 'stalled' %} · <b class="text-bad">past the {{ w.stall_limit_min }}-min limit</b>{% endif %}
+      </p>
+      <p class="row-actions"><a class="btn ghost sm" href="/episodes/{{ item.task.id }}">Open episode →</a></p>
+    </div>
+    {% endfor %}
+    {% elif w.state == 'down' %}
+    <p class="nownext bad mt-md">No worker process is registered in Redis. Renders and uploads are
+      both paused until it returns.</p>
+    {% else %}
+    <p class="nownext muted mt-md">Not rendering anything right now.</p>
+    {% endif %}
+
+    <div class="facts mt-md">
+      <span class="fact">Queue: {{ w.queue_depth }}</span>
+      <span class="fact">{{ 'Render lock held' if w.lock_held else 'Render lock free' }}</span>
+      {% if w.snapshot and w.snapshot.successful is not none %}
+      <span class="fact">✓ {{ w.snapshot.successful }} done</span>
+      <span class="fact">✕ {{ w.snapshot.failed }} failed</span>
+      {% endif %}
+      {% if w.snapshot and w.snapshot.last_heartbeat %}
+      <span class="fact">Heartbeat <span data-reltime="{{ w.snapshot.last_heartbeat.isoformat() }}Z">{{ ago(w.snapshot.last_heartbeat) }}</span></span>
+      {% endif %}
+      {% if w.snapshot and w.snapshot.birth_date %}
+      <span class="fact">Started <span data-reltime="{{ w.snapshot.birth_date.isoformat() }}Z">{{ ago(w.snapshot.birth_date) }}</span></span>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="card col-4">
+    <div class="card-head"><h3>Recovery</h3></div>
+    {% if w.restart_pending %}
+    {% call ui.banner('info') %}Restart already requested — waiting for the worker to exit.{% endcall %}
+    {% endif %}
+    <p class="meta">Two interventions, no SSH. Neither can touch a render that is genuinely
+      progressing.</p>
+
+    <div class="mt-md">
+      <form method="post" action="/operations/recover">
+        <button class="btn block" type="submit">🩹 Recover stuck renders</button></form>
+      <p class="hint">Fails episodes that are definitively dead and releases a render lock left by a
+        crashed worker — now, instead of at the next hourly housekeeping tick. Use this when an
+        episode is frozen mid-render.</p>
+    </div>
+
+    <div class="mt-md">
+      <form method="post" action="/operations/restart-worker"
+            data-confirm="Restart the render worker? An in-flight render is abandoned (it can be retried) and the worker comes back automatically.">
+        <button class="btn ghost block" type="submit">🔄 Restart worker</button></form>
+      <p class="hint">Asks the worker to exit; its container is recreated automatically. Takes about
+        a minute. A worker frozen so hard that even its own threads cannot run is the one case this
+        cannot reach — that needs the box itself.</p>
+    </div>
+  </div>
+</div>
+
+<div class="card mt-md">
+  <div class="card-head"><h3>How a frozen render heals itself</h3></div>
+  <p class="meta">Rendering is one long job, so “stuck” has to be defined by time. Three layers,
+    deliberately ordered from gentlest to bluntest:</p>
+  <ol class="hint">
+    <li><b>RQ job timeout</b> — a render running longer than its hard cap is failed cleanly, and the
+      queue moves on.</li>
+    <li><b>Watchdog ({{ w.stall_limit_min }} min without progress)</b> — a render that outlived even
+      that cap has a worker that stopped executing, so the episode is failed and the worker restarts
+      itself. Slow-but-alive renders never reach here: image generation, stitching and Auto-QC each
+      report no progress for minutes at a time, which is normal.</li>
+    <li><b>Housekeeping tick</b> — anything still stranded is failed so Retry works. The Recover
+      button above is this same sweep, on demand.</li>
+  </ol>
+</div>
+{% endif %}
+
+{# ── Tab 3 · Publish queue ────────────────────────────────────────────────── #}
+{% if tab == 'publish' %}
+{% if publish_rows %}
+{% set _pstate = {'override': ('SCHEDULED', '✏ Your time'), 'slot': ('SCHEDULED', '🔵 Slot'),
+                  'review': ('AWAITING_REVIEW', '👁 Needs review'), 'now': ('PENDING_QUEUE', '⏳ Next tick')} %}
+<div class="card">
+  <div class="table-wrap">
+    <table class="stack-table ops-table">
+      <thead><tr><th>Episode</th><th>Channel</th><th>Publishes</th><th>State</th><th></th></tr></thead>
+      <tbody>
+        {% for r in publish_rows %}
+        <tr>
+          <td data-label="Episode"><b>Ep {{ r.item.episode_number }}</b>
+            <div class="meta">{{ r.campaign.topic_name if r.campaign else '—' }}</div>
+            {% if r.missing %}<div class="err">Video file is no longer on disk — re-render before publishing.</div>{% endif %}</td>
+          <td data-label="Channel">{{ r.channel.channel_name if r.channel else '—' }}
+            {% if r.channel %}<div class="meta"><span class="platform {{ r.channel.platform.value }}">{{ r.channel.platform.value }}</span></div>{% endif %}</td>
+          <td data-label="Publishes">
+            {% if r.when_label %}<b>{{ r.when_label }}</b><div class="meta">{{ r.tz }}</div>
+            {% elif r.state == 'review' %}<span class="meta">After you approve it</span>
+            {% else %}<span class="meta">At the next tick</span>{% endif %}</td>
+          <td data-label="State">{{ ui.pill(_pstate[r.state][0], _pstate[r.state][1]) }}</td>
+          <td data-label="">
+            <div class="row-actions">
+              {% if r.state == 'review' %}
+              <a class="btn ghost sm" href="/assets">Review →</a>
+              {% else %}
+              <form method="post" action="/assets/{{ r.item.id }}/publish-now">
+                <input type="hidden" name="return_to" value="/operations?tab=publish">
+                <button class="btn sm" type="submit" {{ 'disabled' if r.missing }}>⚡ Now</button></form>
+              <details class="resched">
+                <summary class="btn ghost sm">✏ Reschedule</summary>
+                <div class="resched-form">
+                  <form method="post" action="/operations/buffer/{{ r.item.id }}/reschedule" class="row-actions">
+                    <input type="datetime-local" name="publish_at" value="{{ r.input_value }}"
+                           aria-label="Publish date and time ({{ r.tz }})">
+                    <button class="btn sm" type="submit">Save</button>
+                  </form>
+                  {% if r.state == 'override' %}
+                  {# Its own form: a submit button sharing the input's name would send publish_at twice. #}
+                  <form method="post" action="/operations/buffer/{{ r.item.id }}/reschedule">
+                    <input type="hidden" name="publish_at" value="">
+                    <button class="btn ghost sm" type="submit"
+                            title="Return this episode to the campaign's posting slots">Clear custom time</button></form>
+                  {% endif %}
+                  <p class="hint">Times are in <b>{{ r.tz }}</b> — the same clock this campaign's
+                    posting slots use. Only this episode moves; the campaign keeps its schedule.</p>
+                </div>
+              </details>
+              {% endif %}
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+<p class="hint">Slot times are a projection: ready episodes fill the campaign's upcoming slots
+  lowest-number-first, which is the rule the scheduler actually follows. Give an episode its own time
+  and it leaves that queue — it publishes only at the time you set.</p>
+{% else %}
+{% call ui.empty('🚀', 'Nothing waiting to publish',
+   'Rendered episodes appear here with the time they will go out. An empty list means the buffer is
+    empty — check the render queue.') %}
+  <div class="row-actions center">
+    <a class="btn ghost sm" href="/operations?tab=queue">Render queue</a>
+    <a class="btn ghost sm" href="/calendar">Calendar</a>
+  </div>
+{% endcall %}
+{% endif %}
+{% endif %}
+{% endblock %}

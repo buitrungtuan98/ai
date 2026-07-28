@@ -46,6 +46,7 @@ from core.tts import VOICE_CHOICES
 from database.db_session import get_db, init_db
 from database.models import AutopilotAction, BufferPoolItem, Campaign, Channel, Task
 from database.types import BufferStatus, CampaignStatus, ChannelStatus, Platform, TaskStatus
+from services import analytics_service
 from workers import task_queue, video_worker
 
 logging.basicConfig(level=settings.LOG_LEVEL)
@@ -284,11 +285,15 @@ def _system_health(db, user=None) -> dict:
     should show as red, not take the page down. The AI daily budget is the user's Settings value
     when set, else the app-wide GEMINI_DAILY_BUDGET fallback."""
     budget = (user.settings_json or {}).get("ai_daily_budget") if user is not None else None
-    health = {"redis": False, "worker": False, "queue_depth": None, "buffer_ready": 0,
-              "disk_pct": None, "ai_calls": 0, "ai_budget": budget or settings.GEMINI_DAILY_BUDGET}
+    health = {"redis": False, "worker": False, "worker_stalled": False, "queue_depth": None,
+              "buffer_ready": 0, "disk_pct": None, "ai_calls": 0,
+              "ai_budget": budget or settings.GEMINI_DAILY_BUDGET}
     try:
         health["redis"] = bool(task_queue.conn.ping())
         health["worker"] = task_queue.worker_alive()
+        # A worker that hung mid-render still registers, so liveness alone read as healthy for hours
+        # (ADR-057). Surface "registered but wedged" as its own signal.
+        health["worker_stalled"] = task_queue.stalled_render() is not None
         health["queue_depth"] = len(task_queue.render_queue)
     except Exception:  # noqa: BLE001
         pass
@@ -396,22 +401,50 @@ def _scorecard(db, user_id: int) -> dict:
     }
 
 
-def _next_slot(campaign) -> dict | None:
-    """The soonest upcoming posting slot for ONE active auto-publish campaign, in its own timezone.
-    Returns {in_hours, slot, when} or None (continuous / review / no slots / no upcoming day)."""
+def _campaign_tz_name(campaign) -> str:
+    """The clock a campaign's operator thinks in — its configured zone, else the server default.
+    One definition, so posting slots, the calendar and a publish-time override all agree."""
+    if campaign is None:
+        return settings.TIMEZONE
+    return (campaign.config_json or {}).get("timezone") or settings.TIMEZONE
+
+
+def _campaign_tz(campaign):
+    from zoneinfo import ZoneInfo
+
+    try:
+        return ZoneInfo(_campaign_tz_name(campaign))
+    except Exception:  # noqa: BLE001 — a bad stored zone must never break a page or an action
+        return ZoneInfo("UTC")
+
+
+def _to_campaign_tz(naive_utc, campaign):
+    """A stored naive-UTC timestamp as an aware datetime on the campaign's own clock."""
+    from zoneinfo import ZoneInfo
+
+    return naive_utc.replace(tzinfo=ZoneInfo("UTC")).astimezone(_campaign_tz(campaign))
+
+
+def _upcoming_slots(campaign, count: int = 1, now=None) -> list:
+    """The next `count` posting-slot datetimes for an auto-publish campaign, in its own timezone
+    (weekday gate applied). Empty for continuous / review-first / slot-less campaigns.
+
+    ONE definition of "when will this campaign post next", so the dashboard's next-slot chip and the
+    Operations publish queue's per-episode projection can never disagree."""
     from datetime import timedelta
 
     from workers.scheduler import WEEKDAY_KEYS, local_now
 
     cfg = campaign.config_json or {}
     if not cfg.get("auto_publish", True):
-        return None
+        return []
     slots = sorted(cfg.get("posting_slots") or [])
     if not slots:
-        return None
+        return []
     allowed = cfg.get("posting_days") or []
-    now_local = local_now(cfg.get("timezone"))
-    for dd in range(0, 8):
+    now_local = now or local_now(cfg.get("timezone"))
+    out = []
+    for dd in range(0, 60):  # a horizon long enough for any weekday-gated pattern
         day = now_local + timedelta(days=dd)
         if allowed and WEEKDAY_KEYS[day.weekday()] not in allowed:
             continue
@@ -422,9 +455,24 @@ def _next_slot(campaign) -> dict | None:
                 continue
             cand = day.replace(hour=hh, minute=mm, second=0, microsecond=0)
             if cand > now_local:
-                return {"in_hours": round((cand - now_local).total_seconds() / 3600, 1),
-                        "slot": s, "when": cand.strftime("%a %H:%M")}
-    return None
+                out.append(cand)
+                if len(out) >= count:
+                    return out
+    return out
+
+
+def _next_slot(campaign) -> dict | None:
+    """The soonest upcoming posting slot for ONE active auto-publish campaign, in its own timezone.
+    Returns {in_hours, slot, when} or None (continuous / review / no slots / no upcoming day)."""
+    from workers.scheduler import local_now
+
+    upcoming = _upcoming_slots(campaign, 1)
+    if not upcoming:
+        return None
+    cand = upcoming[0]
+    now_local = local_now((campaign.config_json or {}).get("timezone"))
+    return {"in_hours": round((cand - now_local).total_seconds() / 3600, 1),
+            "slot": cand.strftime("%H:%M"), "when": cand.strftime("%a %H:%M")}
 
 
 def _next_publish(db, user_id: int):
@@ -476,6 +524,56 @@ def _campaign_ops(db, user_id: int, campaigns) -> dict:
     return ops
 
 
+def _server_day_start_utc(now=None):
+    """Midnight of "today" on the server's configured clock, as naive UTC (what the DB stores).
+    Reuses `_campaign_tz(None)`, so the dashboard's day and a campaign's day agree on the zone."""
+    from zoneinfo import ZoneInfo
+
+    now_local = (now or datetime.utcnow()).replace(tzinfo=ZoneInfo("UTC")).astimezone(_campaign_tz(None))
+    start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return start.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+
+
+def _factory_vitals(db, user_id: int, now=None) -> dict:
+    """Factory-wide operating numbers (ADR-062) — the macro view the per-campaign pages cannot give:
+    how much reach the whole factory has produced, whether today's renders are actually succeeding,
+    how much machine time they cost, and whether the box itself is saturated.
+
+    Views are reported WITH the number of measured episodes, because YouTube Analytics lags ~2 days:
+    a bare total would silently read as "the whole catalogue" when it only covers what has data.
+    """
+    from core import host
+
+    day_start = _server_day_start_utc(now)
+    views, measured = 0, 0
+    for (stats,) in db.execute(
+            select(Task.stats_json).where(Task.user_id == user_id, Task.stats_json.isnot(None))).all():
+        if not stats:
+            continue
+        got = stats.get("views")
+        if got is None:
+            continue
+        views += int(got)
+        measured += 1
+    published_total = db.scalar(select(func.count()).select_from(Task).where(
+        Task.user_id == user_id, Task.status == TaskStatus.COMPLETED)) or 0
+
+    # Today's render outcomes. A render that FINISHED today counts, whatever day it started.
+    finished_today = db.scalars(select(Task).where(
+        Task.user_id == user_id, Task.finished_at.isnot(None),
+        Task.finished_at >= day_start)).all()
+    failed = sum(1 for t in finished_today if t.status == TaskStatus.FAILED)
+    total = len(finished_today)
+    render_seconds = sum(int((t.render_json or {}).get("render_seconds") or 0) for t in finished_today)
+    return {
+        "views": views, "measured": measured, "published_total": published_total,
+        "renders_today": total, "failed_today": failed,
+        "fail_pct_today": round(100 * failed / total) if total else None,
+        "render_minutes_today": round(render_seconds / 60) if render_seconds else 0,
+        "host": host.snapshot(),
+    }
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request, user: CurrentUser, db: DbDep):
     channels = db.scalars(select(Channel).where(Channel.user_id == user.id)).all()
@@ -519,6 +617,7 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
             "attention_failed": attention_failed, "attention_review": attention_review,
             "review_ids": review_ids,
             "scorecard": _scorecard(db, user.id), "next_publish": _next_publish(db, user.id),
+            "vitals": _factory_vitals(db, user.id),
             "active_running": active_campaigns,
             "autopilot_proposed": autopilot_proposed,
             "ops": _campaign_ops(db, user.id, active_campaigns),
@@ -565,6 +664,8 @@ def channels_page(request: Request, user: CurrentUser, db: DbDep, status: str = 
         {"request": request, "user": user, "channels": channels, "nav": "channels",
          "camp_counts": camp_counts, "chips": chips, "status": status, "q": q, "total_all": total_all,
          "ap": {c.id: (c.autopilot_json or {}) for c in channels},
+         # Growth series per channel (ADR-063): does publishing this much actually move subs/views?
+         "growth": {c.id: analytics_service.channel_growth(db, c.id) for c in channels},
          "characters": {c.id: _sanitize_characters(c.characters_json) for c in channels},
          "flash": flash if flash in ("profile", "autopilot", "character",
                                      "char_img_ok", "char_img_fail") else ""},
@@ -1743,17 +1844,31 @@ def _episode_return(return_to: str) -> str | None:
     return return_to if return_to.startswith("/episodes/") and tail.isdigit() else None
 
 
-def _action_redirect(return_to: str, flash: str, default: str, flash_reason: str = "") -> RedirectResponse:
-    """Redirect an asset/task action to its Episode view (when it came from there) or the default
-    /assets URL (unchanged behavior when no return path is supplied)."""
+def _safe_return(return_to: str) -> str | None:
+    """An internal path a shared action may bounce back to, or None. Allow-list only (never an
+    arbitrary `return_to`, which would be an open redirect): the Episode view, and the Operations
+    page — whose Publish-queue tab reuses the same asset actions and must not dump the operator on
+    /assets afterwards."""
     ep = _episode_return(return_to)
-    if ep is None:
+    if ep is not None:
+        return ep
+    if (return_to or "").split("?", 1)[0] == "/operations":
+        return return_to
+    return None
+
+
+def _action_redirect(return_to: str, flash: str, default: str, flash_reason: str = "") -> RedirectResponse:
+    """Redirect an asset/task action to the page it came from (Episode view / Operations) or the
+    default /assets URL (unchanged behavior when no return path is supplied)."""
+    target = _safe_return(return_to)
+    if target is None:
         return RedirectResponse(default, status_code=303)
-    qs = f"?flash={flash}" if flash else ""
+    sep = "&" if "?" in target else "?"
+    qs = f"{sep}flash={flash}" if flash else ""
     if flash_reason:
         from urllib.parse import quote
-        qs += f"&flash_reason={quote(flash_reason)}"
-    return RedirectResponse(ep + qs, status_code=303)
+        qs += ("&" if qs else sep) + f"flash_reason={quote(flash_reason)}"
+    return RedirectResponse(target + qs, status_code=303)
 
 
 @app.post("/assets/{item_id}/approve")
@@ -2121,7 +2236,10 @@ def calendar_page(request: Request, user: CurrentUser, db: DbDep, week: int = 0,
     ready_by_camp: dict[int, list[int]] = {}
     for cid, epn in db.execute(
             select(BufferPoolItem.campaign_id, BufferPoolItem.episode_number)
-            .where(BufferPoolItem.status == BufferStatus.ready)
+            .where(BufferPoolItem.status == BufferStatus.ready,
+                   # An episode with an operator-set publish time no longer competes for a slot
+                   # (ADR-059), so it must not be projected into one here either.
+                   BufferPoolItem.publish_at.is_(None))
             .order_by(BufferPoolItem.episode_number)).all():
         ready_by_camp.setdefault(cid, []).append(epn)
     slotted, unslotted = [], []
@@ -2322,3 +2440,418 @@ def retry_task(task_id: int, user: CurrentUser, db: DbDep, return_to: str = Form
     db.commit()
     return _action_redirect(return_to, "rerender", "") if _episode_return(return_to) \
         else {"ok": True, "mode": "render"}
+
+
+# ── Operations: the factory floor (render queue · worker · publish queue) ─────
+# The one place that answers "what is the machine doing, and why is nothing moving?" — and lets the
+# operator intervene from the browser instead of SSHing into the box (ADR-058). Everything here
+# reads live queue/worker state, so every lookup fails soft: a dead Redis renders an empty,
+# explained page rather than a 500.
+_OPS_TABS = ("queue", "worker", "publish")
+
+
+def _ops_job_rows(db, user_id: int) -> tuple[list[dict], int]:
+    """Queued jobs (true queue order) joined to their episode, scoped to this user. Returns the
+    render rows and how many publish jobs are queued — a render waiting behind uploads is a real
+    thing an operator needs to see, so it is reported rather than hidden."""
+    jobs = task_queue.queued_jobs()
+    render_ids = [j["arg"] for j in jobs if j["kind"] == "render" and j["arg"] is not None]
+    tasks = {t.id: t for t in db.scalars(
+        select(Task).where(Task.user_id == user_id, Task.id.in_(render_ids or [-1]))).all()}
+    campaigns = {c.id: c for c in db.scalars(
+        select(Campaign).where(Campaign.user_id == user_id)).all()}
+    channels = {c.id: c for c in db.scalars(
+        select(Channel).where(Channel.user_id == user_id)).all()}
+    rows, publish_queued = [], 0
+    for job in jobs:
+        if job["kind"] == "publish":
+            publish_queued += 1
+            continue
+        task = tasks.get(job["arg"])
+        if task is None:  # another tenant's job (or a vanished task) — never leak it
+            continue
+        campaign = campaigns.get(task.campaign_id)
+        rows.append({
+            "position": job["position"], "job_id": job["job_id"], "task": task,
+            "campaign": campaign,
+            "channel": channels.get(campaign.channel_id) if campaign else None,
+            "enqueued_at": job["enqueued_at"],
+        })
+    return rows, publish_queued
+
+
+def _ops_worker_card(db, user_id: int) -> dict:
+    """The single worker's state, plus whatever it is rendering right now. `state` is the operator-
+    facing verdict: down (nothing registered) · stalled (progress past the watchdog limit) ·
+    busy · idle."""
+    snap = task_queue.worker_snapshot()
+    stalled = task_queue.stalled_render()
+    live = []
+    for raw_id in sorted(task_queue.active_render_task_ids()):
+        try:
+            task = db.get(Task, int(raw_id))
+        except (TypeError, ValueError):
+            continue
+        if task is None or task.user_id != user_id:
+            continue
+        campaign = db.get(Campaign, task.campaign_id)
+        age = task_queue.progress_age_seconds(task.id)
+        live.append({"task": task, "campaign": campaign,
+                     "pct": round(task_queue.get_progress(task.id), 1),
+                     "idle_min": int(age // 60) if age is not None else None})
+    # Liveness comes from the same helper the dashboard health strip uses (one definition of "the
+    # worker is up"); the snapshot only adds detail and may be unavailable on a partial registration.
+    if not task_queue.worker_alive():
+        state = "down"
+    elif stalled is not None:
+        state = "stalled"
+    elif live:
+        state = "busy"
+    else:
+        state = "idle"
+    return {"snapshot": snap, "state": state, "live": live,
+            "lock_held": task_queue.render_lock_held(),
+            "stall_limit_min": task_queue.stall_limit_seconds() // 60,
+            "stalled_min": int(stalled[1] // 60) if stalled else None,
+            "restart_pending": task_queue.restart_requested(),
+            "queue_depth": len(task_queue.queued_jobs())}
+
+
+def _ops_publish_rows(db, user_id: int) -> list[dict]:
+    """Rendered episodes waiting to go out, with WHEN each will publish.
+
+    Three states an operator must be able to tell apart: `override` (a time they set — ADR-059),
+    `slot` (projected onto the campaign's next free slots, lowest episode first, exactly the rule the
+    scheduler follows), and `review` (waiting for approval, so no time exists yet). `missing` flags a
+    row whose file left the disk, because Publish now would fail on it."""
+    items = db.scalars(
+        select(BufferPoolItem)
+        .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
+        .where(Campaign.user_id == user_id,
+               BufferPoolItem.status.in_([BufferStatus.ready, BufferStatus.awaiting_review]))
+        .order_by(BufferPoolItem.campaign_id, BufferPoolItem.episode_number)).all()
+    if not items:
+        return []
+    campaigns = {c.id: c for c in db.scalars(
+        select(Campaign).where(Campaign.user_id == user_id)).all()}
+    channels = {c.id: c for c in db.scalars(
+        select(Channel).where(Channel.user_id == user_id)).all()}
+    # Project slot times per campaign: only un-overridden ready items queue for slots, so the Nth
+    # such episode lands in the Nth upcoming slot.
+    slot_queue: dict[int, list] = {}
+    for cid, campaign in campaigns.items():
+        waiting = [i for i in items if i.campaign_id == cid
+                   and i.status == BufferStatus.ready and i.publish_at is None]
+        if waiting:
+            slot_queue[cid] = _upcoming_slots(campaign, len(waiting))
+    slot_cursor: dict[int, int] = {}
+    rows = []
+    for item in items:
+        campaign = campaigns.get(item.campaign_id)
+        when, state = None, "review"
+        if item.status == BufferStatus.awaiting_review:
+            state = "review"
+        elif item.publish_at is not None:
+            # Stored naive UTC → the campaign's own clock, so every row below is comparable.
+            when, state = _to_campaign_tz(item.publish_at, campaign), "override"
+        else:
+            taken = slot_cursor.get(item.campaign_id, 0)
+            upcoming = slot_queue.get(item.campaign_id) or []
+            if taken < len(upcoming):
+                when = upcoming[taken]
+            slot_cursor[item.campaign_id] = taken + 1
+            # No slots configured → continuous mode already published at render time, so anything
+            # still ready here is simply waiting for the next tick.
+            state = "slot" if when is not None else "now"
+        rows.append({
+            "item": item, "campaign": campaign,
+            "channel": channels.get(item.channel_id),
+            "when": when, "state": state,
+            # Both rendered in the campaign's timezone: a human label, and the value a browser
+            # `datetime-local` field expects when the operator opens the reschedule form.
+            "when_label": when.strftime("%a %d/%m %H:%M") if when else None,
+            "input_value": when.strftime("%Y-%m-%dT%H:%M") if when else "",
+            "tz": _campaign_tz_name(campaign),
+            "missing": not (item.video_path and os.path.exists(item.video_path)),
+        })
+    return rows
+
+
+@app.get("/operations", response_class=HTMLResponse)
+def operations_page(request: Request, user: CurrentUser, db: DbDep, tab: str = "queue",
+                    flash: str = ""):
+    tab = tab if tab in _OPS_TABS else "queue"
+    ctx = {"request": request, "user": user, "nav": "operations", "tab": tab, "flash": flash,
+           "worker": _ops_worker_card(db, user.id)}
+    if tab == "queue":
+        ctx["job_rows"], ctx["publish_queued"] = _ops_job_rows(db, user.id)
+    elif tab == "publish":
+        ctx["publish_rows"] = _ops_publish_rows(db, user.id)
+    return templates.TemplateResponse(request, "operations.html", ctx)
+
+
+def _ops_redirect(tab: str, flash: str = "") -> RedirectResponse:
+    qs = f"?tab={tab}" + (f"&flash={flash}" if flash else "")
+    return RedirectResponse("/operations" + qs, status_code=303)
+
+
+def _owned_queued_task(db, user_id: int, job_id: str) -> Task:
+    """The Task behind a queued render job, or 404. Tenancy is checked through the Task row, so one
+    operator can never reorder or cancel another's queue."""
+    for job in task_queue.queued_jobs():
+        if job["job_id"] != job_id:
+            continue
+        if job["kind"] != "render":
+            raise HTTPException(400, "Only queued renders can be reordered or cancelled")
+        task = db.get(Task, job["arg"]) if job["arg"] is not None else None
+        if task is None or task.user_id != user_id:
+            raise HTTPException(404, "Job not found")
+        return task
+    raise HTTPException(404, "That job is no longer queued")
+
+
+@app.post("/operations/jobs/{job_id}/front")
+def ops_move_job_front(job_id: str, user: CurrentUser, db: DbDep):
+    """Render this episode next — for when a posting slot is close and the buffer is empty."""
+    _owned_queued_task(db, user.id, job_id)
+    return _ops_redirect("queue", "prioritised" if task_queue.move_job_to_front(job_id) else "gone")
+
+
+@app.post("/operations/jobs/{job_id}/cancel")
+def ops_cancel_job(job_id: str, user: CurrentUser, db: DbDep):
+    """Drop a queued render. The Task is marked FAILED (not deleted) so it stays visible and the
+    normal Retry button can put it back — cancelling is a pause, not a delete."""
+    task = _owned_queued_task(db, user.id, job_id)
+    if not task_queue.cancel_job(job_id):
+        return _ops_redirect("queue", "gone")
+    task.status = TaskStatus.FAILED
+    task.finished_at = datetime.utcnow()
+    task.error_message = "Cancelled from the Operations page before it started. Use Retry to queue it again."
+    task_queue.clear_progress(task.id)
+    db.commit()
+    return _ops_redirect("queue", "cancelled")
+
+
+@app.post("/operations/recover")
+def ops_recover(user: CurrentUser, db: DbDep):
+    """Fail definitively-dead tasks and free a render lock left by a crashed worker, now instead of
+    at the next hourly tick. The render-concurrency-1 guard still applies: a live render is never
+    touched."""
+    from workers.scheduler import recover_now
+
+    result = recover_now(db)
+    flash = "recovered" if (result["reaped"] or result["lock_cleared"]) else "nothing"
+    return _ops_redirect("worker", flash)
+
+
+@app.post("/operations/restart-worker")
+def ops_restart_worker(user: CurrentUser, db: DbDep):
+    """Ask the worker to exit so its container is recreated (compose's restart policy does the rest).
+
+    A flag in Redis, NOT a Docker command: the web container is the internet-facing service and must
+    never hold the Docker socket, which is host-root (ADR-057). The worker's watchdog thread sees the
+    flag within a minute and leaves cleanly."""
+    task_queue.request_worker_restart()
+    return _ops_redirect("worker", "restarting")
+
+
+@app.post("/operations/buffer/{item_id}/reschedule")
+def ops_reschedule(db: DbDep, item=Depends(get_owned_buffer_item), publish_at: str = Form("")):
+    """Set (or clear) THIS episode's publish time — dodge another channel's peak hour without moving
+    the whole campaign's slots (ADR-059).
+
+    The input is a browser `datetime-local` value, i.e. the operator's own wall clock, so it is
+    interpreted in the CAMPAIGN's timezone (the same clock its posting slots use) and stored as naive
+    UTC like every other timestamp. An empty value clears the override and the episode rejoins the
+    normal slot queue."""
+    if item.status != BufferStatus.ready:
+        raise HTTPException(400, "Only pre-rendered (ready) episodes can be rescheduled")
+    raw = (publish_at or "").strip()
+    if not raw:
+        item.publish_at = None
+        db.commit()
+        return _ops_redirect("publish", "resched_cleared")
+    try:
+        naive_local = datetime.fromisoformat(raw)
+    except ValueError:
+        return _ops_redirect("publish", "resched_bad")
+    from zoneinfo import ZoneInfo
+
+    campaign = db.get(Campaign, item.campaign_id)
+    item.publish_at = (naive_local.replace(tzinfo=_campaign_tz(campaign))
+                       .astimezone(ZoneInfo("UTC")).replace(tzinfo=None))
+    db.commit()
+    return _ops_redirect("publish", "rescheduled")
+
+
+# ── Cross-channel alert feed (the header bell) ────────────────────────────────
+# ONE inbox for "what is wrong across all my channels", derived from live state rather than stored as
+# events (ADR-060): every row is recomputed from the same helpers the pages render, so an alert can
+# never disagree with reality or linger after the problem is fixed. Levels: red (nothing is moving /
+# something needs a decision), amber (heading for trouble), green (it worked).
+_ALERT_ORDER = {"red": 0, "amber": 1, "green": 2}
+_ALERT_FAILED_LIMIT = 8      # per-episode failures listed individually before it stops being useful
+_ALERT_GREEN_LIMIT = 3       # a little "it's working" evidence, not a publish log
+_QUOTA_WARN_RATIO = 0.8
+_SLOT_RISK_HOURS = 6         # a slot this close with an empty buffer is an actionable warning
+
+
+def _alert(level: str, key: str, text: str, *, channel: str = "", campaign: str = "",
+           href: str = "", action: str = "", at=None) -> dict:
+    """One alert row. `key` is stable for the same underlying problem so the client can de-dupe
+    across polls; `at` is an ISO string when the row has a real timestamp."""
+    return {"level": level, "key": key, "channel": channel, "campaign": campaign,
+            "text": text, "href": href, "action": action,
+            "at": at.isoformat() + "Z" if at is not None else None}
+
+
+def _infra_alerts(db, user) -> list[dict]:
+    """Faults that stop the whole factory, plus the two resource limits that quietly stop it later."""
+    health = _system_health(db, user)
+    out = []
+    if not health["redis"]:
+        out.append(_alert("red", "redis-down",
+                          "Redis is unreachable — nothing can be queued, rendered or published.",
+                          href="/operations?tab=worker", action="Operations"))
+    if not health["worker"]:
+        out.append(_alert("red", "worker-down",
+                          "No render worker is registered — renders and uploads are both paused.",
+                          href="/operations?tab=worker", action="Operations"))
+    elif health["worker_stalled"]:
+        out.append(_alert("red", "worker-stalled",
+                          "The render worker is wedged — it has stopped making progress and will "
+                          "restart itself.", href="/operations?tab=worker", action="Operations"))
+    disk = health["disk_pct"]
+    if disk is not None and disk >= settings.DISK_PRESSURE_PCT:
+        out.append(_alert("amber", "disk", f"Disk is {disk}% full — old renders are being swept "
+                                          "aggressively to make room.",
+                          href="/operations?tab=publish", action="Publish queue"))
+    budget, calls = health["ai_budget"], health["ai_calls"]
+    if budget and calls >= budget * _QUOTA_WARN_RATIO:
+        out.append(_alert("amber", "quota",
+                          f"AI calls today: {calls}/{budget}. Renders start failing when the daily "
+                          "quota runs out.", href="/settings", action="Settings"))
+    return out
+
+
+def _work_alerts(db, user) -> list[dict]:
+    """Things that need a human: failed episodes, a campaign the breaker stopped, review, proposals."""
+    campaigns = {c.id: c for c in db.scalars(
+        select(Campaign).where(Campaign.user_id == user.id)).all()}
+    channels = {c.id: c for c in db.scalars(
+        select(Channel).where(Channel.user_id == user.id)).all()}
+
+    def names(campaign):
+        channel = channels.get(campaign.channel_id) if campaign else None
+        return (channel.channel_name if channel else ""), (campaign.topic_name if campaign else "")
+
+    out = []
+    for task in db.scalars(
+            select(Task).where(Task.user_id == user.id, Task.status == TaskStatus.FAILED)
+            .order_by(Task.finished_at.desc().nullslast(), Task.id.desc())
+            .limit(_ALERT_FAILED_LIMIT)).all():
+        campaign = campaigns.get(task.campaign_id)
+        chan, camp = names(campaign)
+        # The stack trace's LAST line is the actual error; the rest is noise in a one-line alert.
+        # A task can legitimately carry no message (an old row, a cleared retry) — say so rather than
+        # rendering "Ep 7 failed — failed".
+        lines = (task.error_message or "").strip().splitlines()
+        reason = lines[-1][:120] if lines else "no error recorded"
+        out.append(_alert("red", f"task-failed:{task.id}", f"Ep {task.episode_number} failed — {reason}",
+                          channel=chan, campaign=camp, href=f"/episodes/{task.id}", action="Open",
+                          at=task.finished_at or task.updated_at))
+    for campaign in campaigns.values():
+        if campaign.status == CampaignStatus.failed:
+            chan, camp = names(campaign)
+            out.append(_alert("red", f"campaign-paused:{campaign.id}",
+                              "Campaign stopped after repeated failures — no new episodes will "
+                              "render until you start it again.",
+                              channel=chan, campaign=camp,
+                              href=f"/campaigns/{campaign.id}", action="Open"))
+    review = _task_counts(db, user.id)["awaiting_review"]
+    if review:
+        out.append(_alert("amber", "review",
+                          f"{review} episode{'s' if review != 1 else ''} waiting for your review.",
+                          href="/assets", action="Review"))
+    proposed = _autopilot_proposed_count(db, user.id)
+    if proposed:
+        out.append(_alert("amber", "autopilot",
+                          f"{proposed} autopilot proposal{'s' if proposed != 1 else ''} awaiting a "
+                          "decision.", href="/autopilot", action="Autopilot"))
+    return out
+
+
+def _schedule_alerts(db, user) -> list[dict]:
+    """A posting slot about to be missed because nothing is ready — the failure you want to hear
+    about BEFORE it happens, since a missed slot cannot be recovered after the fact."""
+    ready = dict(db.execute(
+        select(BufferPoolItem.campaign_id, func.count())
+        .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
+        .where(Campaign.user_id == user.id, BufferPoolItem.status == BufferStatus.ready)
+        .group_by(BufferPoolItem.campaign_id)).all())
+    channels = {c.id: c for c in db.scalars(
+        select(Channel).where(Channel.user_id == user.id)).all()}
+    out = []
+    for campaign in db.scalars(select(Campaign).where(
+            Campaign.user_id == user.id, Campaign.status == CampaignStatus.active)).all():
+        if ready.get(campaign.id):
+            continue  # something is ready to go out
+        nxt = _next_slot(campaign)
+        if nxt is None or nxt["in_hours"] > _SLOT_RISK_HOURS:
+            continue
+        channel = channels.get(campaign.channel_id)
+        out.append(_alert("amber", f"slot-risk:{campaign.id}",
+                          f"Next post is {nxt['when']} but nothing is rendered yet — that slot will "
+                          "be missed.", channel=channel.channel_name if channel else "",
+                          campaign=campaign.topic_name, href="/operations?tab=queue",
+                          action="Render queue"))
+    return out
+
+
+def _success_alerts(db, user) -> list[dict]:
+    """A little evidence the factory is working, so a quiet bell means "healthy", not "broken feed"."""
+    from datetime import timedelta
+
+    cutoff = datetime.utcnow() - timedelta(hours=24)
+    campaigns = {c.id: c for c in db.scalars(
+        select(Campaign).where(Campaign.user_id == user.id)).all()}
+    channels = {c.id: c for c in db.scalars(
+        select(Channel).where(Channel.user_id == user.id)).all()}
+    out = []
+    for task in db.scalars(
+            select(Task).where(Task.user_id == user.id, Task.status == TaskStatus.COMPLETED,
+                               Task.finished_at.isnot(None), Task.finished_at >= cutoff)
+            .order_by(Task.finished_at.desc()).limit(_ALERT_GREEN_LIMIT)).all():
+        campaign = campaigns.get(task.campaign_id)
+        channel = channels.get(campaign.channel_id) if campaign else None
+        out.append(_alert("green", f"published:{task.id}",
+                          f"Ep {task.episode_number} published.",
+                          channel=channel.channel_name if channel else "",
+                          campaign=campaign.topic_name if campaign else "",
+                          href=task.published_url or f"/episodes/{task.id}",
+                          action="View", at=task.finished_at))
+    return out
+
+
+def _alerts(db, user) -> list[dict]:
+    """The whole feed, most urgent first. Fail-soft per source: one broken query must not empty the
+    bell, because an empty bell reads as "everything is fine"."""
+    rows: list[dict] = []
+    for source in (_infra_alerts, _work_alerts, _schedule_alerts, _success_alerts):
+        try:
+            rows += source(db, user)
+        except Exception:  # noqa: BLE001
+            logger.warning("alert source %s failed", source.__name__, exc_info=True)
+    rows.sort(key=lambda a: (_ALERT_ORDER.get(a["level"], 9), a["at"] or "", a["key"]))
+    return rows
+
+
+@app.get("/api/alerts")
+def api_alerts(user: CurrentUser, db: DbDep):
+    """Feed for the header bell. `actionable` counts red+amber — the badge number, so it can never
+    disagree with the list length."""
+    rows = _alerts(db, user)
+    return {"alerts": rows,
+            "actionable": sum(1 for a in rows if a["level"] in ("red", "amber")),
+            "worst": ("red" if any(a["level"] == "red" for a in rows)
+                      else "amber" if any(a["level"] == "amber" for a in rows) else "")}

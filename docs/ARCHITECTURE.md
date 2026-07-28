@@ -1116,3 +1116,175 @@ slice of it on mobile — the exact "navigation overlap / bloat / lost context" 
 Collapsing to destinations-only, demoting lenses into their parent, and lighting the parent on child
 routes makes "where am I / how do I get back" answerable at a glance, and gives mobile a single,
 predictable menu instead of two competing ones.
+
+### ADR-057 — Wedged-render recovery is an in-process watchdog, not a healthcheck or a Docker socket
+**Decision:** the worker recovers itself. `set_progress` now change-stamps a companion Redis hash
+(`task:progress-ts`) — only a *moved* percentage refreshes the stamp — which makes "this render
+stopped progressing" measurable without touching the render. A daemon thread (`workers/watchdog.py`)
+checks that stamp every `WATCHDOG_INTERVAL_SECONDS` (60) and, when a render has not moved for
+`JOB_TIMEOUT_SECONDS + WORKER_STALL_GRACE_SECONDS` (45 min + 10 min), marks the Task FAILED with an
+actionable message, releases its progress entry and the global render lock, alerts the operator, then
+`os._exit(1)`s so compose's existing `restart: unless-stopped` recreates the container. The container
+healthcheck moves from `worker_alive()` to `worker_healthy()` (registered **and** not wedged) so the
+fault is *visible* in `docker compose ps`, and the web container gets a Redis restart flag
+(`worker:restart-requested`, TTL 5 min) that the same thread honours — an operator "Restart worker"
+click with **no Docker socket**. `run_worker.py` clears the lock, all progress entries and any stale
+restart flag at boot (at that instant nothing is rendering, so each is a crash artifact).
+**Why:** an episode sat at "Rendering 10%" for two hours. Three safety nets existed and none fired,
+because *all of them live inside the worker process that died*: RQ's own 45-min job timeout, the
+scheduler's 90-min stuck-task reaper, and the orphan-lock sweep. Worse, the healthcheck tested only
+whether a worker was *registered* — a worker hung mid-job still registers, so Docker never saw a
+problem. Three design constraints shaped the fix. (1) **Not the healthcheck alone**: a plain
+`restart:` policy reacts to a container *exiting*, not to `unhealthy` (only Swarm restarts on health),
+so a failing probe can report but never recover. (2) **Not the Docker socket**: mounting it into the
+internet-facing web container to run `docker restart` would trade a web vulnerability for host root —
+unacceptable against the "nothing privileged reachable through the tunnel" constraint. (3) **A thread
+works**: a render blocked in ffmpeg, a socket read or a subprocess wait holds the main thread with
+the GIL *released*, so a daemon thread keeps running and can end the process. The stall limit sits
+deliberately **behind** RQ's own timeout: under that line a slow-but-alive render is RQ's to fail
+cleanly, so only a render that outlived its own timeout — proof the loop stopped executing — is
+restarted. Because silent stages exist (image generation, concat, Auto-QC upload report no progress),
+a shorter limit would kill healthy renders. Remaining honest gap: a process frozen so hard that even
+its threads cannot run is reachable only by the healthcheck's `(unhealthy)` signal or SSH — no
+in-app button can reach code that cannot execute.
+
+### ADR-058 — An Operations page: recover the factory from the browser, never from the Docker socket
+**Decision:** add `/operations` (System group in the rail) — the factory floor, with URL-driven tabs.
+**Render queue** lists queued jobs in true RQ order joined to their episode, with `🔼 Next`
+(RQ `at_front`, reusing the same Job so `Task.rq_job_id` stays valid) and `✕ Cancel` (drops the job,
+marks the Task FAILED so the normal Retry puts it back — cancelling is a pause, not a delete).
+Because renders and uploads share the one queue, the `#` column is the *real* queue position and
+queued uploads are counted rather than hidden. **Worker** shows the single worker's verdict —
+`down | stalled | busy | idle`, where liveness comes from the same `worker_alive()` the dashboard
+health strip uses (one definition) — its live render with progress *and how long since that progress
+last moved*, the render-lock state, and two controls: `🩹 Recover stuck renders` (the hourly sweep on
+demand via `scheduler.recover_now`) and `🔄 Restart worker`. Tenancy is enforced through the Task row,
+so a job id is never a way around it. `_system_health` gained `worker_stalled` so a
+registered-but-wedged worker is its own signal on the rail badge and the health strip.
+**Why:** the operator asked "can I restart the worker from the website instead of SSH?" The literal
+answer — mount `/var/run/docker.sock` into the web container — is refused on purpose: that socket is
+host-root, and the web container is the one service exposed through the tunnel, so it would trade a
+web vulnerability for the whole box. But the *need* is real and satisfiable without it, because the
+web process already shares Redis and the DB with the worker: it can read exactly what the worker is
+doing, fix stranded rows and locks directly, and ask the worker to exit via a flag the worker's own
+watchdog honours (ADR-057). That covers both real failure modes — a stranded task/lock (the Recover
+button) and a wedged process (the restart flag, plus the automatic watchdog). The page is also the
+*explanation*: the two-hour "Rendering 10%" incident was hard to diagnose because progress past 10%
+lives only in Redis while the DB row freezes, so the UI showed a number that could not move. Showing
+"last moved N min ago" next to the percentage makes the difference between slow and wedged legible,
+and the three-layer explainer (RQ timeout → watchdog → housekeeping) tells the operator which one
+will fix it and when, instead of leaving them to guess whether to wait or intervene.
+
+### ADR-059 — Per-episode publish time: an override column, not a second scheduler
+**Decision:** `BufferPoolItem.publish_at` (nullable naive UTC, additive column upgrade) lets an
+operator move ONE rendered episode to an exact time without touching the campaign's posting slots.
+The scheduler checks it first: `due_override_item` publishes a ready episode whose `publish_at` has
+arrived, deliberately skipping the posting-day, slot-window and one-per-slot gates (the operator
+named a time and that time is now), and it works even for a campaign with no slots at all. Symmetric-
+ally, an episode with a FUTURE override is excluded from the normal slot pick, from missed-slot
+catch-up, and from the calendar's slot projection — otherwise the very logic the operator overrode
+would publish it early and silently undo the reschedule. `auto_publish` still wins: a review-first
+campaign publishes on approval only. The UI reads and writes the time in the CAMPAIGN's timezone —
+the same clock its posting slots already use — and stores naive UTC like every other timestamp.
+**Why:** the operator's need was "shift one video to dodge another channel's peak hour". The
+alternative (edit the campaign's slots) moves *every* future episode, which is the wrong blast
+radius, and a general per-episode scheduler would duplicate slot logic that already works. One
+nullable column expresses "this episode is special" precisely, needs no new table or job type, and
+degrades to today's behaviour when NULL. Making the override *outrank* the gates rather than
+compose with them is the key call: an operator who picks 23:30 on a Tuesday for a Mon-only campaign
+means it, and a schedule that silently refuses would be worse than no feature. The mirror-image
+exclusions matter as much as the publish path — without them the feature would appear to work while
+the slot path raced it. Timezone handling is the other trap: a `datetime-local` field carries no
+zone, so interpreting it as UTC would silently shift every reschedule by the operator's offset (7
+hours, in this deployment). Deferred: showing overridden episodes on the week-planner calendar —
+they now correctly vanish from the slot grid (they no longer compete for a slot), but drawing them at
+their own time needs a calendar cell that is not slot-aligned.
+
+### ADR-060 — The alert bell is derived state with a live count, not an event log with unread marks
+**Decision:** `GET /api/alerts` recomputes the whole cross-channel incident feed on every poll from the
+same helpers the pages render — four fail-soft sources (infrastructure, work needing a human, an
+imminent missed slot, recent successes) merged and sorted red → amber → green. There is **no**
+`Notification` table and **no** read/unread state: the bell's badge is the number of red+amber rows
+present *right now*, so fixing a problem clears it and the count can never disagree with the list it
+opens. Backlogs (review queue, autopilot proposals) are single counted rows; per-episode failures are
+listed individually but capped. The app bar that hosts the bell is now rendered at every width, with
+the sidebar sticking below it.
+**Why:** the operator asked for one bell that gathers failures across channels, colour-coded, in the
+form `[Channel] ➔ [Campaign] ➔ problem ➔ [action]`. A stored-event table was the obvious design and
+the wrong one here: events are written at one moment and then drift from the world, so a resolved
+failure keeps its row and a fixed campaign still shows red until someone marks it read — the operator
+would be maintaining an inbox instead of reading a status. Deriving from state costs a handful of
+indexed queries (a single-operator box, WAL reads never block the writer), gives a feed that is
+correct by construction, and needs no migration, retention policy or read-state sync. It also makes
+"acknowledge" meaningless in the right way: for an ops panel, a problem you cannot fix yet is exactly
+what you want to keep seeing. Telegram already provides the durable history a stored table would add.
+Two details earn their complexity: the last line of a stack trace is the actual error (the rest is
+noise in a one-line alert), and the imminent-missed-slot warning is the only *predictive* row — a slot
+that passes with an empty buffer cannot be recovered afterwards, so warning at publish time would be
+useless. Deviation from the plan: read-watermarking in localStorage was proposed and dropped, because
+with a live count there is nothing to mark.
+
+### ADR-061 — The breadcrumb lives in the app bar, filled by a template block
+**Decision:** every page's breadcrumb moved out of the content flow into `{% block crumbs %}`, which
+`base.html` renders inside the app bar — once, at every width. On the phone the brand yields to the
+trail (`:has()`), because the current location is worth the space and the product name is not, and the
+trail scrolls horizontally rather than truncating each crumb, so every parent stays readable and
+tappable. The campaign-hub trail lives in `_campaign_crumbs.html`, included by each of the three hub
+pages: a template block cannot be filled from inside an include, so the shared `_campaign_hub.html`
+partial could no longer own it, and one tiny include keeps the trail defined once.
+**Why:** the operator asked for a header with the breadcrumb on the left and the bell/theme/profile on
+the right. The trail was previously rendered per page at the top of the content, with a negative top
+margin to tuck it under the page heading — which meant its position was a per-page accident and it
+competed with the `<h1>`. Hoisting it into the app bar makes "where am I / go back one level" a fixed,
+predictable location on every page. Two alternatives were rejected: passing trails as route context
+(it would move breadcrumb-building into Python for eight routes and duplicate the hub trail across
+three of them) and rendering the block twice via `self.crumbs()` so the phone could keep an in-content
+copy (double-rendering a block is a subtle trap once a block contains `{% set %}`, and the phone
+solution turned out to be simpler — drop the brand instead). Verified across fifteen pages at 1280px
+and 375px that the trail appears in the app bar exactly where expected, never in the content, and that
+a long Vietnamese campaign name never pushes the bell off screen.
+
+### ADR-062 — Macro analytics: factory-wide vitals, and host readings from the kernel not psutil
+**Decision:** the dashboard gains a "Factory vitals" card answering the four questions the
+per-campaign pages structurally cannot: how much reach the whole factory has produced (cumulative
+views, reported **with** the count of measured episodes), whether today's renders are actually
+succeeding (failure rate over renders that *finished* today, plus the machine minutes they cost from
+`render_json.render_seconds`), and whether the box itself is saturated (CPU + memory). Host numbers
+come from a new stdlib-only `core/host.py`: CPU as a **load average per core** via `os.getloadavg()`
+and `os.sched_getaffinity(0)`, memory as Total−**Available** from `/proc/meminfo`. Every reader fails
+soft to `None`. Disk is *not* duplicated here — `main._system_health` remains its one definition.
+**Why:** three judgement calls carry this. (1) **No psutil.** It is a compiled dependency added for
+two numbers the kernel already publishes on the single Linux box this deploys to; the repo's YAGNI
+rule says a dependency needs a roadmap task justifying it, and "read two files" does not. (2) **Load
+average, not instantaneous CPU percent.** A percent needs two samples and retained state, and would
+mostly report whatever ffmpeg was doing in that 100ms window. The real question on a box whose job is
+one `nice -19` render is "is work queueing up?", which is exactly what load-per-core measures — and it
+is capped at 100% for the gauge because how far past saturated stops mattering to the operator.
+(3) **Views must be qualified.** YouTube Analytics lags about two days, so a bare "31,832 views" reads
+as the whole catalogue when it may cover three of thirty episodes; showing "across 3 measured episodes
+of 30 published" makes the number honest instead of flattering. Memory deliberately excludes
+reclaimable page cache: Total−Free would show this 24 GB box at ~95% while it is perfectly healthy,
+training the operator to ignore the one number that should mean something.
+
+### ADR-063 — Channel growth is a daily snapshot table, because per-episode stats cannot answer it
+**Decision:** a new `ChannelSnapshot` table stores one row per channel per **local** day — subscribers,
+views, video count — sampled by `collect_channel_snapshots` riding the existing hourly stats pass. The
+day row is checked before fetching, so extra ticks cost a cheap SELECT and no API quota, and
+`unique(channel, day)` is the backstop. `channel_growth` then serves the correlation the operator
+asked for: per-day subscriber/view deltas beside how many episodes that channel published that day,
+rendered on each Channels card as CSS bars (episodes) under an inline-SVG polyline (subscribers
+gained). A hidden subscriber count is `None`, never `0`; a first sample yields `None` deltas, never `0`.
+**Why:** the request was "videos published vs real View/Sub growth from the API", and the existing
+per-episode `Task.stats_json` structurally cannot supply it. A channel's totals are *not* the sum of
+the episodes this factory made — older videos, Shorts-feed spillover and content published outside the
+tool all move them — so summing episode views would answer a different question and quietly
+under-report growth. Platform APIs also only expose the **current** total, never history, which forces
+the design: if we don't sample daily, the past is simply unavailable, and no later feature can
+reconstruct it. One `channels.list` call per channel per day is negligible against the Data API quota
+that per-episode collection already spends. Two "unknown vs zero" distinctions are load-bearing and
+easy to get wrong: a channel that hides its subscriber count would otherwise render as "0 subscribers,
+no growth" forever, and the first day of collection would draw a flat line at zero implying publishing
+did nothing — so both report `None` and the UI says the curve appears tomorrow. Facebook reports
+followers but no lifetime page-view total comparable to YouTube's, so `views` stays `None` rather than
+substituting a similar-sounding metric. The chart is hand-rolled from numeric server values (no chart
+library, XSS-safe by construction), consistent with the no-CDN rule.
