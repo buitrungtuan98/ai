@@ -1427,3 +1427,39 @@ knew the answer and did not say it. Diagnosis is a fixed pattern table rather th
 it must work when the AI is exactly what is broken, and it returns nothing rather than guessing: a
 confident wrong cause is worse than a stack trace. The verb on the confirm button matters because
 "Confirm" was the word for both delete-a-campaign and publish-now, which trains the reflex to click it.
+
+### ADR-069 — Slow-vendor healing: laddered timeouts in a budget, checkpoint resume, autopilot continue
+**Decision:** three layers, from the reported failure inward (8 scene images × 120s; the vendor
+answered 5, then slowed past 120s on the 6th; the render failed and lost everything).
+1. **Laddered timeout inside a hard budget.** An image fetch's retry waits DOUBLE the previous
+   attempt (base `IMAGE_TIMEOUT_SECONDS`, per-user override on Settings, cap 600s) with a
+   throttle-friendly pause between attempts — because a vendor that slows down after N requests needs
+   a longer next attempt, not the identical 120s that just failed. All of one episode's image fetches
+   share a single `IMAGE_WAIT_BUDGET_SECONDS` deadline; when it is spent the render fails FAST with a
+   message that classifies as transient. Raising timeouts without the budget is a trap: worst-case
+   waiting would exceed the render job's own 45-minute RQ timeout, and a SIGKILL mid-encode is the
+   messiest failure this box has.
+2. **Checkpoint resume.** `RenderWorkspace` keeps the workspace when the render FAILS (success still
+   cleans); scene stills are written atomically and named by a hash of their exact prompt
+   (`studio.scene_cache_key`), so a rerun reuses precisely the drawings that are still correct and
+   never a stale one; the generated script is persisted on the task the moment it exists and reused
+   by Retry — so retrying a mid-episode failure redraws only the missing scenes and pays for no
+   second script. The success path's `render_json` overwrite consumes the checkpoint; reject and
+   Discard-&-re-render drop it explicitly (`drop_script_checkpoint`), because those actions exist to
+   get DIFFERENT content and must reroll. Kept workspaces are not leaks: `sweep_orphans` collects
+   them by age exactly as it collects crash survivors — the scheduler just skips tasks that failed
+   within 24h (`resume_checkpoint_ids`), since the autopilot's cadence (hours) is slower than the
+   orphan age (60 min). Under disk pressure the checkpoints are sacrificed: survival first.
+3. **The autopilot is the CONTINUE.** `autopilot_retry_channel` already re-queued failures; it now
+   shares the failure classification with the episode page and the bell (`core/failure.py`,
+   `is_transient`) so it never burns its 2-attempt cap on what a retry cannot fix — a missing key, a
+   spent quota, a deterministic safety block — and it clears the dead attempt's ghost progress. With
+   the checkpoint, its retry IS a resume.
+
+**Why sequential, not parallel:** scene N's still is drawn with scene N−1's still as a reference
+(temporal continuity), so the 8 fetches cannot overlap; the fix had to make waiting smarter and
+failure cheaper, not fetch harder. **Why a per-prompt hash in the filename:** the checkpoint's one
+real danger is serving a stale image to a NEW script — hashing the exact prompt makes that
+structurally impossible instead of procedurally avoided. **Why `core/failure.py`:** the scheduler
+cannot import `main` (circular), and a second keyword list is how the app got four attention counts —
+one table, three readers.

@@ -42,7 +42,7 @@ from auth.dependencies import (
     get_owned_campaign,
     get_owned_channel,
 )
-from core import autopilot, retention, timezones
+from core import autopilot, failure, retention, timezones
 from core.config import settings
 from core.tts import VOICE_CHOICES
 from database.db_session import get_db, init_db
@@ -1801,11 +1801,16 @@ def settings_page(request: Request, user: CurrentUser):
 def save_settings(user: CurrentUser, db: DbDep, language: str = Form(""),
                   video_format: str = Form(""), publish_mode: str = Form(""),
                   posting_slots: str = Form(""), total_episodes: str = Form(""),
-                  ai_daily_budget: str = Form("")):
+                  ai_daily_budget: str = Form(""), image_timeout_s: str = Form("")):
     """Save the whole preferences form (a blank field clears that default — the form always submits
     every field). Values are whitelisted/validated exactly like the campaign form does."""
 
     s: dict = {}
+    # Per-attempt image-vendor wait for Studio renders (ADR-069). Clamped: below 30s even a healthy
+    # vendor gets cut off mid-draw; above 600s a single scene could eat the whole per-episode image
+    # budget in one attempt.
+    if image_timeout_s.strip().isdigit():
+        s["image_timeout_s"] = min(600, max(30, int(image_timeout_s)))
     if language in _SETTINGS_LANGS:
         s["language"] = language
     if video_format in ("short", "long"):
@@ -2055,6 +2060,9 @@ def rerender_asset(db: DbDep, item=Depends(get_owned_buffer_item), return_to: st
     task.error_message = None
     task.progress_pct = 0
     task.retry_count += 1
+    # Discard & re-render is a REROLL: drop the resume checkpoint so the render writes a fresh
+    # script (a plain Retry keeps it and rebuilds the same episode — ADR-069).
+    video_worker.drop_script_checkpoint(task)
     db.commit()
     task.rq_job_id = task_queue.enqueue_render(task.id)
     db.commit()
@@ -2303,55 +2311,10 @@ def episode_view(request: Request, user: CurrentUser, db: DbDep, task_id: int,
     )
 
 
-# The failure modes this box actually produces, each matched on words that appear in the recorded
-# error and each ending somewhere the operator can act (ADR-068). Order matters: the first match wins.
-_FAILURE_PATTERNS: tuple[tuple[tuple[str, ...], str, str, str, str], ...] = (
-    (("api key", "api_key", "invalid key", "unauthorized", "401", "403 forbidden"),
-     "A provider rejected the key",
-     "The AI or footage provider refused the credentials this render used. Check the key is present "
-     "and still valid, then retry.", "/credentials", "Check credentials"),
-    (("quota", "429", "rate limit", "resource_exhausted", "exceeded"),
-     "A free-tier quota ran out",
-     "The daily or per-minute allowance for the AI model is spent. It resets on its own — retry "
-     "later, or put a bigger-quota model first in the model chain.", "/credentials", "Model chain"),
-    (("no space", "disk", "enospc"),
-     "The box ran out of disk",
-     "Rendering needs working space. Old renders are cleaned automatically, but a stuck job can fill "
-     "the disk — check the disk reading and free space, then retry.", "/operations", "Operations"),
-    (("ffmpeg", "codec", "invalid data", "moov atom"),
-     "ffmpeg could not build the video",
-     "One of the source clips or the audio track was unusable. A retry usually picks different "
-     "footage and succeeds; if it repeats, try a different visual source on the campaign.",
-     "", ""),
-    (("timed out", "timeout", "connection", "network", "temporarily unavailable", "502", "503"),
-     "A provider was unreachable",
-     "This is almost always transient — the render reached out and got nothing back. Retry it.",
-     "", ""),
-    (("stalled", "wedged", "worker"),
-     "The worker stopped making progress",
-     "The render was abandoned because it stopped reporting progress. The worker recovers itself; "
-     "check it is running, then retry this episode.", "/operations", "Worker status"),
-    (("safety", "blocked", "policy", "profanity"),
-     "The safety filter blocked the content",
-     "The generated script tripped the brand-safety filter. Retrying re-writes it; if it keeps "
-     "happening, soften the campaign's topic or persona.", "", ""),
-)
-
-
-def _diagnose_failure(message: str | None) -> dict | None:
-    """Turn a recorded render error into a cause, a fix and somewhere to go (ADR-068).
-
-    A failed episode used to show the raw exception text and a single Retry button: true, unreadable,
-    and a dead end when retrying was not the answer (a spent quota, a missing key, a full disk).
-    Returns None when nothing matches — better no guess than a confident wrong one, and the raw
-    message is always shown either way."""
-    if not message:
-        return None
-    low = message.lower()
-    for words, cause, fix, href, action in _FAILURE_PATTERNS:
-        if any(w in low for w in words):
-            return {"cause": cause, "fix": fix, "href": href, "action": action}
-    return None
+# One failure classification for the whole app (ADR-069): the same table also tells the autopilot
+# which failures a retry can actually fix, so it lives in core/failure.py — these are aliases.
+_FAILURE_PATTERNS = failure.PATTERNS
+_diagnose_failure = failure.diagnose
 
 
 # ── Performance & learning (self-improvement transparency) ──────────────────

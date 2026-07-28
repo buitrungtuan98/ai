@@ -26,6 +26,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 
+from core import failure
 from core.cleanup import sweep_orphans
 from core.config import settings
 from database.db_session import SessionLocal
@@ -477,6 +478,20 @@ def hourly_stats_pass(db, now: datetime | None = None) -> dict:
 # ── Autopilot: the "hands" — AI review / auto-reject / retry / catch-up publish (ADR-044) ──
 AUTOPILOT_MAX_RETRIES = 2  # auto-retry a genuine render failure at most this many times
 
+# How long a FAILED render's workspace survives as a resume checkpoint (ADR-069). Long enough for
+# the slowest autopilot cadence (24h) and for an operator who retries the next morning; bounded so
+# an episode nobody ever retries cannot hold its stills forever.
+RESUME_KEEP_HOURS = 24
+
+
+def resume_checkpoint_ids(db) -> set[str]:
+    """Workspace names (task ids) the orphan sweep must leave alone: tasks that failed recently
+    enough that a retry — autopilot or human — would still resume from them."""
+    cutoff = datetime.utcnow() - timedelta(hours=RESUME_KEEP_HOURS)
+    return {str(tid) for (tid,) in db.execute(
+        select(Task.id).where(Task.status == TaskStatus.FAILED,
+                              Task.updated_at >= cutoff)).all()}
+
 
 AUTOPILOT_LOG_KINDS = ("approved", "rejected", "escalated", "recommended", "retried", "caught_up")
 AUTOPILOT_LOG_RETENTION_DAYS = 90  # prune the operational decision log beyond this so it never bloats
@@ -556,9 +571,12 @@ def autopilot_review_channel(db, channel, mode: str, approve_min: int, reject_ma
 
 
 def autopilot_retry_channel(db, channel) -> int:
-    """Re-queue genuinely-failed renders (both modes — re-rendering never publishes). Skips operator
-    rejects (their decision stands), quota exhaustion (wait for the reset — don't burn it), and tasks
-    already retried to the cap."""
+    """Re-queue genuinely-failed renders (both modes — re-rendering never publishes), which is how an
+    interrupted render CONTINUES on its own (ADR-069): the retry resumes from the kept checkpoint —
+    same persisted script, scenes already drawn are reused — so a mid-episode vendor timeout costs
+    only the missing scenes, not the whole render. Skips operator rejects (their decision stands),
+    failures a retry cannot fix (missing key, spent quota, safety block — one classification with the
+    episode page and the bell: `core.failure`), and tasks already retried to the cap."""
     retried = 0
     # CANCELLED is deliberately absent: an operator who dropped an episode from the queue must not
     # find it back a few minutes later (ADR-064). Only genuine failures are auto-retried.
@@ -570,13 +588,14 @@ def autopilot_retry_channel(db, channel) -> int:
             continue  # a human rejected this — don't silently re-render it
         if t.retry_count >= AUTOPILOT_MAX_RETRIES:
             continue
-        if any(k in msg for k in ("429", "quota", "exhaust", "rate limit")):
-            continue  # quota is spent; the reset is what fixes it, not another attempt now
+        if not failure.is_transient(msg):
+            continue  # a retry can't mint a key, refill a quota, or unblock deterministic content
         t.status = TaskStatus.PENDING_QUEUE
         t.error_message = None
         t.progress_pct = 0
         t.retry_count += 1
         db.commit()
+        task_queue.clear_progress(t.id)  # drop any ghost % from the interrupted attempt (F1)
         t.rq_job_id = task_queue.enqueue_render(t.id)
         db.commit()
         retried += 1
@@ -1061,9 +1080,13 @@ def periodic_tick(db=None, now: datetime | None = None) -> dict:
         summary["reaped"] = reap_stuck_tasks(db)
         summary["lock_cleared"] = clear_orphaned_render_lock(db)  # unwedge a crashed-worker lock (F3)
         # Disk hygiene. Never sweep the workspace of a render in flight (its dir mtime goes stale
-        # during a long single-scene encode), even under disk pressure.
+        # during a long single-scene encode). Recently-FAILED tasks keep theirs too (ADR-069):
+        # that workspace is the resume checkpoint, and the autopilot's retry cadence (hours) is
+        # slower than the orphan age (minutes) — sweeping it would quietly turn every resume back
+        # into a from-scratch re-render. Under real disk pressure the checkpoints are sacrificed:
+        # a machine that cannot write at all is strictly worse than a slower retry.
         active = task_queue.active_render_task_ids()
-        summary["swept"] = sweep_orphans(skip=active)
+        summary["swept"] = sweep_orphans(skip=active | resume_checkpoint_ids(db))
         if disk_usage_pct(settings.MEDIA_ROOT) >= settings.DISK_PRESSURE_PCT:
             logger.warning("Disk pressure high on %s — sweeping aggressively", settings.MEDIA_ROOT)
             summary["swept"] += sweep_orphans(max_age_minutes=5, skip=active)

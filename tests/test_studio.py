@@ -61,7 +61,7 @@ def test_character_sheet_caches_and_calls_generator(tmp_path):
 
     calls = []
 
-    def fake_gen(*, prompt, api_key, out_path, model=None, reference_paths=None, reference_url=None):
+    def fake_gen(*, prompt, api_key, out_path, model=None, reference_paths=None, reference_url=None, **_kw):
         calls.append(prompt)
         open(out_path, "w").write("PNG")
         return out_path
@@ -79,7 +79,7 @@ def test_scene_visual_forwards_references(tmp_path):
 
     seen = {}
 
-    def fake_gen(*, prompt, api_key, out_path, model=None, reference_paths=None, reference_url=None):
+    def fake_gen(*, prompt, api_key, out_path, model=None, reference_paths=None, reference_url=None, **_kw):
         seen["prompt"] = prompt
         seen["refs"] = reference_paths
         seen["model"] = model
@@ -115,7 +115,7 @@ def test_generate_image_writes_and_falls_back_on_quota(tmp_path, monkeypatch):
     monkeypatch.setattr(ai_engine, "_BACKOFF_BASE_SECONDS", 0)
     seen_models = []
 
-    def fake_call(*, api_key, model, prompt, reference_paths, out_path):
+    def fake_call(*, api_key, model, prompt, reference_paths, out_path, **_kw):
         seen_models.append(model)
         if model == "img-a":
             raise RuntimeError("429 ... quota_id ...PerDay... exhausted")
@@ -211,7 +211,7 @@ def test_produce_studio_chains_references_and_skips_pexels(tmp_path, monkeypatch
 
     gen_calls = []
 
-    def fake_gen(*, prompt, api_key, out_path, model=None, reference_paths=None, reference_url=None):
+    def fake_gen(*, prompt, api_key, out_path, model=None, reference_paths=None, reference_url=None, **_kw):
         gen_calls.append({"out": out_path, "refs": reference_paths})
         open(out_path, "w").write("PNG")
         return out_path
@@ -309,7 +309,7 @@ def test_generate_image_dispatches_to_pollinations(tmp_path, monkeypatch):
 
     seen = {}
 
-    def fake_poll(*, model, prompt, out_path, token, width, height, seed, reference_url=None):
+    def fake_poll(*, model, prompt, out_path, token, width, height, seed, reference_url=None, **_kw):
         seen.update(model=model, token=token, width=width, height=height)
         open(out_path, "wb").write(b"P")
         return out_path
@@ -331,7 +331,7 @@ def test_generate_image_falls_back_gemini_to_pollinations(tmp_path, monkeypatch)
     def dead_gemini(**k):
         raise RuntimeError("500 transient server error")   # → GeminiError after retries
 
-    def fake_poll(*, model, prompt, out_path, token, width, height, seed, reference_url=None):
+    def fake_poll(*, model, prompt, out_path, token, width, height, seed, reference_url=None, **_kw):
         open(out_path, "wb").write(b"P")
         return out_path
 
@@ -346,7 +346,7 @@ def test_generate_image_falls_back_gemini_to_pollinations(tmp_path, monkeypatch)
 def test_generate_image_pollinations_primary_skips_gemini(tmp_path, monkeypatch):
     from core import ai_engine
 
-    def fake_poll(*, model, prompt, out_path, token, width, height, seed, reference_url=None):
+    def fake_poll(*, model, prompt, out_path, token, width, height, seed, reference_url=None, **_kw):
         open(out_path, "wb").write(b"P")
         return out_path
 
@@ -457,7 +457,7 @@ def test_generate_image_safety_net_flux_when_chain_dies(tmp_path, monkeypatch):
     monkeypatch.setattr(ai_engine, "_BACKOFF_BASE_SECONDS", 0)
     seen = []
 
-    def flaky_call(*, model, prompt, out_path, token, width, height, seed, reference_url=None):
+    def flaky_call(*, model, prompt, out_path, token, width, height, seed, reference_url=None, **_kw):
         seen.append(model)
         if model == "kontext":
             raise ImageGenError("500 kontext")   # kontext keeps 500-ing (e.g. blocked image fetch)
@@ -496,7 +496,7 @@ def test_kontext_without_reference_degrades_to_flux(tmp_path, monkeypatch):
 
     seen: dict = {}
 
-    def fake_call(*, model, prompt, out_path, token, width, height, seed, reference_url=None):
+    def fake_call(*, model, prompt, out_path, token, width, height, seed, reference_url=None, **_kw):
         seen["model"] = model
         open(out_path, "wb").write(b"P")
         return out_path
@@ -512,7 +512,7 @@ def test_generate_image_kontext_forwards_reference_url(tmp_path, monkeypatch):
 
     seen: dict = {}
 
-    def fake_poll(*, model, prompt, out_path, token, width, height, seed, reference_url=None):
+    def fake_poll(*, model, prompt, out_path, token, width, height, seed, reference_url=None, **_kw):
         seen.update(model=model, ref_url=reference_url)
         open(out_path, "wb").write(b"P")
         return out_path
@@ -600,7 +600,7 @@ def test_produce_studio_uses_uploaded_ref_image(tmp_path, monkeypatch):
     ref.write_bytes(b"a-real-uploaded-image")
     gen_refs, gen_urls = [], []
 
-    def fake_gen(*, prompt, api_key, out_path, model=None, reference_paths=None, reference_url=None):
+    def fake_gen(*, prompt, api_key, out_path, model=None, reference_paths=None, reference_url=None, **_kw):
         gen_refs.append(reference_paths)
         gen_urls.append(reference_url)
         open(out_path, "w").write("P")

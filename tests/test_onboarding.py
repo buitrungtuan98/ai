@@ -239,10 +239,11 @@ def test_each_diagnosis_ends_somewhere_the_operator_can_act():
     """A cause with no fix is still a dead end."""
     import main
 
-    for words, cause, fix, href, action in main._FAILURE_PATTERNS:
+    for words, cause, fix, href, action, transient in main._FAILURE_PATTERNS:
         assert words and cause and fix
         assert bool(href) == bool(action)           # a link needs a label and vice versa
         assert not href or href.startswith("/")     # never off-site
+        assert isinstance(transient, bool)          # the autopilot reads this — no maybes
 
 
 def test_an_unrecognised_error_is_not_given_a_confident_wrong_cause():

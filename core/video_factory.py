@@ -503,6 +503,7 @@ def produce(
     image_model: str | None = None,
     studio_sheet_dir: str | None = None,
     gen_image=None,
+    image_timeout_s: int | None = None,
     title_overlay: bool = False,
     content_style: str = "story",
     signature: str | None = None,
@@ -510,8 +511,12 @@ def produce(
     on_progress=None,
 ) -> RenderResult:
     """Render one episode from a validated script. Output (master.mp4 + thumb.jpg) is written to
-    `output_dir` (outside the workspace) so it survives cleanup; all temp media is auto-removed."""
+    `output_dir` (outside the workspace) so it survives cleanup; temp media is removed on success —
+    a FAILED render keeps its workspace as a checkpoint so a retry resumes from the scenes already
+    drawn instead of starting over (ADR-069). `image_timeout_s` is the per-attempt image-vendor wait
+    (Settings knob); the per-episode total is capped by `IMAGE_WAIT_BUDGET_SECONDS`."""
     import os
+    import time
 
     profile = resolve_profile(video_format)
     branding = branding or Branding()
@@ -567,6 +572,13 @@ def produce(
         # is passed as a reference into the next so consecutive frames stay temporally continuous.
         studio_sheet_path: str | None = None
         studio_prev_still: str | None = None
+        # One clock for ALL of this episode's image fetching (ADR-069). Without a budget, 8 scenes ×
+        # provider-chain × laddered timeouts could outgrow the render job's own 45-min cap and get
+        # SIGKILLed mid-encode — the messiest possible failure. Spending the budget fails CLEANLY,
+        # and the kept workspace turns the retry into a resume.
+        image_deadline = (time.monotonic() + settings.IMAGE_WAIT_BUDGET_SECONDS) if studio_mode \
+            else None
+        stills_reused = 0
         for si, scene in enumerate(script.scenes):
             # Safety filter narration before TTS (policy lives in safety_filter). If the filter
             # emptied a non-empty narration (whole scene was blacklisted), do NOT fall back to the
@@ -625,20 +637,36 @@ def produce(
                             studio_sheet_path = ws.path("character_sheet.png")
                         studio.character_sheet(
                             studio_character, api_key=image_api_key, out_path=studio_sheet_path,
-                            style_override=visual_style, model=image_model, gen_image=gen_image)
-                still_path = ws.path(f"scene_{si}_still.png")
+                            style_override=visual_style, model=image_model, gen_image=gen_image,
+                            timeout_s=image_timeout_s, deadline=image_deadline)
+                # Checkpoint resume (ADR-069): the still is named after its prompt hash, so a still
+                # left by an interrupted earlier attempt is reused ONLY when it would be drawn from
+                # the identical prompt — a new script or style hashes differently and redraws.
+                subject = ", ".join(scene.pexels_keywords)
+                key = studio.scene_cache_key(studio_character, subject, mood=clean,
+                                             style_override=visual_style)
+                still_path = ws.path(f"scene_{si}_still_{key}.png")
                 refs = ([studio_sheet_path] if studio_sheet_path else []) \
                     + ([studio_prev_still] if studio_prev_still else [])
-                studio.scene_visual(
-                    character=studio_character, subject=", ".join(scene.pexels_keywords),
-                    mood=clean, api_key=image_api_key, out_path=still_path, reference_paths=refs,
-                    reference_url=(studio_character.get("ref_url") if studio_character else None),
-                    style_override=visual_style, model=image_model, gen_image=gen_image)
+                if os.path.exists(still_path) and os.path.getsize(still_path) > 0:
+                    stills_reused += 1
+                    logger.info("Scene %d: reusing checkpointed still %s", si,
+                                os.path.basename(still_path))
+                else:
+                    studio.scene_visual(
+                        character=studio_character, subject=subject,
+                        mood=clean, api_key=image_api_key, out_path=still_path, reference_paths=refs,
+                        reference_url=(studio_character.get("ref_url") if studio_character else None),
+                        style_override=visual_style, model=image_model, gen_image=gen_image,
+                        timeout_s=image_timeout_s, deadline=image_deadline)
                 studio_prev_still = still_path
                 studio_clip = still_to_clip(still_path, ws.path(f"scene_{si}_studio.mp4"), d_i, profile)
                 plans.append({"clean": clean, "audio": audio_path, "timings": timings,
                               "d": d_i, "studio_clip": studio_clip})
                 report("scenes", (si + 1) / n_scenes * 30)
+                if si == n_scenes - 1 and stills_reused:
+                    logger.info("Studio resume: reused %d of %d checkpointed still(s)",
+                                stills_reused, n_scenes)
                 continue
 
             # Footage to cover d_i (with keyword fallback chain). Orientation matches the format
