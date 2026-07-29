@@ -137,17 +137,19 @@ def scene_visual(
     mood: str | None = None, style_override: str | None = None,
     reference_paths: list[str] | None = None, reference_url: str | None = None,
     model: str | None = None, gen_image: GenImage | None = None,
-    timeout_s: float | None = None, deadline: float | None = None,
+    timeout_s: float | None = None, deadline: float | None = None, seed_salt: int = 0,
 ) -> str:
     """Draw one scene keyframe starring `character`, conditioned on `reference_paths` (the character
     sheet first, then the previous scene's frame for temporal continuity — used by the Gemini leg) and
     `reference_url` (a public image URL used by Pollinations image-editing models like `kontext`, so
     the free provider can honour an uploaded reference too). `timeout_s`/`deadline` are the
-    slow-vendor controls (ADR-069), forwarded to the generator. Returns the image path."""
+    slow-vendor controls (ADR-069); `seed_salt` asks the free provider for a DIFFERENT draw of the
+    same scene, which is what makes an Auto-QC re-render mean something (ADR-070). Returns the
+    image path."""
     gen = gen_image or ai_engine.generate_image
     return gen(
         prompt=scene_prompt(character, subject, mood=mood, style_override=style_override),
         api_key=api_key, out_path=out_path,
         reference_paths=reference_paths or [], reference_url=reference_url, model=model,
-        timeout_s=timeout_s, deadline=deadline,
+        timeout_s=timeout_s, deadline=deadline, seed_salt=seed_salt,
     )

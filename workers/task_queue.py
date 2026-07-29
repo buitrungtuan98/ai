@@ -56,11 +56,15 @@ def enqueue_render(task_id: int) -> str:
 
 def enqueue_publish(buffer_item_id: int) -> str:
     """Enqueue a publish (upload) job for an approved buffer item. Same queue/worker, so uploads
-    stay sequential with renders (KISS on one box); a short upload never blocks for long."""
+    stay sequential with renders (KISS on one box); a short upload never blocks for long.
+
+    An hour, not 30 minutes: a 15-minute long-form master on a slow uplink can exceed half an hour,
+    and being killed mid-upload is the one failure this box handles worst (the platform may already
+    hold a partial video)."""
     job = render_queue.enqueue(
         "workers.video_worker.publish_task",
         buffer_item_id,
-        job_timeout=1800,
+        job_timeout=3600,
         result_ttl=3600,
     )
     return job.id

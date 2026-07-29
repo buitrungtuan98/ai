@@ -463,14 +463,13 @@
     function open() {
       backdrop.hidden = false;
       input.value = "";
-      sel = -1;
       // Opening with an empty box lists where you can go, so the palette teaches the app instead of
-      // showing "Type to search…" and leaving the operator to guess what it indexes.
+      // showing "Type to search…" and leaving the operator to guess what it indexes. The first row is
+      // preselected exactly as it is after typing — leaving it unselected made ⌘K then Enter do
+      // nothing while ⌘K, one letter, Enter worked.
       render(CMD_PAGES.map(function (p) {
         return { type: "Go to", label: p.label, sub: p.sub, href: p.href };
       }));
-      sel = -1;
-      highlight();
       input.focus();
     }
     function close() { backdrop.hidden = true; }

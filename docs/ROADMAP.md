@@ -1392,6 +1392,31 @@ The reported failure: 8 scene images at 120s each; the vendor answered 5, slowed
   sweeper leaves recent checkpoints alone (24h) so an hours-later autopilot pass still finds them.
 - Verified: 439 tests (17 new), ruff clean, docs guard green.
 
+## R8 — Post-R7 audit: five almost-right mechanisms `DONE`
+Audited the R7 result against what the UI actually promises; every finding passed the suite already
+(gaps in coverage, not regressions) — ADR-070:
+- **"Restart worker" no longer leaves a phantom render.** The watchdog did full bookkeeping on the
+  stall path but the operator-restart path just exited, so the episode read "Rendering 47%" — with
+  nothing working on it — until the reaper noticed up to 2 hours later. A redeploy whose 300s grace
+  expired mid-encode did the same. Boot recovery now fails abandoned renders the moment the worker
+  comes back, which is also what makes the button's confirm text true.
+- **The autopilot stopped fighting the breaker and the lifecycle.** Its retry was joined on the
+  channel, not the campaign: it re-queued the very episodes the consecutive-failure breaker had
+  stopped a campaign for, and could re-render — and on auto-publish actually upload — leftover
+  failures of a campaign the operator had already completed.
+- **A wedged worker is no longer reported as an unreachable provider.** The watchdog's own message
+  contains "timeout" as well as "stalled", and the network class matched first: same retry verdict,
+  wrong explanation, and the explanation is what the operator acts on.
+- **Auto-QC's re-render actually re-draws.** Pollinations seeds come from the prompt, so the one
+  re-render rebuilt the rejected video pixel-for-pixel and re-judged it — a whole episode of image
+  calls plus a vision call for the identical verdict. Attempt 2 now salts the seed; attempt 1 stays
+  deterministic so a resume can still reuse its checkpointed stills.
+- Uploads get an hour instead of 30 minutes (a long-form master on a slow uplink can exceed it, and
+  being killed mid-upload is the failure this box handles worst), and ⌘K preselects its first row on
+  open — ⌘K then Enter did nothing while ⌘K, one letter, Enter worked.
+- Verified: 457 tests (18 new), ruff clean, docs guard green; ⌘K-then-Enter and the restart confirm
+  checked in a real browser at 375px and 1280px.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

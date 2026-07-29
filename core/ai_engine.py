@@ -1104,6 +1104,7 @@ def generate_image(
     reference_url: str | None = None,
     pollinations_token: str | None = None, width: int = 1080, height: int = 1920,
     max_retries: int = 2, timeout_s: float | None = None, deadline: float | None = None,
+    seed_salt: int = 0,
 ) -> str:
     """Draw one image, writing it to `out_path` and returning the path.
 
@@ -1135,7 +1136,7 @@ def generate_image(
                     prompt=prompt, model=sub or "flux", out_path=out_path,
                     token=pollinations_token, width=width, height=height,
                     reference_url=reference_url, max_retries=max_retries,
-                    timeout_s=timeout_s, deadline=deadline,
+                    timeout_s=timeout_s, deadline=deadline, seed_salt=seed_salt,
                 )
             return _generate_image_single(
                 prompt=prompt, api_key=api_key, model=entry, out_path=out_path,
@@ -1167,20 +1168,26 @@ def generate_image(
             return _generate_pollinations_single(
                 prompt=prompt, model="flux", out_path=out_path, token=pollinations_token,
                 width=width, height=height, max_retries=max_retries,
-                timeout_s=timeout_s, deadline=deadline,
+                timeout_s=timeout_s, deadline=deadline, seed_salt=seed_salt,
             )
         except (GeminiError, ImageGenError) as exc:
             last = exc
     raise last if last is not None else GeminiError("no image provider in the chain succeeded")
 
 
-def _pollinations_seed(prompt: str) -> int:
+def _pollinations_seed(prompt: str, salt: int = 0) -> int:
     """A deterministic seed from the prompt: a re-render of the SAME scene reproduces its image, while
     different scenes (different prompts) vary — character identity comes from the description, not the
-    seed, so scenes differ but the described character stays recognizable."""
+    seed, so scenes differ but the described character stays recognizable.
+
+    `salt` deliberately breaks that determinism when the caller WANTS a different draw of the same
+    scene (ADR-070): Auto-QC's one re-render was reproducing the rejected video pixel-for-pixel and
+    re-judging it, so it burned a full episode of image calls plus a vision call to reach the same
+    verdict. Determinism is right for a resume, wrong for a reroll."""
     import hashlib
 
-    return int(hashlib.sha1(prompt.encode("utf-8")).hexdigest()[:12], 16) % 1_000_000
+    key = f"{prompt}|{salt}" if salt else prompt
+    return int(hashlib.sha1(key.encode("utf-8")).hexdigest()[:12], 16) % 1_000_000
 
 
 def _call_pollinations(
@@ -1239,7 +1246,7 @@ def _call_pollinations(
 def _generate_pollinations_single(
     *, prompt: str, model: str, out_path: str, token: str | None,
     width: int, height: int, max_retries: int, reference_url: str | None = None,
-    timeout_s: float | None = None, deadline: float | None = None,
+    timeout_s: float | None = None, deadline: float | None = None, seed_salt: int = 0,
 ) -> str:
     """One Pollinations provider's attempt loop: retry transient HTTP failures with backoff, then
     raise ImageGenError so the provider chain can fall over to the next entry."""
@@ -1253,7 +1260,7 @@ def _generate_pollinations_single(
             "text-only 'flux' instead. For %r to keep your character, upload a reference image on the "
             "character AND set PUBLIC_BASE_URL to a public https host.", model, model)
         model = "flux"
-    seed = _pollinations_seed(prompt)
+    seed = _pollinations_seed(prompt, seed_salt)
     last: Exception | None = None
     for attempt in range(max_retries):
         t = _attempt_timeout(attempt, timeout_s, deadline, last)  # doubles per attempt (ADR-069)

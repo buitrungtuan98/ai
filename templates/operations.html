@@ -165,7 +165,7 @@
 
     <div class="mt-md">
       <form method="post" action="/operations/restart-worker"
-            data-confirm="Restart the render worker? An in-flight render is abandoned (it can be retried) and the worker comes back automatically." data-confirm-verb="Restart worker">
+            data-confirm="Restart the render worker? The worker comes back on its own within a minute. An in-flight render is abandoned — the new worker marks it failed straight away, and retrying it resumes from the scenes already rendered." data-confirm-verb="Restart worker">
         <button class="btn ghost block" type="submit">🔄 Restart worker</button></form>
       <p class="hint">Asks the worker to exit; its container is recreated automatically. Takes about
         a minute. A worker frozen so hard that even its own threads cannot run is the one case this
