@@ -1436,8 +1436,13 @@ unreachable, off by default, or unbuilt — ADR-071:
 - **Picking Quote tunes all six settings and says so.** Every branch respects a choice the operator
   already made, and a toast lists what changed — most of those fields sit on another tab inside a
   collapsed section.
-- Verified: 482 tests (25 new), ruff clean, docs guard green; the auto-tune, the 🌙 marks and the
-  notice checked in a real browser at 375px and 1280px, including that a deliberate grade survives.
+- **The save bar stacks on the phone instead of squeezing.** Spotted while verifying the above at
+  375px: one non-wrapping row could not fit two submit buttons, Cancel and the hint, so flex shrank
+  them all and the page's most important control read "Create &". The primary action now gets its own
+  full-width row, the hint moves below, and desktop keeps its single row.
+- Verified: 483 tests (26 new), ruff clean, docs guard green; the auto-tune, the 🌙 marks, the notice
+  and the save bar checked in a real browser at 375px and 1280px — including that a deliberate grade
+  survives the auto-tune and that no button label clips.
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation

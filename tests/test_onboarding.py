@@ -417,3 +417,17 @@ def test_row_actions_are_thumb_sized_on_a_phone():
     phone = css.split("@media (max-width: 720px)", 1)[1]
     assert ".btn, .btn.sm { min-height: 44px; }" in phone
     assert ".icon-btn, .nav-toggle { width: 44px; height: 44px; }" in phone
+
+
+def test_the_save_bar_stacks_instead_of_clipping_its_primary_button():
+    """One non-wrapping row could not fit two submit buttons, a Cancel link and the hint at 375px, so
+    flex shrank them all and the most important control on the page read "Create &"."""
+    css = open("static/app.css", encoding="utf-8").read()
+    phone = css.split("@media (max-width: 720px)", 1)[1]
+    bar = phone.split(".savebar {", 1)[1].split("\n  ." + "hint", 1)[0]
+    assert "flex-wrap: wrap" in bar
+    assert ".savebar > button:first-of-type { flex: 1 0 100%; }" in phone   # primary gets a row
+    assert "white-space: nowrap" in phone.split(".savebar .btn {", 1)[1].split("}", 1)[0]
+    # Desktop keeps the single row: these rules live inside the phone media query only.
+    desktop = css.split("@media (max-width: 720px)", 1)[0]
+    assert "flex-wrap" not in desktop.split(".savebar {", 1)[1].split("}", 1)[0]
