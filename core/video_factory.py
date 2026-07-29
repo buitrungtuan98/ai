@@ -142,12 +142,29 @@ COLOR_GRADES: dict[str, str] = {
     "cool": "eq=contrast=1.05:saturation=0.95,colorbalance=bs=0.07:bm=0.04:rs=-0.03",
     "vivid": "eq=contrast=1.08:saturation=1.25",
     "noir": "hue=s=0,eq=contrast=1.15:brightness=-0.02",
-    # Vintage (ADR-056): muted film look for the aesthetic quote style — soft desaturation, warm
-    # shadows, a vignette and light grain so drawn stills feel like scanned illustrations.
-    "vintage": ("eq=contrast=1.02:saturation=0.82:brightness=-0.01,"
-                "colorbalance=rs=0.04:rm=0.02:bs=-0.05:bh=-0.03,vignette,"
-                "noise=alls=7:allf=t"),
+    # Vintage (ADR-056/071): the retro-anime quote look — sepia warmth pushed toward burnt orange,
+    # soft desaturation, a vignette and film grain, so drawn stills read as a scanned 80s/90s cel.
+    # Grain is `allf=t` (temporal) on purpose: static grain looks like a dirty lens, moving grain
+    # looks like film. This grade was written for ADR-056 but never reachable — the campaign-config
+    # whitelist and the form's dropdown both omitted it, so no campaign could select it (ADR-071).
+    "vintage": ("eq=contrast=1.03:saturation=0.80:brightness=-0.015,"
+                "colorbalance=rs=0.07:rm=0.05:rh=0.02:gm=0.01:bs=-0.08:bm=-0.05:bh=-0.04,"
+                "vignette,noise=alls=7:allf=t"),
 }
+
+# THE list of selectable grades (id → operator-facing label): the campaign form's dropdown, its live
+# summary line and the create-time whitelist all read this one dict, so a grade cannot exist in the
+# filter table yet be unreachable from the UI. That is exactly how "vintage" was lost — three
+# hand-maintained copies of this list, and the new entry only reached one of them (ADR-071).
+COLOR_GRADE_CHOICES: dict[str, str] = {
+    "cinematic": "Cinematic — filmic contrast, teal shadows",
+    "warm": "Warm — golden, cosy",
+    "cool": "Cool — blue, moody",
+    "vivid": "Vivid — punchy colour",
+    "noir": "Noir — black & white",
+    "vintage": "Vintage — sepia warmth, vignette, film grain (the retro-anime quote look)",
+}
+assert set(COLOR_GRADE_CHOICES) <= set(COLOR_GRADES), "a selectable grade has no filter defined"
 
 # Loudness normalization to the -14 LUFS short-form platform target (EBU R128 single pass).
 LOUDNORM_FILTER = "loudnorm=I=-14:TP=-1.5:LRA=11"
@@ -480,6 +497,7 @@ def produce(
     output_dir: str,
     voice: str | None = None,
     rate_pct: int = 0,
+    voice_delivery: str = "normal",
     branding: Branding | None = None,
     subtitle_style: str = "word",
     caption_theme: str = "highlight",
@@ -599,14 +617,14 @@ def produce(
             # scene's sentences with breath gaps (returns merged timings so captions still align).
             audio_path = ws.path(f"scene_{si}.mp3")
             timings = tts.synthesize_paced(clean, audio_path, language=lang, voice=voice,
-                                           rate_pct=rate_pct)
+                                           rate_pct=rate_pct, delivery=voice_delivery)
             # Voice sanity (deterministic, free): silent/truncated TTS output → one re-synthesis,
             # then a loud failure — never hours later as a broken published video.
             problem = voice_check(audio_path, clean)
             if problem:
                 logger.warning("Scene %d voice check failed (%s) — re-synthesizing once", si, problem)
                 timings = tts.synthesize_paced(clean, audio_path, language=lang, voice=voice,
-                                               rate_pct=rate_pct)
+                                               rate_pct=rate_pct, delivery=voice_delivery)
                 problem = voice_check(audio_path, clean)
                 if problem:
                     raise RuntimeError(f"Scene {si} narration failed the voice check: {problem}")

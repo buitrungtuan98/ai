@@ -99,7 +99,7 @@
                placeholder="e.g. hand-drawn pencil sketch, black &amp; white, bold ink outlines">
         <div class="row-actions" style="margin-top:var(--sp-2)">
           <span class="meta">Presets:</span>
-          <button type="button" class="btn ghost sm" data-style="lofi retro anime illustration, painterly texture, film grain, muted teal and warm dusk-orange palette, soft fading light, a lone small figure in a vast atmospheric scene, 1980s Japanese illustration mood">Lofi retro anime (quote look)</button>
+          <button type="button" class="btn ghost sm" data-style="1980s-90s Japanese anime illustration, hand-painted cel look with soft cel shading, muted sepia and burnt-orange palette, dark moody dusk light, nostalgic city-pop atmosphere, visible film grain and analog vintage texture, a lone small figure in a vast quiet scene">Retro anime 80s/90s (quote look)</button>
           <button type="button" class="btn ghost sm" data-style="soft watercolour illustration, gentle washes, muted palette, dreamy and quiet">Soft watercolour</button>
           <button type="button" class="btn ghost sm" data-style="moody cinematic digital painting, deep shadows, rim light, film grain">Moody cinematic</button>
         </div>
@@ -212,7 +212,20 @@
       <div class="form-row"><label>Voice profile (follows the Target language)</label>
         <select name="voice" id="voice-select" data-current="{{ cfg.get('voice') or '' }}"></select>
         <p class="hint">Voices are filtered to the campaign's Target language (Core tab). Default = the
-          language's standard voice. Tip: use 📝 Preview a script + your ear on the first render to pick.</p></div>
+          language's standard voice. 🌙 marks the soft, low-energy voices that suit an intimate read —
+          Quote mode picks one for you. Tip: use 📝 Preview a script + your ear on the first render to pick.</p></div>
+      <div class="form-row"><label>Voice delivery</label>
+        <select name="voice_delivery" id="voice-delivery">
+          <option value="normal" {{ 'selected' if cfg.get('voice_delivery','normal')!='soft' }}>Normal — clear narration (default)</option>
+          <option value="soft" {{ 'selected' if cfg.get('voice_delivery')=='soft' }}>🌙 Soft — intimate, confiding, close-mic</option>
+        </select>
+        <p class="hint">Soft slows and lowers the voice, then softens the highs and evens out the
+          dynamics so it sits <i>inside</i> the music like someone talking quietly to you — the read
+          the aesthetic quote channels use.
+          {# Kept on ONE line: a template line break here split the phrase a test pins. #}
+          Honest limit: this is a close, confiding delivery, <b>not a real whisper</b> with breath —
+          no free voice engine can synthesize breath, and the paid “whispering” style doesn’t exist
+          for Vietnamese or Spanish at all. Pair it with a 🌙 voice.</p></div>
       <div class="form-row"><label>Audio speed adjustment: <span id="rate-val">{{ cfg.get('rate_pct', 0) }}</span>%</label>
         <input name="rate_pct" type="range" min="-20" max="20" value="{{ cfg.get('rate_pct', 0) }}"
                oninput="document.getElementById('rate-val').textContent=this.value"></div>
@@ -229,7 +242,9 @@
           <div class="form-row"><label>Colour grade (channel look, baked into every clip)</label>
             <select name="color_grade">
               <option value="" {{ 'selected' if not cfg.get('color_grade') }}>None — footage as shot</option>
-              {% for g, label in [('cinematic','Cinematic — filmic contrast, teal shadows'), ('warm','Warm — golden, cosy'), ('cool','Cool — blue, moody'), ('vivid','Vivid — punchy colour'), ('noir','Noir — black & white')] %}
+              {# One catalog (core.video_factory.COLOR_GRADE_CHOICES) — a hand-copied list here is
+                 what hid "vintage" from every operator for a whole release (ADR-071). #}
+              {% for g, label in grade_choices.items() %}
               <option value="{{ g }}" {{ 'selected' if cfg.get('color_grade')==g }}>{{ label }}</option>
               {% endfor %}
             </select>
@@ -378,6 +393,7 @@
   // (the same list the AI designer may propose from). Changing the language resets to the
   // language default — a voice from another language would be a broken/mismatched narration.
   const voiceData = {{ voice_choices | tojson }};
+  const SOFT_VOICES = {{ quote_voices | tojson }};
   const voiceSel = document.getElementById("voice-select");
   const langSel = document.querySelector('select[name="language"]');
   const LANG_NAMES = { vi: "Vietnamese", en: "English", es: "Spanish" };
@@ -393,7 +409,11 @@
       voiceSel.appendChild(o);
     };
     mk("", "Default — " + (LANG_NAMES[lang] || lang) + " standard voice");
-    (voiceData[lang] || []).forEach(pair => mk(pair[0], pair[1]));
+    // 🌙 marks the curated soft-delivery voices (core/tts.py QUOTE_VOICES) — the same list Quote
+    // mode auto-picks from and the AI designer is restricted to for a quote campaign.
+    const soft = (SOFT_VOICES[lang] || []);
+    (voiceData[lang] || []).forEach(pair =>
+      mk(pair[0], (soft.indexOf(pair[0]) >= 0 ? "🌙 " : "") + pair[1]));
     if (current && !Array.from(voiceSel.options).some(o => o.value === current)) {
       mk(current, current + " (custom)");   // keep a hand-typed legacy voice selectable
     }
@@ -436,12 +456,46 @@
   applyContentVisual();
   if (vsSel) vsSel.addEventListener("change", applyContentVisual);
   if (csSel) csSel.addEventListener("change", function () {
-    // Picking Quote auto-suggests a starter art style (the lofi look) when none is set yet.
-    if (isQuote() && vstyleInput && !vstyleInput.value.trim()) {
-      const preset = document.querySelector("[data-style]");
-      if (preset) vstyleInput.value = preset.dataset.style;
+    // Picking Quote auto-tunes the whole aesthetic (ADR-071). Every line below only fills a field the
+    // operator has NOT set — the genre needs six settings to agree (drawn scenes, retro-anime style,
+    // vintage grain, soft read, a soft voice, lofi music under it), and a video missing any one of
+    // them just looks like a normal narrated video with centred text.
+    if (isQuote()) {
+      // What was changed is announced afterwards: most of these fields live on the OTHER tab inside a
+      // collapsed section, so silently rewriting five of them is the kind of help that reads as a bug.
+      const tuned = [];
+      if (vstyleInput && !vstyleInput.value.trim()) {
+        const preset = document.querySelector("[data-style]");
+        if (preset) { vstyleInput.value = preset.dataset.style; tuned.push("retro-anime art style"); }
+      }
+      const grade = document.querySelector('[name="color_grade"]');
+      if (grade && !grade.value) { grade.value = "vintage"; tuned.push("vintage grade (film grain)"); }
+      const delivery = document.getElementById("voice-delivery");
+      if (delivery && delivery.value !== "soft") { delivery.value = "soft"; tuned.push("soft read"); }
+      // A soft read over an announcer voice sounds wrong rather than intimate, so follow it with a
+      // 🌙 voice for the campaign's language.
+      if (voiceSel && !voiceSel.value) {
+        const soft = (SOFT_VOICES[langSel ? langSel.value : "en"] || []);
+        if (soft.length) { voiceSel.value = soft[0]; tuned.push("a 🌙 soft voice"); }
+      }
+      // Music is not decoration here: a quote video with silence under it is not the genre. The Vibe
+      // Engine already rolls a lofi/piano mood per episode — this is the switch that uses it.
+      const music = document.querySelector('[name="music_mode"]');
+      if (music && music.value === "none") { music.value = "auto"; tuned.push("auto lofi music"); }
+      const mvol = document.querySelector('[name="music_volume"]');
+      const mvolOut = document.getElementById("mvol-val");
+      if (mvol && parseFloat(mvol.value) < 0.2) {                 // the voice sits INSIDE the bed
+        mvol.value = "0.2";
+        if (mvolOut) mvolOut.textContent = mvol.value;
+        tuned.push("music at 0.20");
+      }
+      if (tuned.length && window.ui) {
+        window.ui.toast("Quote style tuned (Aesthetics & Audio tab): " + tuned.join(", ") +
+                        ". Change any of it freely.", "success");
+      }
     }
     applyContentVisual();
+    updateIdentity();
   });
   document.querySelectorAll("[data-style]").forEach(function (b) {
     b.addEventListener("click", function () { if (vstyleInput) vstyleInput.value = b.dataset.style; });
@@ -473,7 +527,7 @@
   // 🎬 Live campaign "identity card": a plain-language summary of what you're about to create.
   const idText = document.getElementById("identity-text");
   const CAPTIONS = { highlight: "highlight captions", classic: "clean captions", boxed: "boxed captions", neon: "neon captions" };
-  const GRADES = { cinematic: "cinematic grade", warm: "warm grade", cool: "cool grade", vivid: "vivid grade", noir: "noir grade" };
+  const GRADES = {{ grade_choices.keys()|list|tojson }}.reduce(function (m, g) { m[g] = g + " grade"; return m; }, {});
   function updateIdentity() {
     const form = document.getElementById("campaign-form");
     if (!idText || !form) return;
@@ -494,6 +548,7 @@
     } else {
       parts.push("publishes continuously");
     }
+    if (g("voice_delivery") === "soft") parts.push("🌙 soft, confiding read");
     parts.push(g("publish_mode") === "review" ? "review first" : "auto-publish");
     idText.textContent = parts.filter(Boolean).join(" · ");
   }
@@ -580,6 +635,9 @@
           body.set("video_format", form.elements["video_format"].value || "short");
           // The selected channel localizes the design to its audience/country (channel profile).
           body.set("channel_id", (form.elements["channel_id"] && form.elements["channel_id"].value) || "");
+          // A quote campaign is designed for a whispered read — the server restricts the voice pool
+          // to the curated soft ones and asks for a lofi/piano music mood (ADR-071).
+          body.set("content_style", form.elements["content_style"].value || "story");
           const r = await fetch("/campaigns/propose", { method: "POST", body });
           const p = await r.json();
           if (!r.ok) throw new Error(p.error || "AI proposal failed");

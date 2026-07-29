@@ -458,6 +458,7 @@ def propose_campaign(
     model: str = DEFAULT_MODEL,
     nonce: int = 0,
     extra_context: str = "",
+    content_style: str = "story",
 ) -> CampaignProposal:
     """Design one complete, standout campaign config. With no topic, it invents a concept; high
     temperature + a variation `nonce` make each call distinct. The chosen voice is validated
@@ -486,11 +487,26 @@ def propose_campaign(
             "a spoken length range fitting the beat (e.g. 25-45s for punchy facts, 60-120s for "
             "stories); post daily (leave posting_days empty)."
         )
-    voices = ", ".join(v for vs in PROPOSABLE_VOICES.values() for v in vs)
+    # A quote campaign is read intimately, so the designer may only choose from the curated soft
+    # voices (ADR-071) — an energetic announcer voice under the soft delivery sounds wrong, and the
+    # operator would have to undo the designer's pick every time.
+    is_quote = content_style == "quote"
+    from core.tts import QUOTE_VOICES
+
+    catalog = QUOTE_VOICES if is_quote else PROPOSABLE_VOICES
+    pool = {lang: list(vs) for lang, vs in catalog.items()}
+    if language in ("vi", "en", "es") and pool.get(language):
+        pool = {language: pool[language]}          # don't offer voices in the wrong language at all
+    voices = ", ".join(v for vs in pool.values() for v in vs)
+    quote_line = (
+        "This is an AESTHETIC QUOTE channel: each video is a short poem read quietly over a drawn "
+        "illustration. Write the persona and style examples for a soft, confiding, almost-whispered "
+        "read, and pick a music mood in the lofi / ambient piano family. "
+        if is_quote else "")
     prompt = (
         "You are a senior short-form AND long-form video channel strategist. Propose ONE complete, "
         "standout campaign configuration for an automated video factory. "
-        f"{topic_line} {lang_line} {fmt_line} {profile_line} {extra_context} "
+        f"{topic_line} {lang_line} {fmt_line} {profile_line} {quote_line}{extra_context} "
         "Make it distinctive and genuinely good — a real creator's channel, never a bland template. "
         "Choose: a vivid, specific persona (region/age/speech habits, written in the target "
         "language); 2-3 short style-example lines in that voice; signature opening and closing "
@@ -509,9 +525,12 @@ def propose_campaign(
         prompt=prompt, schema=CampaignProposal, api_key=api_key, model=model,
         temperature=1.1,  # inherits the generous default token budget (thinking + JSON)
     )
-    allowed = {v for vs in PROPOSABLE_VOICES.values() for v in vs}
+    allowed = {v for vs in pool.values() for v in vs}
     if proposal.voice not in allowed:
-        proposal.voice = ""  # model invented a voice → fall back to the app default
+        # Invented, or (for a quote campaign) an energetic voice we don't want read softly. Fall back
+        # to the first curated soft voice when we have one, else to the app default.
+        soft = pool.get(language or "", []) if is_quote else []
+        proposal.voice = soft[0] if soft else ""
     # The format is the operator's explicit choice, not the model's — force it, then clamp the
     # proposed durations into that format's real range (matches the create-time clamp in main.py).
     proposal.video_format = "long" if is_long else "short"

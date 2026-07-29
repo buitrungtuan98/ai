@@ -58,6 +58,71 @@ VOICE_CHOICES: dict[str, list[tuple[str, str]]] = {
 
 _TICKS_PER_SECOND = 1e7  # edge-tts offsets/durations are in 100-nanosecond ticks
 
+# ── Soft delivery: the "thì thầm tâm sự" narration for aesthetic quote videos (ADR-071) ──────
+# There is no real whisper to switch on here. A `whispering` style exists only in Azure Speech's PAID
+# express-as API, and even there only for a handful of multi-style en-US voices — never for Spanish,
+# never for Vietnamese. So the intimacy is BUILT, from the three things edge-tts does expose (rate,
+# pitch, volume) plus one duration-preserving post filter. It is honestly a close-mic confiding
+# delivery, not a biological whisper: no breath noise, because nothing free can synthesize that.
+DELIVERIES = ("normal", "soft")
+
+# Voices whose character suits that delivery, per language — the ONE list the form's 🌙 marks, the
+# quote auto-pick and the AI designer all read. Only ids already in VOICE_CHOICES: a curated pick,
+# not new voices. Deliberately excludes the bright/energetic ones (Aria, Guy, Elvira): the same soft
+# processing over an announcer read sounds wrong, not intimate.
+QUOTE_VOICES: dict[str, list[str]] = {
+    "vi": ["vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural"],
+    "en": ["en-US-JennyNeural", "en-US-ChristopherNeural", "en-GB-SoniaNeural"],
+    "es": ["es-MX-DaliaNeural", "es-MX-JorgeNeural"],
+}
+
+_SOFT_RATE_DELTA = -12          # confiding, not announcing — applied on top of the campaign rate
+# Pitch per voice. Dropping a bright voice ~18 Hz reads as intimate; doing the same to an already
+# deep one reads as muddy and unwell, so those drop far less. Anything unlisted gets the middle value.
+_SOFT_PITCH_HZ: dict[str, int] = {
+    "vi-VN-HoaiMyNeural": -18,
+    "vi-VN-NamMinhNeural": -8,
+    "en-US-JennyNeural": -18,
+    "en-GB-SoniaNeural": -16,
+    "en-US-ChristopherNeural": -6,
+    "es-MX-DaliaNeural": -18,
+    "es-MX-JorgeNeural": -8,
+}
+_SOFT_PITCH_DEFAULT = -14
+
+# The post filter, applied ONCE to the finished narration (never per sentence). Every stage earns its
+# place: highpass drops the low rumble a pitch shift exaggerates; lowpass takes the hard edge off the
+# sibilance so consonants read as breath; the compressor is what makes a quiet, close read audible
+# without shouting (it lifts the soft passages instead of raising everything); the 18 ms slap is a
+# small room, not an echo. All are duration-preserving to within milliseconds, so the edge-tts word
+# timings — and therefore the captions — still line up.
+SOFT_VOICE_FILTER = (
+    "highpass=f=90,"
+    "lowpass=f=8500,"
+    "acompressor=threshold=0.05:ratio=4:attack=8:release=180:makeup=2,"
+    "aecho=0.85:0.35:18:0.12"
+)
+
+
+def soft_voices(language: str) -> list[str]:
+    """The curated soft-delivery voices for a language (empty if none are curated for it)."""
+    return list(QUOTE_VOICES.get(language, ()))
+
+
+def is_soft_voice(voice: str | None) -> bool:
+    return bool(voice) and any(voice in ids for ids in QUOTE_VOICES.values())
+
+
+def _soft_pitch_str(voice: str) -> str:
+    hz = _SOFT_PITCH_HZ.get(voice, _SOFT_PITCH_DEFAULT)
+    return f"+{hz}Hz" if hz >= 0 else f"{hz}Hz"
+
+
+def build_soft_voice_args(in_path: str, out_path: str) -> list[str]:
+    """ffmpeg args (after the binary) that apply SOFT_VOICE_FILTER to a narration file. Pure, so the
+    chain is unit-tested without an ffmpeg binary (same approach as `build_paced_concat_args`)."""
+    return ["-i", in_path, "-af", SOFT_VOICE_FILTER, "-c:a", "libmp3lame", "-q:a", "4", out_path]
+
 
 @dataclass
 class WordTiming:
@@ -75,12 +140,15 @@ def _rate_str(rate_pct: int) -> str:
     return f"+{rate_pct}%" if rate_pct >= 0 else f"{rate_pct}%"
 
 
-async def _synthesize_async(text: str, voice: str, rate_pct: int, out_path: str) -> list[WordTiming]:
+async def _synthesize_async(text: str, voice: str, rate_pct: int, out_path: str,
+                            pitch: str = "+0Hz") -> list[WordTiming]:
     import edge_tts
 
     # edge-tts >= 7 defaults to SENTENCE boundaries; captions need per-WORD timings, so request
     # them explicitly (without this, timings come back empty and videos render with no subtitles).
-    communicate = edge_tts.Communicate(text, voice, rate=_rate_str(rate_pct), boundary="WordBoundary")
+    # `pitch` shifts the voice without changing duration, so the word timings stay valid.
+    communicate = edge_tts.Communicate(text, voice, rate=_rate_str(rate_pct), pitch=pitch,
+                                       boundary="WordBoundary")
     timings: list[WordTiming] = []
     with open(out_path, "wb") as f:
         async for chunk in communicate.stream():
@@ -93,6 +161,40 @@ async def _synthesize_async(text: str, voice: str, rate_pct: int, out_path: str)
     return timings
 
 
+def _delivery_params(delivery: str, voice: str, rate_pct: int) -> tuple[int, str]:
+    """(rate_pct, pitch) for a delivery — the TTS-level half of `soft` (ADR-071). The audio-level
+    half is `SOFT_VOICE_FILTER`, applied once to the finished narration by the callers below."""
+    if delivery != "soft":
+        return rate_pct, "+0Hz"
+    return rate_pct + _SOFT_RATE_DELTA, _soft_pitch_str(voice)
+
+
+def _synthesize_raw(text: str, out_path: str, voice: str, rate_pct: int, pitch: str) -> list[WordTiming]:
+    """One edge-tts call with retries. No post-processing: the soft filter must run ONCE on the
+    assembled narration, not per sentence (a compressor applied six times over is not the same
+    effect, and it would cost six extra ffmpeg passes per scene)."""
+    last: Exception | None = None
+    for attempt in range(_RETRY_ATTEMPTS):
+        try:
+            return asyncio.run(_synthesize_async(text, voice, rate_pct, out_path, pitch))
+        except Exception as exc:  # noqa: BLE001 — retry the flaky network path, then surface
+            last = exc
+            logger.warning("TTS attempt %d/%d failed: %s", attempt + 1, _RETRY_ATTEMPTS, exc)
+            if attempt < _RETRY_ATTEMPTS - 1 and _RETRY_SLEEP_SECONDS:
+                time.sleep(_RETRY_SLEEP_SECONDS * (attempt + 1))
+    raise last if last is not None else RuntimeError("TTS failed with no error")
+
+
+def apply_soft_voice(path: str) -> None:
+    """Rewrite `path` through SOFT_VOICE_FILTER in place (tmp + replace, so a failed pass can never
+    leave a half-written narration where the render expects a finished one)."""
+    from core.ffmpeg_runner import run_ffmpeg
+
+    tmp = f"{path}.soft.mp3"
+    run_ffmpeg(build_soft_voice_args(path, tmp))
+    os.replace(tmp, path)
+
+
 def synthesize(
     text: str,
     out_path: str,
@@ -100,22 +202,19 @@ def synthesize(
     language: str = "en",
     voice: str | None = None,
     rate_pct: int = 0,
+    delivery: str = "normal",
 ) -> list[WordTiming]:
     """Synthesize `text` to `out_path` (mp3). Returns word timings (relative to clip start).
 
     Retries transient endpoint failures (the service occasionally drops a handshake); a
-    persistent failure still raises so the episode fails visibly rather than silently."""
+    persistent failure still raises so the episode fails visibly rather than silently.
+    `delivery="soft"` is the intimate, confiding read used by quote videos (ADR-071)."""
     resolved = resolve_voice(language, voice)
-    last: Exception | None = None
-    for attempt in range(_RETRY_ATTEMPTS):
-        try:
-            return asyncio.run(_synthesize_async(text, resolved, rate_pct, out_path))
-        except Exception as exc:  # noqa: BLE001 — retry the flaky network path, then surface
-            last = exc
-            logger.warning("TTS attempt %d/%d failed: %s", attempt + 1, _RETRY_ATTEMPTS, exc)
-            if attempt < _RETRY_ATTEMPTS - 1 and _RETRY_SLEEP_SECONDS:
-                time.sleep(_RETRY_SLEEP_SECONDS * (attempt + 1))
-    raise last if last is not None else RuntimeError("TTS failed with no error")
+    rate, pitch = _delivery_params(delivery, resolved, rate_pct)
+    timings = _synthesize_raw(text, out_path, resolved, rate, pitch)
+    if delivery == "soft":
+        apply_soft_voice(out_path)
+    return timings
 
 
 # ── Paced narration: real editors leave breathing room between sentences ─────
@@ -173,27 +272,33 @@ def synthesize_paced(
     language: str = "en",
     voice: str | None = None,
     rate_pct: int = 0,
+    delivery: str = "normal",
 ) -> list[WordTiming]:
     """Like synthesize(), but paces multi-sentence narration with breath gaps. A single-sentence
     (or terminator-free) input falls straight through to synthesize() — identical to the old path."""
     sentences = split_sentences(text)
     if len(sentences) <= 1:
-        return synthesize(text, out_path, language=language, voice=voice, rate_pct=rate_pct)
+        return synthesize(text, out_path, language=language, voice=voice, rate_pct=rate_pct,
+                          delivery=delivery)
 
     from core import media
     from core.ffmpeg_runner import run_ffmpeg
 
+    resolved = resolve_voice(language, voice)
+    rate, pitch = _delivery_params(delivery, resolved, rate_pct)
     parts: list[str] = []
     per_timings: list[list[WordTiming]] = []
     durations: list[float] = []
     for i, sentence in enumerate(sentences):
         part = f"{out_path}.p{i}.mp3"
-        per_timings.append(synthesize(sentence, part, language=language, voice=voice, rate_pct=rate_pct))
+        per_timings.append(_synthesize_raw(sentence, part, resolved, rate, pitch))
         parts.append(part)
         durations.append(media.probe_duration(part))
 
     gaps = [pause_after(s) for s in sentences[:-1]]
     run_ffmpeg(build_paced_concat_args(parts, gaps, out_path))
+    if delivery == "soft":
+        apply_soft_voice(out_path)   # once, on the assembled narration
 
     merged: list[WordTiming] = []
     offset = 0.0
