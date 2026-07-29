@@ -868,7 +868,15 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
   .savebar { border-radius: var(--radius) var(--radius) 0 0; margin-left: calc(-1 * var(--main-pad));
     margin-right: calc(-1 * var(--main-pad));
     /* Clear the 60px fixed bottom tab bar so the save/cancel buttons are never hidden under it. */
-    bottom: calc(60px + env(safe-area-inset-bottom, 0px)); }
+    bottom: calc(60px + env(safe-area-inset-bottom, 0px));
+    /* Stack instead of squeezing. One non-wrapping row could not fit two submit buttons, a Cancel
+       link and the explanatory hint at 375px, so flex shrank them all and the PRIMARY action clipped
+       to "Create &" — the most important control on the page, unreadable. */
+    flex-wrap: wrap; }
+  .savebar .grow { display: none; }                 /* a spacer has no job once the row wraps */
+  .savebar > button:first-of-type { flex: 1 0 100%; }  /* the primary action gets its own row */
+  .savebar .btn { flex: 1 1 auto; white-space: nowrap; }   /* never break a label mid-phrase */
+  .savebar .hint { flex: 1 0 100%; order: 9; }      /* the explanation goes last, on its own line */
   /* Hub tab bar scrolls sideways on narrow screens instead of wrapping to a second row. */
   .hub-tabs { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; }
   .hub-tab { white-space: nowrap; }

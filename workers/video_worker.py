@@ -626,6 +626,7 @@ def render_task(task_id: int) -> None:
                 output_dir=output_dir,
                 voice=cfg.get("voice"),
                 rate_pct=rate_pct,
+                voice_delivery=cfg.get("voice_delivery", "normal"),
                 branding=_branding_from_config(cfg),
                 subtitle_style=cfg.get("subtitle_style", "word"),
                 caption_theme=cfg.get("caption_theme", "highlight"),

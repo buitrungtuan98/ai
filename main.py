@@ -44,7 +44,8 @@ from auth.dependencies import (
 )
 from core import autopilot, failure, retention, timezones
 from core.config import settings
-from core.tts import VOICE_CHOICES
+from core.tts import QUOTE_VOICES, VOICE_CHOICES
+from core.video_factory import COLOR_GRADE_CHOICES
 from database.db_session import get_db, init_db
 from database.models import AutopilotAction, BufferPoolItem, Campaign, Channel, Task
 from database.types import BufferStatus, CampaignStatus, ChannelStatus, Platform, TaskStatus
@@ -84,6 +85,10 @@ app.mount("/static", CachedStaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 templates.env.globals["settings"] = settings  # e.g. MULTI_TENANT_MODE toggles the sign-out chip
 templates.env.globals["voice_choices"] = VOICE_CHOICES  # campaign form: per-language voice picker
+# The soft-delivery voices per language (ADR-071) — the form marks them 🌙 and the Quote style
+# auto-picks one, so "which voices suit a whispered read" has one definition, in core/tts.py.
+templates.env.globals["quote_voices"] = QUOTE_VOICES
+templates.env.globals["grade_choices"] = COLOR_GRADE_CHOICES  # one list: dropdown + whitelist
 templates.env.globals["voice_names"] = {  # id → short friendly name for compact chips
     v: label.split(" — ")[0] for vs in VOICE_CHOICES.values() for v, label in vs}
 templates.env.globals["tz_choices"] = timezones.tz_choices  # grouped timezone picker (offsets live)
@@ -1348,7 +1353,7 @@ def preview_script(
 @app.post("/campaigns/propose")
 def propose_campaign_route(user: CurrentUser, db: DbDep, topic: str = Form(""),
                            language: str = Form(""), video_format: str = Form("short"),
-                           channel_id: str = Form("")):
+                           channel_id: str = Form(""), content_style: str = Form("story")):
     """AI-design a whole campaign config from a title (or from scratch). Returns JSON the New
     Campaign form fills in for review — nothing is saved until the user clicks Create. The form's
     video_format is an explicit constraint (short vs long, forced onto the result); the selected
@@ -1371,6 +1376,7 @@ def propose_campaign_route(user: CurrentUser, db: DbDep, topic: str = Form(""),
     try:
         proposal = ai_engine.propose_campaign(
             topic=topic.strip() or None, language=lang, video_format=fmt, profile=profile, api_key=key,
+            content_style="quote" if content_style == "quote" else "story",
             model=user.gemini_model or settings.GEMINI_MODEL,
             nonce=random.randint(1, 1_000_000),
         )
@@ -1395,7 +1401,7 @@ def _build_campaign_config(
     motion: str = "on", caption_theme: str = "highlight", self_critique: str = "on",
     script_depth: str = "standard", video_format: str = "short",
     visual_source: str = "stock", visual_style: str = "", title_overlay: str = "off",
-    content_style: str = "story", signature: str = "",
+    content_style: str = "story", signature: str = "", voice_delivery: str = "normal",
     music_mode: str = "none", music_mood: str = "",
     color_grade: str = "", auto_qc: str = "on",
     max_per_day: str = "", min_per_day: str = "",
@@ -1410,6 +1416,9 @@ def _build_campaign_config(
         # would make every episode fail generation. Default to English.
         "language": language if language in ("en", "vi", "es") else "en",
         "system_prompt": system_prompt, "voice": voice or None,
+        # Voice delivery (ADR-071): "soft" is the intimate, confiding read the aesthetic quote
+        # style needs — slower + lower pitch + a softening audio pass, applied in core/tts.py.
+        "voice_delivery": "soft" if voice_delivery == "soft" else "normal",
         "rate_pct": rate_pct, "subtitle_style": subtitle_style,
         "music_path": music_path or None, "music_volume": music_volume,
         "posting_slots": [s.strip() for s in posting_slots.split(",") if s.strip()],
@@ -1458,7 +1467,10 @@ def _build_campaign_config(
         "music_mode": music_mode if music_mode in ("none", "auto", "file") else "none",
         "music_mood": music_mood.strip() or None,
         # Auto-QC gate (ADR-013): colour grade baked into the encode; machine review of output.
-        "color_grade": color_grade if color_grade in ("cinematic", "warm", "cool", "vivid", "noir") else None,
+        # "vintage" (grain + sepia + vignette) is the quote look from ADR-056 — it was written and
+        # rendered correctly but omitted here, so every campaign that asked for it silently got no
+        # grade at all (ADR-071).
+        "color_grade": color_grade if color_grade in COLOR_GRADE_CHOICES else None,
         "auto_qc": "off" if auto_qc == "off" else "on",
         # Daily pacing: cap NEW renders per local day (quota rationing across campaigns), and a
         # published-minimum watchdog that alerts (it cannot force publishes).
@@ -1502,6 +1514,7 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
     language: str = Form("en"),
     system_prompt: str = Form(""),
     voice: str = Form(""),
+    voice_delivery: str = Form("normal"),
     rate_pct: int = Form(0),
     subtitle_style: str = Form("word"),
     music_path: str = Form(""),
@@ -1561,7 +1574,7 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
             motion=motion, caption_theme=caption_theme, self_critique=self_critique,
             script_depth=script_depth, video_format=video_format,
             visual_source=visual_source, visual_style=visual_style, title_overlay=title_overlay,
-            content_style=content_style, signature=signature,
+            content_style=content_style, signature=signature, voice_delivery=voice_delivery,
             music_mode=music_mode, music_mood=music_mood,
             color_grade=color_grade, auto_qc=auto_qc,
             max_per_day=max_per_day, min_per_day=min_per_day,

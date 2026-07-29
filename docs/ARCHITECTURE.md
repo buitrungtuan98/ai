@@ -1498,3 +1498,42 @@ acts on the explanation). The QC re-render was pure waste with the free provider
 seed is derived from the prompt, so attempt 2 rebuilt the rejected video pixel-for-pixel and re-judged
 it — a whole episode of image calls plus a vision call to reach the identical verdict. Salting only
 attempt 2 keeps both properties: deterministic for resume, different for reroll.
+
+### ADR-071 — The quote aesthetic: reachable grade, retro-anime look, and a soft read (incl. non-Vietnamese)
+**Decision:** five changes so a Quote campaign actually looks and sounds like the genre it names.
+1. **`vintage` becomes selectable**, and grades get ONE catalog. The grade (sepia warmth toward burnt
+   orange, muted saturation, vignette, temporal film grain) was written for ADR-056 and rendered
+   correctly, but the create-time whitelist and the form's dropdown were hand-maintained copies of the
+   grade list and neither learned about it — so no campaign could ever pick it. Both now read
+   `video_factory.COLOR_GRADE_CHOICES`, with an assert that every selectable grade has a filter.
+2. **The quote art-style preset is explicitly 80s/90s anime** — cel shading, muted sepia and
+   burnt-orange, dusk light, city-pop atmosphere, analog grain. Described by its attributes rather
+   than by naming a studio: it gives the image model more to work with and keeps someone else's brand
+   out of our prompts.
+3. **`voice_delivery: soft`** — a per-campaign intimate read. There is no whisper to switch on: a
+   `whispering` style exists only in Azure Speech's PAID express-as API, and even there only for a
+   few multi-style **en-US** voices — never Spanish, never Vietnamese. So it is built from what
+   edge-tts exposes (rate −12%, a per-voice pitch drop) plus one duration-preserving filter chain
+   (`highpass` → `lowpass` → `acompressor` → tiny `aecho`) applied ONCE to the assembled narration.
+   The UI says plainly that this is a close, confiding delivery and not a real whisper.
+4. **Quote auto-tunes the whole aesthetic** and says what it changed. Six settings have to agree
+   (drawn scenes, retro-anime style, vintage grade, soft read, a soft voice, lofi music under it);
+   every branch only fills a field the operator left unset, and a toast lists the result because most
+   of those fields live on another tab inside a collapsed section.
+5. **Soft voices are curated per language** (`tts.QUOTE_VOICES`) — Hoài My/Nam Minh, Jenny/
+   Christopher/Sonia, Dalia/Jorge — marked 🌙 in the picker, auto-picked by Quote, and the ONLY pool
+   the AI designer may choose from for a quote campaign.
+
+**Why:** the reference channels this feature exists to imitate are recognisable through the *whole*
+stack, not one setting; the previous implementation had the skeleton (drawn scenes, centred lines,
+per-episode Vibe roll) while three of the six settings were unreachable, off by default, or unbuilt —
+so a quote video came out as a normal narrated video with centred text over an ungraded illustration.
+The grade bug is the sharper lesson: a feature can be fully implemented, correct, and tested and still
+not exist, because the list that exposes it was copied instead of shared. Hence one catalog plus an
+assert rather than just adding the missing entry in three places. For the voice, saying "whisper" and
+shipping a normal read would be the dishonest kind of feature copy — the honest version names its own
+ceiling, and the per-voice pitch table exists because dropping an already-deep voice as far as a bright
+one sounds unwell rather than intimate. Restricting the designer's voice pool matters for exactly the
+same reason: the soft chain over an energetic announcer read sounds wrong, and an operator should not
+have to undo the designer's pick on every quote campaign. That restriction is per language, which is
+what makes the English and Spanish quote channels work as well as the Vietnamese one.

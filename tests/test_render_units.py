@@ -664,7 +664,7 @@ def test_tts_retries_transient_failures(monkeypatch):
     monkeypatch.setattr(tts, "_RETRY_SLEEP_SECONDS", 0)
     attempts = []
 
-    async def flaky(text, voice, rate_pct, out_path):
+    async def flaky(text, voice, rate_pct, out_path, pitch="+0Hz"):
         attempts.append(1)
         if len(attempts) < 2:
             raise ConnectionError("403 handshake dropped")
@@ -677,7 +677,7 @@ def test_tts_retries_transient_failures(monkeypatch):
     # A persistent failure still raises (the episode must fail visibly).
     attempts.clear()
 
-    async def dead(text, voice, rate_pct, out_path):
+    async def dead(text, voice, rate_pct, out_path, pitch="+0Hz"):
         attempts.append(1)
         raise ConnectionError("403 forever")
 
@@ -698,8 +698,8 @@ def test_tts_requests_word_boundaries(monkeypatch, tmp_path):
     captured = {}
 
     class FakeCommunicate:
-        def __init__(self, text, voice, rate=None, boundary=None):
-            captured.update(text=text, voice=voice, rate=rate, boundary=boundary)
+        def __init__(self, text, voice, rate=None, pitch=None, boundary=None):
+            captured.update(text=text, voice=voice, rate=rate, pitch=pitch, boundary=boundary)
 
         async def stream(self):
             yield {"type": "audio", "data": b"mp3"}
@@ -710,6 +710,7 @@ def test_tts_requests_word_boundaries(monkeypatch, tmp_path):
     timings = tts.synthesize("hello", str(tmp_path / "o.mp3"))
     assert captured["boundary"] == "WordBoundary"          # explicit — the 7.x default is sentences
     assert [w.text for w in timings] == ["hello"]          # word events used, sentence events ignored
+    assert captured["pitch"] == "+0Hz"                     # a normal read is never pitch-shifted
 
 
 def test_split_sentences_and_pause():
@@ -740,11 +741,11 @@ def test_synthesize_paced_merges_timings(monkeypatch, tmp_path):
     from core import tts
 
     # Each sentence: one word 0.0-1.0s; each part probes to 1.0s. Gap after sentence 1 = 0.35 ('.').
-    def fake_synth(text, out, **k):
+    def fake_synth(text, out, *a, **k):
         open(out, "w").close()
         return [tts.WordTiming(text.split()[0], 0.0, 1.0)]
 
-    monkeypatch.setattr(tts, "synthesize", fake_synth)
+    monkeypatch.setattr(tts, "_synthesize_raw", fake_synth)
     monkeypatch.setattr("core.media.probe_duration", lambda p: 1.0)
     monkeypatch.setattr("core.ffmpeg_runner.run_ffmpeg", lambda *a, **k: None)
 

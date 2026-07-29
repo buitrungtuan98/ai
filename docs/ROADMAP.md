@@ -1417,6 +1417,33 @@ Audited the R7 result against what the UI actually promises; every finding passe
 - Verified: 457 tests (18 new), ruff clean, docs guard green; ⌘K-then-Enter and the restart confirm
   checked in a real browser at 375px and 1280px.
 
+## R9 — The quote aesthetic, and a voice that whispers as far as free TTS can `DONE`
+Audited Quote mode against the reference style (retro 80s/90s anime, sepia + film grain, lofi piano,
+a confiding read). The skeleton was there; three of the six settings that make it recognisable were
+unreachable, off by default, or unbuilt — ADR-071:
+- **The `vintage` grade existed, rendered correctly, and no campaign could select it.** Film grain,
+  sepia warmth and the vignette were written back in ADR-056, but the create-time whitelist and the
+  form's dropdown were hand-copied lists that never learned about it. Both now read one catalog with
+  an assert, so a grade can no longer exist in the filter table yet be invisible in the UI.
+- **The quote art preset is now explicitly 1980s–90s anime** — cel shading, muted sepia and
+  burnt-orange, dusk light, city-pop mood, analog grain.
+- **A soft, confiding read** (`voice_delivery`): rate −12%, a per-voice pitch drop, and one
+  duration-preserving filter pass (highpass → lowpass → compressor → tiny room) applied once to the
+  assembled narration. Named honestly in the UI: there is no free whisper, and the paid Azure
+  "whispering" style has no Vietnamese or Spanish voice at all.
+- **Soft voices curated per language** — 🌙 in the picker, auto-picked by Quote, and the only pool the
+  AI designer may propose from for a quote campaign, so foreign-language quote channels sound right too.
+- **Picking Quote tunes all six settings and says so.** Every branch respects a choice the operator
+  already made, and a toast lists what changed — most of those fields sit on another tab inside a
+  collapsed section.
+- **The save bar stacks on the phone instead of squeezing.** Spotted while verifying the above at
+  375px: one non-wrapping row could not fit two submit buttons, Cancel and the hint, so flex shrank
+  them all and the page's most important control read "Create &". The primary action now gets its own
+  full-width row, the hint moves below, and desktop keeps its single row.
+- Verified: 483 tests (26 new), ruff clean, docs guard green; the auto-tune, the 🌙 marks, the notice
+  and the save bar checked in a real browser at 375px and 1280px — including that a deliberate grade
+  survives the auto-tune and that no button label clips.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download
