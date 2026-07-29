@@ -484,6 +484,37 @@ AUTOPILOT_MAX_RETRIES = 2  # auto-retry a genuine render failure at most this ma
 RESUME_KEEP_HOURS = 24
 
 
+def fail_orphaned_renders(db, now: datetime | None = None) -> int:
+    """At worker BOOT, fail every task still sitting in a working state (ADR-070). Returns the count.
+
+    This is the one moment the answer is certain: there is exactly one worker, machine-wide, and it
+    has not started rendering yet — so a task in AI_GENERATION/RENDERING/AUDIO_SYNCED/PUBLISHING is
+    the abandoned remains of the previous process (an operator restart, a redeploy whose 300s grace
+    expired mid-encode, an OOM kill). Nothing was reporting it: the watchdog only does this
+    bookkeeping on the STALL path, not on the restart-request path, so a deliberate "Restart worker"
+    click left the episode reading "Rendering 47%" until the stuck-task reaper noticed ~2 hours later.
+
+    Marked FAILED rather than re-queued on purpose: the retry cap still applies, and the message
+    classifies as transient (`core.failure`) so the autopilot picks it up and — since R7 keeps the
+    workspace — resumes from the scenes already drawn. Re-enqueueing here would outrank the cap and
+    could crash-loop on the very episode that killed the worker."""
+    now = now or datetime.utcnow()
+    orphans = list(db.scalars(select(Task).where(Task.status.in_(_STUCK_STATUSES))).all())
+    for task in orphans:
+        task.status = TaskStatus.FAILED
+        task.finished_at = now
+        task.error_message = (
+            "The worker restarted while this episode was in flight (operator restart, redeploy or a "
+            "crash), so the render was abandoned. Retry picks it up and resumes from the scenes "
+            "already rendered — the autopilot does this on its own.")
+        task_queue.clear_progress(task.id)
+    if orphans:
+        db.commit()
+        logger.warning("Boot recovery: failed %d orphaned render(s) left by the previous worker: %s",
+                       len(orphans), [t.id for t in orphans])
+    return len(orphans)
+
+
 def resume_checkpoint_ids(db) -> set[str]:
     """Workspace names (task ids) the orphan sweep must leave alone: tasks that failed recently
     enough that a retry — autopilot or human — would still resume from them."""
@@ -580,9 +611,14 @@ def autopilot_retry_channel(db, channel) -> int:
     retried = 0
     # CANCELLED is deliberately absent: an operator who dropped an episode from the queue must not
     # find it back a few minutes later (ADR-064). Only genuine failures are auto-retried.
+    # ACTIVE campaigns only. Without this the autopilot fought two other mechanisms: it re-queued the
+    # very episodes the consecutive-failure circuit breaker had just stopped a campaign for, and it
+    # re-rendered (and, on auto-publish, actually UPLOADED) leftover failures of campaigns the
+    # operator had already completed.
     for t in db.scalars(
             select(Task).join(Campaign, Task.campaign_id == Campaign.id)
-            .where(Campaign.channel_id == channel.id, Task.status == TaskStatus.FAILED)).all():
+            .where(Campaign.channel_id == channel.id, Task.status == TaskStatus.FAILED,
+                   Campaign.status == CampaignStatus.active)).all():
         msg = (t.error_message or "").lower()
         if "rejected in review" in msg and "auto-review" not in msg:
             continue  # a human rejected this — don't silently re-render it

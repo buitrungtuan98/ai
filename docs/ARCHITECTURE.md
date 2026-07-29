@@ -1463,3 +1463,38 @@ real danger is serving a stale image to a NEW script — hashing the exact promp
 structurally impossible instead of procedurally avoided. **Why `core/failure.py`:** the scheduler
 cannot import `main` (circular), and a second keyword list is how the app got four attention counts —
 one table, three readers.
+
+### ADR-070 — Post-R7 audit fixes: boot recovery, autopilot scope, honest diagnosis, meaningful QC retry
+**Decision:** five defects found by auditing the R7 result against what the UI promises.
+1. **Boot-time orphan recovery** (`scheduler.fail_orphaned_renders`, called from `run_worker.main`
+   before the worker consumes anything). At boot there is exactly one worker and it has not started
+   rendering, so any task still in AI_GENERATION/RENDERING/AUDIO_SYNCED/PUBLISHING is the abandoned
+   remains of the previous process. It is marked FAILED — not re-queued — with a message that
+   classifies as transient, so the retry cap still applies and the autopilot picks it up (and with
+   R7's kept workspace, that retry is a resume).
+2. **Autopilot retry is scoped to ACTIVE campaigns.** It was joined on the channel only.
+3. **The stalled class is matched before the network class** in `core/failure.PATTERNS`.
+4. **Auto-QC's re-render passes a seed salt** (`image_seed_salt` → `_pollinations_seed(prompt, salt)`),
+   so attempt 2 draws different images. Attempt 1 stays salt-free — determinism is what lets a resume
+   reuse a checkpointed still.
+5. **A publish job gets 3600s** instead of 1800s.
+Plus: the "Restart worker" confirm now describes what happens, and the ⌘K palette preselects its
+first row on open exactly as it does after typing.
+
+**Why:** each of these was a mechanism that was *almost* right, and the gap was invisible because the
+suite tested the path that worked. The watchdog does careful bookkeeping on the STALL path — fail the
+task, drop the ghost progress, release the lock — but the operator-restart path only consumed the flag
+and exited, so the button the Operations page offers left the episode reading "Rendering 47%" with
+nothing working on it until the stuck-task reaper noticed up to two hours later; a `compose` redeploy
+whose 300s grace expired mid-encode did the same. Boot is the one moment the answer is certain, which
+is why the fix lives there rather than in more elaborate shutdown handling. The autopilot's missing
+campaign filter had it fighting two other mechanisms: it re-queued the very episodes the
+consecutive-failure breaker had just stopped a campaign for, and it could re-render and (on
+auto-publish) actually UPLOAD leftover failures of a campaign the operator had completed — automation
+must not outrank an explicit human stop. The diagnosis order was my own regression from ADR-068: both
+the watchdog's and the reaper's wording contain "timeout" as well as "stalled"/"worker", so the bell
+blamed the vendor for this box's own fault (same retry verdict, wrong explanation — and the operator
+acts on the explanation). The QC re-render was pure waste with the free provider: the Pollinations
+seed is derived from the prompt, so attempt 2 rebuilt the rejected video pixel-for-pixel and re-judged
+it — a whole episode of image calls plus a vision call to reach the identical verdict. Salting only
+attempt 2 keeps both properties: deterministic for resume, different for reroll.

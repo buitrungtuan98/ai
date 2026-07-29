@@ -13,7 +13,8 @@ from rq import SimpleWorker
 
 from core.config import settings
 from database.db_session import init_db
-from workers.scheduler import run_scheduler_thread
+from database.db_session import SessionLocal
+from workers.scheduler import fail_orphaned_renders, run_scheduler_thread
 from workers.task_queue import LOCK_KEY, clear_all_progress, clear_restart_request, conn, render_queue
 from workers.watchdog import run_watchdog_thread
 
@@ -30,6 +31,12 @@ def main() -> None:
     # restart loop. A restart flag consumed by the previous process must not kill this one either.
     clear_all_progress()
     clear_restart_request()
+    # The DB rows that belonged to those artifacts (ADR-070). Redis is now clean, but a task killed
+    # mid-render still reads RENDERING — a "Rendering 47%" that nothing is working on. Failing it here
+    # makes it immediately retryable (and R7 makes that retry a resume) instead of waiting ~2h for the
+    # stuck-task reaper. This is why the "Restart worker" button can promise the render is retried.
+    with SessionLocal() as db:
+        fail_orphaned_renders(db)
     run_scheduler_thread()  # periodic buffer hydration + housekeeping (in-process, no extra container)
     run_watchdog_thread()   # wedged-render / operator-restart recovery (ADR-057)
     worker = SimpleWorker([render_queue], connection=conn)

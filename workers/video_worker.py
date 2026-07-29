@@ -648,6 +648,11 @@ def render_task(task_id: int) -> None:
                 studio_sheet_dir=os.path.join(settings.MEDIA_ROOT, "studio", "sheets", str(channel.id)),
                 gen_image=image_gen,
                 image_timeout_s=image_timeout_s,
+                # Attempt 2 asks the free image provider for DIFFERENT draws (ADR-070): its seed is
+                # derived from the prompt, so re-rendering reproduced the QC-rejected video
+                # pixel-for-pixel and re-judged it — a whole episode of image calls for the same
+                # verdict. Attempt 1 stays salt-free so a resume reuses its checkpointed stills.
+                image_seed_salt=attempt - 1,
                 title_overlay=cfg.get("title_overlay") == "on",
                 content_style=content_style,
                 signature=cfg.get("signature"),

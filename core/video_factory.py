@@ -504,6 +504,7 @@ def produce(
     studio_sheet_dir: str | None = None,
     gen_image=None,
     image_timeout_s: int | None = None,
+    image_seed_salt: int = 0,
     title_overlay: bool = False,
     content_style: str = "story",
     signature: str | None = None,
@@ -514,7 +515,10 @@ def produce(
     `output_dir` (outside the workspace) so it survives cleanup; temp media is removed on success —
     a FAILED render keeps its workspace as a checkpoint so a retry resumes from the scenes already
     drawn instead of starting over (ADR-069). `image_timeout_s` is the per-attempt image-vendor wait
-    (Settings knob); the per-episode total is capped by `IMAGE_WAIT_BUDGET_SECONDS`."""
+    (Settings knob); the per-episode total is capped by `IMAGE_WAIT_BUDGET_SECONDS`. `image_seed_salt`
+    asks the free image provider for a different draw of the same scenes — Auto-QC's re-render passes
+    a non-zero value, because its seed is otherwise deterministic and it rebuilt the rejected video
+    pixel-for-pixel (ADR-070)."""
     import os
     import time
 
@@ -658,7 +662,8 @@ def produce(
                         mood=clean, api_key=image_api_key, out_path=still_path, reference_paths=refs,
                         reference_url=(studio_character.get("ref_url") if studio_character else None),
                         style_override=visual_style, model=image_model, gen_image=gen_image,
-                        timeout_s=image_timeout_s, deadline=image_deadline)
+                        timeout_s=image_timeout_s, deadline=image_deadline,
+                        seed_salt=image_seed_salt)
                 studio_prev_still = still_path
                 studio_clip = still_to_clip(still_path, ws.path(f"scene_{si}_studio.mp4"), d_i, profile)
                 plans.append({"clean": clean, "audio": audio_path, "timings": timings,

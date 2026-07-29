@@ -27,6 +27,15 @@ PATTERNS: tuple[tuple[tuple[str, ...], str, str, str, str, bool], ...] = (
      "The daily or per-minute allowance for the AI model is spent. It resets on its own — retry "
      "later, or put a bigger-quota model first in the model chain.", "/credentials", "Model chain",
      False),
+    # Ahead of the network class on purpose: the watchdog's and the reaper's own wording contains
+    # BOTH "stalled/worker" and "timeout" ("…no progress for N minutes, past this job's own
+    # timeout…"), and matching "timeout" first told the operator a provider was unreachable when the
+    # truth was that this box's worker had wedged. Same retry verdict either way, wrong explanation.
+    (("stalled", "wedged", "worker"),
+     "The worker stopped making progress",
+     "The render was abandoned because it stopped reporting progress. The worker recovers itself; "
+     "check it is running, then retry this episode — it resumes from the scenes already drawn.",
+     "/operations", "Worker status", True),
     (("no space", "disk", "enospc"),
      "The box ran out of disk",
      "Rendering needs working space. Old renders are cleaned automatically, but a stuck job can fill "
@@ -42,10 +51,6 @@ PATTERNS: tuple[tuple[tuple[str, ...], str, str, str, str, bool], ...] = (
      "This is almost always transient — the render reached out and got nothing back. Retry it; an "
      "interrupted render resumes from the scenes it already finished.",
      "", "", True),
-    (("stalled", "wedged", "worker"),
-     "The worker stopped making progress",
-     "The render was abandoned because it stopped reporting progress. The worker recovers itself; "
-     "check it is running, then retry this episode.", "/operations", "Worker status", True),
     (("safety", "blocked", "policy", "profanity"),
      "The safety filter blocked the content",
      "The generated script tripped the brand-safety filter. Discard & re-render writes a fresh "
