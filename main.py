@@ -784,7 +784,8 @@ def channels_page(request: Request, user: CurrentUser, db: DbDep, status: str = 
          "characters": {c.id: _sanitize_characters(c.characters_json) for c in channels},
          "flash": flash if flash in ("profile", "autopilot", "character", "char_img_ok",
                                      "char_img_fail", "no_google_client", "fb_added",
-                                     "fb_rejected") else "",
+                                     "fb_added_unverified", "fb_rejected", "fb_token_ok",
+                                     "fb_token_unverified", "fb_token_bad") else "",
          # Facebook's own words for why it refused. Truncated and escaped by Jinja on the way out;
          # never contains the token (see services/verification.check_facebook_page).
          "flash_reason": flash_reason[:200]},
@@ -795,33 +796,93 @@ def channels_page(request: Request, user: CurrentUser, db: DbDep, status: str = 
 def add_facebook_channel(
     user: CurrentUser,
     db: DbDep,
-    channel_name: str = Form(...),
+    channel_name: str = Form(""),
     page_id: str = Form(...),
     page_access_token: str = Form(...),
     avatar_url: str = Form(""),
 ):
-    # Verify before trusting (ADR-068). A made-up Page id and token used to save as "● Active" and
-    # count as a connected channel; the lie only surfaced weeks later when a publish failed. One cheap
-    # Graph call decides — and a network hiccup must not block a real operator, so only a definite
-    # rejection stops the save.
+    """Connect a Facebook Page, verifying it first (ADR-068/072).
+
+    A made-up Page id and token used to save as "● Active" and count as a connected channel; the lie
+    only surfaced weeks later when a publish failed. One cheap Graph call decides — and a network
+    hiccup must not block a real operator, so only a DEFINITE rejection stops the save."""
+    from services import verification
+
+    page_id = verification.normalize_page_id(page_id)
+    page_access_token = (page_access_token or "").strip()
+    if not page_id or not page_access_token:
+        return RedirectResponse(
+            "/channels?flash=fb_rejected&flash_reason="
+            + quote("A Page ID and a Page Access Token are both required."), status_code=303)
     verdict = None
     try:
-        from services import verification
-
         verdict = verification.check_facebook_page(page_id, page_access_token)
     except Exception:  # noqa: BLE001 — verification is a guard, never a gate on our own bugs
         logger.warning("Facebook page verification raised", exc_info=True)
-    if verdict is not None and verdict[0] is False:
+    if verdict is not None and verdict.ok is False:
         return RedirectResponse(
-            "/channels?flash=fb_rejected&flash_reason=" + quote(verdict[1][:200]), status_code=303)
+            "/channels?flash=fb_rejected&flash_reason=" + quote(verdict.detail[:200]), status_code=303)
+    verified = verdict is not None and verdict.ok is True
+    if verified:
+        # Store the CANONICAL numeric id Graph resolved, not the username or URL that was typed: a
+        # username silently breaks the day the operator renames the Page.
+        page_id = verdict.page_id or page_id
+    # The operator may leave the label and avatar blank and take the Page's own (ADR-072) — retyping
+    # what Facebook just told us is busywork, and a hand-typed name drifts from the real Page.
+    name = (channel_name or "").strip() or (verdict.name if verified else "") or f"Page {page_id}"
+    avatar = (avatar_url or "").strip() or (verdict.picture if verified else None)
     creds = json.dumps({"page_id": page_id, "page_access_token": page_access_token})
     channel = Channel(
-        user_id=user.id, platform=Platform.facebook, channel_name=channel_name,
-        avatar_url=avatar_url or None, encrypted_credentials=creds, status=ChannelStatus.active,
+        user_id=user.id, platform=Platform.facebook, channel_name=name[:120],
+        avatar_url=avatar or None, encrypted_credentials=creds, status=ChannelStatus.active,
     )
     db.add(channel)
     db.commit()
-    return RedirectResponse("/channels?flash=fb_added", status_code=303)
+    # Only say "verified" when it actually was. Claiming Facebook accepted a token we never managed to
+    # ask about is exactly the lie this check exists to remove.
+    return RedirectResponse(
+        "/channels?flash=" + ("fb_added" if verified else "fb_added_unverified"), status_code=303)
+
+
+@app.post("/channels/{channel_id}/facebook-token")
+def replace_facebook_token(db: DbDep, channel=Depends(get_owned_channel),
+                           page_access_token: str = Form(...)):
+    """Paste a fresh Page Access Token for an already-connected Page (ADR-072).
+
+    Without this, marking a channel `expired` would be a dead end: the only way back was Remove +
+    re-add, which deletes the channel's campaigns and rendered videos. A token is a credential that
+    rotates; losing a year of campaigns because one expired is not a trade anyone would choose.
+    A verified token also clears the expired flag, so the fix is visible immediately."""
+    from services import verification
+
+    if channel.platform != Platform.facebook:
+        raise HTTPException(400, "Only a Facebook Page has a Page Access Token")
+    token = (page_access_token or "").strip()
+    if not token:
+        return RedirectResponse("/channels?flash=fb_token_bad&flash_reason="
+                                + quote("Paste the new token first."), status_code=303)
+    creds = json.loads(channel.encrypted_credentials or "{}")
+    page_id = creds.get("page_id") or ""
+    verdict = None
+    try:
+        verdict = verification.check_facebook_page(page_id, token)
+    except Exception:  # noqa: BLE001 — the guard must never be the thing that blocks a fix
+        logger.warning("Facebook token replacement verification raised", exc_info=True)
+    if verdict is not None and verdict.ok is False:
+        return RedirectResponse("/channels?flash=fb_token_bad&flash_reason="
+                                + quote(verdict.detail[:200]), status_code=303)
+    creds["page_access_token"] = token
+    if verdict is not None and verdict.ok is True and verdict.page_id:
+        creds["page_id"] = verdict.page_id      # a re-verified Page confirms its canonical id
+    channel.encrypted_credentials = json.dumps(creds)
+    # Only a VERIFIED token may clear the expired flag. Storing an unverified one and declaring the
+    # channel healthy would recreate exactly the lie ADR-068 removed.
+    verified = verdict is not None and verdict.ok is True
+    if verified:
+        channel.status = ChannelStatus.active
+    db.commit()
+    return RedirectResponse(
+        "/channels?flash=" + ("fb_token_ok" if verified else "fb_token_unverified"), status_code=303)
 
 
 @app.post("/channels/{channel_id}/delete")
@@ -3069,17 +3130,26 @@ def _credential_alerts(db, user) -> list[dict]:
     Nothing said this before: a first-time operator could create and start a campaign with no keys at
     all, watch it queue three episodes, and read "All clear" on the dashboard while every render was
     doomed. The keys are checked per campaign because the requirement differs — Studio/quote campaigns
-    draw their visuals and need no Pexels key, stock-footage campaigns do."""
+    draw their visuals and need no Pexels key, stock-footage campaigns do.
+
+    Also surfaces a channel whose stored token Facebook has since refused (ADR-072): that one is not
+    about a campaign at all — every episode on that channel will fail to publish until it is fixed."""
+    out: list[dict] = []
+    for ch in db.scalars(select(Channel).where(
+            Channel.user_id == user.id, Channel.status == ChannelStatus.expired)).all():
+        out.append(_alert("red", f"channel-expired:{ch.id}",
+                          "Its access token was refused — nothing can publish here until you paste a "
+                          "fresh one. Rendered episodes keep waiting, they are not lost.",
+                          channel=ch.channel_name, href="/channels", action="Fix the channel"))
     active = db.scalars(select(Campaign).where(
         Campaign.user_id == user.id, Campaign.status == CampaignStatus.active)).all()
     if not active:
-        return []
+        return out
     has_gemini = bool(user.gemini_api_key or settings.GEMINI_API_KEY)
     has_pexels = bool(user.pexels_api_key or settings.PEXELS_API_KEY)
     needs_pexels = [c for c in active
                     if (c.config_json or {}).get("visual_source") != "studio"
                     and (c.config_json or {}).get("content_style") != "quote"]
-    out = []
     if not has_gemini:
         out.append(_alert("red", "missing-gemini",
                           f"No Gemini API key — every render for your {len(active)} active "

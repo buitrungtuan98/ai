@@ -1,0 +1,24 @@
+{# How to actually obtain a PERMANENT Page Access Token (ADR-072). This is the step every operator
+   gets stuck on: the token the Graph Explorer hands you by default is a short-lived USER token, which
+   now fails verification with a clear message — so the form has to say what to do instead. Shared by
+   the "Add a Facebook Page" form and each Page's "Replace token" panel, so the instructions cannot
+   drift apart. #}
+<details class="disclosure">
+  <summary>How do I get a permanent Page Access Token?</summary>
+  <div class="disclosure-body">
+    <ol class="crit-list">
+      <li>Open the <a href="https://developers.facebook.com/tools/explorer/" target="_blank" rel="noopener">Graph API Explorer</a>
+        and pick (or create) an app.</li>
+      <li>In the <b>User or Page</b> dropdown choose <b>your Page</b> — not “User token”. This is the
+        step that decides everything: a user token reads your Page’s name fine, so it <i>looks</i>
+        right, but it cannot post and it expires within hours.</li>
+      <li>Add the permissions <code>pages_manage_posts</code>, <code>pages_read_engagement</code> and
+        <code>pages_show_list</code>, then <b>Generate Access Token</b>.</li>
+      <li>Paste it into the <a href="https://developers.facebook.com/tools/debug/accesstoken/" target="_blank" rel="noopener">Access Token Debugger</a>
+        and press <b>Extend Access Token</b> — the extended <b>Page</b> token has
+        <b>Expires: Never</b>. That is the one to paste here.</li>
+    </ol>
+    <p class="hint">Your <b>Page ID</b> is on the Page under <b>About → Page transparency</b>; you can
+      also just paste the Page’s URL here and we’ll resolve it.</p>
+  </div>
+</details>

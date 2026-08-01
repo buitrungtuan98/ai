@@ -110,6 +110,8 @@ def fetch_facebook_stats(channel: Channel, video_ids: list[str]) -> dict[str, di
 
     import requests
 
+    from services.facebook_service import GRAPH, FacebookAuthError, raise_for_graph
+
     data = _json.loads(channel.encrypted_credentials or "{}")
     token = data.get("page_access_token")
     if not token:
@@ -118,13 +120,17 @@ def fetch_facebook_stats(channel: Channel, video_ids: list[str]) -> dict[str, di
     for vid in video_ids[:50]:
         try:
             resp = requests.get(
-                f"https://graph.facebook.com/v20.0/{vid}/video_insights/total_video_views",
+                f"{GRAPH}/{vid}/video_insights/total_video_views",
                 params={"access_token": token}, timeout=20,
             )
-            resp.raise_for_status()
+            raise_for_graph(resp, token=token, what="Facebook insights")
             rows = resp.json().get("data", [])
             views = rows[0]["values"][0]["value"] if rows else 0
             out[vid] = {"views": int(views)}
+        except FacebookAuthError:
+            # A dead token fails identically for every remaining video — stop, and let the caller
+            # mark the channel expired instead of logging the same failure fifty times (ADR-072).
+            raise
         except Exception:  # noqa: BLE001
             logger.warning("FB insights failed for video %s", vid)
     return out
@@ -324,13 +330,13 @@ def fetch_facebook_page_totals(channel: Channel) -> dict | None:
     YouTube's, so `views` stays None instead of inventing a number that means something else."""
     import requests
 
-    from services.facebook_service import _load
+    from services.facebook_service import GRAPH, _load, raise_for_graph
 
     page_id, token = _load(channel)
     resp = requests.get(
-        f"https://graph.facebook.com/v20.0/{page_id}",
+        f"{GRAPH}/{page_id}",
         params={"fields": "followers_count,fan_count", "access_token": token}, timeout=20)
-    resp.raise_for_status()
+    raise_for_graph(resp, token=token, what="Facebook page")
     data = resp.json()
     followers = data.get("followers_count", data.get("fan_count"))
     return {"subscribers": int(followers) if followers is not None else None,
@@ -367,6 +373,9 @@ def collect_channel_snapshots(db, now: datetime | None = None) -> int:
     is the backstop, so extra calls cost one cheap SELECT and no API quota. Best-effort per channel —
     one revoked token must not stop the others."""
     from database.models import ChannelSnapshot
+    from database.types import ChannelStatus
+    from services.facebook_service import FacebookAuthError
+    from services.facebook_service import scrub as _scrub
 
     written = 0
     for channel in db.scalars(select(Channel)).all():
@@ -376,8 +385,19 @@ def collect_channel_snapshots(db, now: datetime | None = None) -> int:
             continue  # already sampled today — don't spend a call
         try:
             totals = fetch_channel_totals(channel)
-        except Exception:  # noqa: BLE001 — a dead token/quota must not break the pass
-            logger.warning("channel-totals fetch failed for channel %s", channel.id, exc_info=True)
+        except FacebookAuthError as exc:
+            # The token is dead, not the network: retire the channel so the UI stops claiming it
+            # works, instead of failing this same call every hour forever (ADR-072).
+            if channel.status != ChannelStatus.expired:
+                channel.status = ChannelStatus.expired
+                db.commit()
+                logger.warning("Channel %s marked expired during snapshot: %s", channel.id, exc)
+            continue
+        except Exception as exc:  # noqa: BLE001 — a dead token/quota must not break the pass
+            # `exc_info` is deliberately absent: a raw requests traceback embeds the Graph URL, and
+            # that URL carries the access token straight into the log file (ADR-072).
+            logger.warning("channel-totals fetch failed for channel %s: %s",
+                           channel.id, _scrub(str(exc)))
             continue
         if not totals:
             continue

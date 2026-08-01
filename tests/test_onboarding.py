@@ -114,8 +114,9 @@ def test_a_page_facebook_rejects_is_not_saved_as_a_working_channel(client, sessi
     from database.models import Channel
     from services import verification
 
-    monkeypatch.setattr(verification, "check_facebook_page",
-                        lambda page_id, token: (False, "Invalid OAuth access token."))
+    monkeypatch.setattr(
+        verification, "check_facebook_page",
+        lambda page_id, token: verification.PageCheck(False, "Invalid OAuth access token."))
 
     r = client.post("/channels/facebook", data={
         "channel_name": "Fake", "page_id": "1", "page_access_token": "made-up"},
@@ -135,13 +136,15 @@ def test_a_network_hiccup_never_blocks_connecting_a_real_page(client, session, m
     flaky minute locks them out of their own Page."""
     from services import verification
 
-    monkeypatch.setattr(verification, "check_facebook_page",
-                        lambda page_id, token: (None, "Could not reach Facebook to verify"))
+    monkeypatch.setattr(
+        verification, "check_facebook_page",
+        lambda page_id, token: verification.PageCheck(None, "Could not reach Facebook to verify"))
 
     r = client.post("/channels/facebook", data={
         "channel_name": "Real Page", "page_id": "123", "page_access_token": "tok"},
         follow_redirects=False)
-    assert r.headers["location"] == "/channels?flash=fb_added"
+    # Saved — but the banner must not claim it was verified (ADR-072).
+    assert r.headers["location"] == "/channels?flash=fb_added_unverified"
     assert session.scalars(select_channels()).first().channel_name == "Real Page"
 
 
@@ -155,9 +158,9 @@ def test_the_verifier_never_raises_and_never_leaks_the_token(monkeypatch):
     import requests
 
     monkeypatch.setattr(requests, "get", boom)
-    ok, detail = verification.check_facebook_page("1", "SECRET")
-    assert ok is None                       # could not tell — not a rejection
-    assert "SECRET" not in detail and "access_token" not in detail
+    check = verification.check_facebook_page("1", "SECRET")
+    assert check.ok is None                 # could not tell — not a rejection
+    assert "SECRET" not in check.detail and "access_token" not in check.detail
 
 
 def select_channels():

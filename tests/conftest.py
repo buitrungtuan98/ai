@@ -41,8 +41,9 @@ def no_live_credential_checks(monkeypatch):
     """
     from services import verification
 
-    monkeypatch.setattr(verification, "check_facebook_page",
-                        lambda page_id, token: (None, "not checked in tests"))
+    monkeypatch.setattr(
+        verification, "check_facebook_page",
+        lambda page_id, token: verification.PageCheck(None, "not checked in tests"))
 
 
 @pytest.fixture

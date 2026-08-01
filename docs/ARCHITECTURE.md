@@ -1537,3 +1537,40 @@ one sounds unwell rather than intimate. Restricting the designer's voice pool ma
 same reason: the soft chain over an energetic announcer read sounds wrong, and an operator should not
 have to undo the designer's pick on every quote campaign. That restriction is per language, which is
 what makes the English and Spanish quote channels work as well as the Vietnamese one.
+
+### ADR-072 — Facebook: verify the right thing, say only what is true, stay fixable
+**Decision:** seven changes across the Facebook surface.
+1. **Verification asks `/me`, not `/{page_id}`.** Reading a Page's public name proves nothing — a
+   short-lived USER token reads it happily. With a PAGE token `/me` IS the Page, and only a Page
+   carries `category`; that one field separates them. A numeric id the operator typed must also match
+   the id Graph returns, so a token for the *wrong* Page is refused too.
+2. **`check_facebook_page` returns a `PageCheck`** (verdict + canonical id + name + picture) instead
+   of `(bool|None, str)`, because the same call already knows everything the save needs.
+3. **`fb_added_unverified`.** The banner may only say "verified" when the verdict was `True`.
+4. **`normalize_page_id`** accepts a URL, a username, `@handle` or the raw id; a verified save stores
+   the canonical NUMERIC id Graph resolved.
+5. **Graph errors carry Facebook's own words**, token-scrubbed (`raise_for_graph`, `scrub`), and an
+   OAuth failure raises `FacebookAuthError`, which `core.failure` classifies as a non-retryable
+   credential problem pointing at **/channels** (an API key's fix is on /credentials — different page,
+   so it is a separate class, not a widened one).
+6. **`ChannelStatus.expired` is now written** — by `_fail_task` on a publish auth error and by the
+   analytics snapshot pass — so the pill and the filter chip stop being decoration. It is paired with
+   `POST /channels/{id}/facebook-token`, because marking a channel broken without a way back would be
+   a dead end: the only previous route was Remove + re-add, which deletes the channel's campaigns and
+   rendered videos with it. Only a **verified** token clears the flag.
+7. **One `GRAPH_VERSION`** (v23.0) in `facebook_service`; nothing else builds a Graph URL.
+Plus: the form and each Page card share `_fb_token_help.html`, which explains how to obtain a
+permanent Page token — the step that actually defeats people.
+
+**Why:** the whole journey was verified by the one question that cannot fail. The most common mistake
+in this integration is pasting the short-lived User token the Graph Explorer offers by default; it
+read the Page's public name, so the channel saved as "● Active", counted as connected, and died hours
+later at publish time with `400 Client Error: Bad Request for url: …` — a message that is unreadable,
+that leaks the token through the URL, and that discards Facebook's own explanation sitting in the
+response body. The autopilot then spent its whole retry cap re-uploading with the same dead
+credential, because nothing classified "access token" as a credential failure. And the operator's only
+route back was to delete the channel — taking its campaigns and rendered episodes with it — because
+`expired` was a status the code could display but never set. Each fix is small; what they have in
+common is that the system knew the answer and either did not ask, did not say it, or had nowhere to
+put it. Storing the canonical numeric id is the one change with no visible symptom yet: a username
+works until the day the Page is renamed, and then every call 404s at once.

@@ -3,6 +3,8 @@ time, not at 2am when a render fails. Each returns (ok, detail) and never raises
 from __future__ import annotations
 
 import logging
+import re
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -109,31 +111,92 @@ def verify_telegram(token: str, chat_id: str | None = None) -> tuple[bool, str]:
         return False, "Could not reach Telegram (network error)."
 
 
-def check_facebook_page(page_id: str, token: str) -> tuple[bool | None, str]:
-    """Does this Page id + token actually work? THREE-state on purpose (ADR-068):
+_PAGE_URL = re.compile(
+    r"^(?:https?://)?(?:www\.|m\.|web\.|business\.)?facebook\.com/(?:pg/)?(?P<slug>[^/?#]+)", re.I)
+_PROFILE_URL_ID = re.compile(r"profile\.php\?id=(?P<id>\d+)", re.I)
+
+
+def normalize_page_id(raw: str) -> str:
+    """Accept whatever an operator pastes and return the bare Page identifier (ADR-072).
+
+    People paste `https://www.facebook.com/MyPage`, `facebook.com/profile.php?id=123`, `@MyPage`, or
+    the plain id. Everything but the plain id used to be stored verbatim: a full URL made every Graph
+    call 404 (and the save went through anyway because "could not tell" passes), while a username
+    happened to work until Facebook renamed it. The canonical NUMERIC id is resolved separately by
+    `check_facebook_page` — this is only the "make it a lookup key at all" step."""
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    m = _PROFILE_URL_ID.search(s)
+    if m:
+        return m.group("id")
+    m = _PAGE_URL.match(s)
+    if m:
+        s = m.group("slug")
+    return s.lstrip("@").strip("/")
+
+
+@dataclass(frozen=True)
+class PageCheck:
+    """The verdict AND the Page's real identity, so the caller can store the canonical id and offer
+    the official name/avatar instead of asking the operator to retype them."""
+
+    ok: bool | None      # True verified · False definitely rejected · None could not tell
+    detail: str
+    page_id: str | None = None
+    name: str | None = None
+    picture: str | None = None
+
+
+def check_facebook_page(page_id: str, token: str) -> PageCheck:
+    """Is this really a Page Access Token for this Page? THREE-state on purpose (ADR-068/072):
     `True` verified · `False` definitely rejected · `None` could not tell.
 
     The other checks here answer a Test button, where "couldn't reach it" may as well be a failure.
     This one gates a save, so the distinction matters: a made-up token must be refused, but a network
     hiccup must never stop a real operator from connecting their Page. Never raises.
+
+    It asks `/me` rather than `/{page_id}`, because that is the only question worth asking. Reading a
+    Page's public name proves nothing — a short-lived USER token (what people copy out of the Graph
+    Explorer, and the single most common mistake) reads it happily, so the channel saved as verified
+    and died hours later at publish time. With a PAGE token `/me` IS the Page; with a user token it is
+    a person, and only a Page carries `category`. That one field separates them.
     """
+    from services.facebook_service import GRAPH, scrub
+
+    wanted = normalize_page_id(page_id)
     try:
         import requests
 
         resp = requests.get(
-            f"https://graph.facebook.com/v20.0/{page_id}",
-            params={"fields": "id,name", "access_token": token}, timeout=TIMEOUT)
-        if resp.status_code == 200 and (resp.json() or {}).get("id"):
-            return True, f"Verified: {(resp.json() or {}).get('name') or page_id}."
-        # Graph answers a bad token or a wrong Page id with 400/403/404 and an explanation.
+            f"{GRAPH}/me",
+            params={"fields": "id,name,category,picture.type(large)", "access_token": token},
+            timeout=TIMEOUT)
+        if resp.status_code == 200:
+            data = resp.json() or {}
+            got_id, name = str(data.get("id") or ""), data.get("name") or ""
+            if not data.get("category"):
+                who = f" It belongs to “{name}”." if name else ""
+                return PageCheck(False, "That is a personal User token, not a Page Access Token."
+                                        f"{who} In the Graph API Explorer, switch the token dropdown "
+                                        "to your Page before generating it.")
+            # A numeric id the operator typed must match; a username/URL is resolved by Graph instead.
+            if wanted.isdigit() and got_id and wanted != got_id:
+                return PageCheck(False, f"This token belongs to the Page “{name}” (id {got_id}), "
+                                        f"not to the Page id you entered ({wanted}).")
+            pic = (((data.get("picture") or {}).get("data") or {}).get("url")) or None
+            return PageCheck(True, f"Verified: {name or got_id or wanted}.",
+                             page_id=got_id or wanted, name=name or None, picture=pic)
+        # Graph answers a bad token with 400/401/403 and an explanation of its own.
         if resp.status_code in (400, 401, 403, 404):
             detail = ""
             try:
                 detail = ((resp.json() or {}).get("error") or {}).get("message") or ""
             except ValueError:
                 pass
-            return False, detail or f"Facebook rejected these details (HTTP {resp.status_code})."
-        return None, f"Facebook answered HTTP {resp.status_code} — could not verify right now."
+            return PageCheck(False, scrub(detail, token)
+                             or f"Facebook rejected these details (HTTP {resp.status_code}).")
+        return PageCheck(None, f"Facebook answered HTTP {resp.status_code} — could not verify now.")
     except Exception as exc:  # noqa: BLE001 — the URL carries the token; never surface the raw text
         logger.warning("Facebook page verification network error: %s", type(exc).__name__)
-        return None, "Could not reach Facebook to verify — saved without checking."
+        return PageCheck(None, "Could not reach Facebook to verify — saved without checking.")

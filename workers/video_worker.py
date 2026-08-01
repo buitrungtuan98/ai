@@ -26,7 +26,7 @@ from core.config import settings
 from core.video_factory import Branding
 from database.db_session import SessionLocal
 from database.models import BufferPoolItem, Campaign, ChannelClipUsage, Channel, Task, User
-from database.types import BufferStatus, CampaignStatus, Platform, TaskStatus
+from database.types import BufferStatus, CampaignStatus, ChannelStatus, Platform, TaskStatus
 from workers.task_queue import (
     clear_progress,
     enqueue_publish,
@@ -417,14 +417,42 @@ def _publish_buffer(db, task: Task, buf: BufferPoolItem, campaign: Campaign,
     return video_id
 
 
+def _mark_channel_expired(db, campaign: Campaign, exc: Exception) -> bool:
+    """A dead Page/OAuth token means the CHANNEL is broken, not this episode (ADR-072).
+
+    Nothing used to set `ChannelStatus.expired`, so the Channels page kept showing "● Active" for a
+    channel that could no longer publish anything, and its "Expired token" pill and filter chip were
+    decoration. Marking it here is what makes those honest — and what stops the operator debugging
+    episode after episode when the real fix is one new token."""
+    from services.facebook_service import FacebookAuthError
+
+    if not isinstance(exc, FacebookAuthError) or campaign is None:
+        return False
+    channel = db.get(Channel, campaign.channel_id)
+    if channel is None or channel.status == ChannelStatus.expired:
+        return False
+    channel.status = ChannelStatus.expired
+    db.commit()
+    logger.warning("Channel %s marked expired: %s", channel.id, exc)
+    return True
+
+
 def _fail_task(db, task: Task, user: User, campaign: Campaign, exc: Exception, job: str) -> None:
+    from services.facebook_service import scrub
+
     db.rollback()
     task.status = TaskStatus.FAILED
     task.finished_at = datetime.utcnow()
-    task.error_message = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-4000:]
+    # Scrubbed before storing: this string is rendered on the episode page and in the alert bell, and
+    # a Graph traceback carries `access_token=…` in the request URL (ADR-072).
+    trace = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    task.error_message = scrub(trace)[-4000:]
     db.commit()
     logger.exception("%s for task %s failed", job, task.id)
-    _notify(user, f"❌ Episode {task.episode_number} of '{campaign.topic_name}' failed: {exc}")
+    expired = _mark_channel_expired(db, campaign, exc)
+    note = " The channel is marked expired — paste a fresh Page token." if expired else ""
+    _notify(user, f"❌ Episode {task.episode_number} of '{campaign.topic_name}' failed: "
+                  f"{scrub(str(exc))}{note}")
     _maybe_trip_circuit_breaker(db, campaign, user)
 
 
