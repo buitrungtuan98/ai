@@ -18,7 +18,20 @@
 {% elif flash == 'char_img_fail' %}
 {% call ui.banner('failed') %}⚠ <b>That image couldn’t be used.</b> The character was saved, but the picture must be a <b>PNG, JPG or WebP under 15&nbsp;MB</b> (iPhone HEIC isn’t supported — in Photos, share/export as JPG first). Use <b>Add image</b> on the character to try again.{% endcall %}
 {% elif flash == 'fb_added' %}
-{% call ui.banner('success') %}✓ <b>Page connected and verified.</b> Facebook accepted the token, so this Page can publish. Create a campaign on it to start making videos.{% endcall %}
+{% call ui.banner('success') %}✓ <b>Page connected and verified.</b> Facebook confirmed this is a Page Access Token for that Page, so it can publish. Create a campaign on it to start making videos.{% endcall %}
+{% elif flash == 'fb_added_unverified' %}
+{# "Could not tell" is not "verified". Saying otherwise is the exact lie the check exists to remove. #}
+{% call ui.banner('') %}ⓘ <b>Page saved — but not verified.</b> We couldn’t reach Facebook to check the
+  token just now, so the Page was stored without confirming it. Nothing is lost either way: use
+  <b>Check token</b> on the card below before you rely on it.{% endcall %}
+{% elif flash == 'fb_token_ok' %}
+{% call ui.banner('success') %}✓ <b>New token accepted.</b> Facebook verified it and the channel is active again — retry any episode that failed while it was expired.{% endcall %}
+{% elif flash == 'fb_token_unverified' %}
+{% call ui.banner('') %}ⓘ <b>New token saved, but not verified.</b> Facebook was unreachable, so the
+  channel keeps its current status. Use <b>Check token</b> once you’re back online.{% endcall %}
+{% elif flash == 'fb_token_bad' %}
+{% call ui.banner('failed') %}⚠ <b>That token was refused — the old one is still in place.</b>
+  {% if flash_reason %}Facebook said: “{{ flash_reason }}”{% endif %}{% endcall %}
 {% elif flash == 'fb_rejected' %}
 {# The save was refused, so nothing was stored — say that plainly and quote Facebook's own reason. #}
 {% call ui.banner('failed') %}⚠ <b>Facebook refused those details, so the Page was not connected.</b>
@@ -108,7 +121,31 @@
       <a class="btn ghost sm" href="/assets?channel={{ c.id }}">Review →</a>
     </div>
     {% if c.status.value != 'active' %}
-    <p class="hint mt-sm">Re-authorise this channel to resume publishing — reconnect it via OAuth above.</p>
+    {# The recovery instruction has to match the platform: a YouTube channel is re-authorised through
+       OAuth, a Facebook Page needs a new token — and telling a Page owner to "reconnect via OAuth"
+       sent them to a button that does not apply to them (ADR-072). #}
+    <p class="hint mt-sm text-bad">⚠ {% if c.platform.value == 'facebook' %}Facebook refused this
+      Page’s token, so nothing can publish here. Paste a fresh <b>permanent Page Access Token</b>
+      below — your campaigns and rendered episodes are untouched and resume once it is accepted.
+      {% else %}Re-authorise this channel to resume publishing — reconnect it via OAuth above.{% endif %}</p>
+    {% endif %}
+    {% if c.platform.value == 'facebook' %}
+    {# A token rotates; a channel's campaigns and videos must not have to be deleted with it. #}
+    <details class="disclosure mt-sm" {{ 'open' if c.status.value != 'active' }}>
+      <summary><span class="sum"><span class="sum-l">🔑 Page token</span><span class="sum-v">{{ 'needs replacing' if c.status.value != 'active' else 'stored' }}</span></span></summary>
+      <div class="disclosure-body">
+        <p class="hint">Replace the stored token without touching this channel’s campaigns or its
+          rendered episodes. A token that Facebook <b>verifies</b> clears the expired flag right away;
+          one we can’t reach Facebook to check is stored, but the status stays as it is.</p>
+        <form method="post" action="/channels/{{ c.id }}/facebook-token">
+          {% call ui.field('New permanent Page Access Token') %}
+            <input name="page_access_token" type="password" required placeholder="EAA…">
+          {% endcall %}
+          <button class="btn sm" type="submit">Save &amp; check token</button>
+        </form>
+        {% include "_fb_token_help.html" %}
+      </div>
+    </details>
     {% endif %}
     <details class="disclosure mt-sm">
       <summary><span class="sum"><span class="sum-l">🌍 Channel profile</span><span class="sum-v">{% if pr %}{{ pr.vision or pr.audience or (pr.language|upper if pr.language) or 'Localized' }}{% else %}not set{% endif %}</span></span></summary>
@@ -255,14 +292,19 @@
 <details class="disclosure mt" id="fb-form">
   <summary>Add a Facebook Page</summary>
   <div class="disclosure-body">
-    <p class="subtitle">Provide the Page ID and a permanent Page Access Token. Stored encrypted at rest.</p>
+    <p class="subtitle">Paste the Page and a <b>permanent Page Access Token</b>. The token is checked
+      against Facebook before anything is saved, and stored encrypted at rest.</p>
     <form method="post" action="/channels/facebook" class="mt">
-      {% call ui.field('Page name') %}<input name="channel_name" required placeholder="My Page">{% endcall %}
-      {% call ui.field('Page ID') %}<input name="page_id" required placeholder="1234567890">{% endcall %}
-      {% call ui.field('Permanent Page Access Token') %}<input name="page_access_token" required type="password">{% endcall %}
-      {% call ui.field('Avatar URL (optional)') %}<input name="avatar_url" placeholder="https://…">{% endcall %}
+      {% call ui.field('Page ID or Page URL', hint='A numeric id, a username, or just paste the Page’s address — we resolve it.') %}
+        <input name="page_id" required placeholder="1234567890  ·  facebook.com/MyPage">{% endcall %}
+      {% call ui.field('Permanent Page Access Token') %}<input name="page_access_token" required type="password" placeholder="EAA…">{% endcall %}
+      {% call ui.field('Page name (optional)', hint='Leave blank to use the Page’s real name from Facebook.') %}
+        <input name="channel_name" placeholder="My Page">{% endcall %}
+      {% call ui.field('Avatar URL (optional)', hint='Leave blank to use the Page’s own profile picture.') %}
+        <input name="avatar_url" placeholder="https://…">{% endcall %}
       <button class="btn" type="submit">Connect Page</button>
     </form>
+    {% include "_fb_token_help.html" %}
   </div>
 </details>
 {% endblock %}

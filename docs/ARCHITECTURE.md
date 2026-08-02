@@ -1537,3 +1537,78 @@ one sounds unwell rather than intimate. Restricting the designer's voice pool ma
 same reason: the soft chain over an energetic announcer read sounds wrong, and an operator should not
 have to undo the designer's pick on every quote campaign. That restriction is per language, which is
 what makes the English and Spanish quote channels work as well as the Vietnamese one.
+
+### ADR-072 — Facebook: verify the right thing, say only what is true, stay fixable
+**Decision:** seven changes across the Facebook surface.
+1. **Verification asks `/me`, not `/{page_id}`.** Reading a Page's public name proves nothing — a
+   short-lived USER token reads it happily. With a PAGE token `/me` IS the Page, and only a Page
+   carries `category`; that one field separates them. A numeric id the operator typed must also match
+   the id Graph returns, so a token for the *wrong* Page is refused too.
+2. **`check_facebook_page` returns a `PageCheck`** (verdict + canonical id + name + picture) instead
+   of `(bool|None, str)`, because the same call already knows everything the save needs.
+3. **`fb_added_unverified`.** The banner may only say "verified" when the verdict was `True`.
+4. **`normalize_page_id`** accepts a URL, a username, `@handle` or the raw id; a verified save stores
+   the canonical NUMERIC id Graph resolved.
+5. **Graph errors carry Facebook's own words**, token-scrubbed (`raise_for_graph`, `scrub`), and an
+   OAuth failure raises `FacebookAuthError`, which `core.failure` classifies as a non-retryable
+   credential problem pointing at **/channels** (an API key's fix is on /credentials — different page,
+   so it is a separate class, not a widened one).
+6. **`ChannelStatus.expired` is now written** — by `_fail_task` on a publish auth error and by the
+   analytics snapshot pass — so the pill and the filter chip stop being decoration. It is paired with
+   `POST /channels/{id}/facebook-token`, because marking a channel broken without a way back would be
+   a dead end: the only previous route was Remove + re-add, which deletes the channel's campaigns and
+   rendered videos with it. Only a **verified** token clears the flag.
+7. **One `GRAPH_VERSION`** (v23.0) in `facebook_service`; nothing else builds a Graph URL.
+Plus: the form and each Page card share `_fb_token_help.html`, which explains how to obtain a
+permanent Page token — the step that actually defeats people.
+
+**Why:** the whole journey was verified by the one question that cannot fail. The most common mistake
+in this integration is pasting the short-lived User token the Graph Explorer offers by default; it
+read the Page's public name, so the channel saved as "● Active", counted as connected, and died hours
+later at publish time with `400 Client Error: Bad Request for url: …` — a message that is unreadable,
+that leaks the token through the URL, and that discards Facebook's own explanation sitting in the
+response body. The autopilot then spent its whole retry cap re-uploading with the same dead
+credential, because nothing classified "access token" as a credential failure. And the operator's only
+route back was to delete the channel — taking its campaigns and rendered episodes with it — because
+`expired` was a status the code could display but never set. Each fix is small; what they have in
+common is that the system knew the answer and either did not ask, did not say it, or had nowhere to
+put it. Storing the canonical numeric id is the one change with no visible symptom yet: a username
+works until the day the Page is renamed, and then every call 404s at once.
+
+### ADR-073 — Facebook publishing reaches parity with YouTube (Reels, privacy, CTA, permalink, idempotency)
+**Decision:** the Facebook publish path is brought level with `youtube_service`, feature for feature,
+and where the platforms genuinely differ the difference is named rather than left implicit.
+1. **A vertical short is published as a REEL** (`/{page_id}/video_reels`, three-phase start → transfer
+   → finish). Posting 9:16 to `/{page_id}/videos` produced an ordinary Page video that never enters
+   Reels distribution — the entire reason this product renders vertical video. Long-form 16:9 stays a
+   Page video. The three phases also give a **resumable** transfer with an `offset` header, replacing
+   one 600-second all-or-nothing POST while YouTube had been resumable all along.
+2. **The campaign's privacy choice is honoured.** It was read by YouTube and ignored by Facebook, so a
+   campaign set to `private` published **publicly** to the Page. Facebook has no "unlisted", so the
+   honest mapping is public → `PUBLISHED` / `published=true`, anything else → Reel `DRAFT` /
+   `published=false`.
+3. **The CTA is posted as a comment**, as YouTube has always done. It carries the affiliate line, so
+   monetization silently did not exist on Facebook channels.
+4. **A permalink that resolves**: `/reel/{id}` or `/watch/?v={id}`. `facebook.com/{video_id}` is not a
+   video URL, so every "View ↗" for a Facebook publish led nowhere. YouTube gained the same
+   format-awareness — it was building `/shorts/{id}` for 15-minute videos too.
+5. **No duplicate posts.** The Reels `start` phase reserves the video id before any bytes move, so it
+   is persisted on the buffer item first and a retry asks Facebook whether that upload already landed;
+   the Page-video path falls back to matching our own title among recent uploads. An upload that
+   succeeds server-side but times out client-side is indistinguishable from a failure, and the retry
+   used to post a second copy.
+6. **One batched insights call** instead of up to fifty, with per-entry status so one unreadable video
+   does not discard the rest; **https-only avatars** (`_safe_avatar`); and an **expired channel parks
+   the episode** (`ChannelExpired`) instead of failing it — the credential is broken, the rendered
+   video is fine, so it waits in the buffer and goes out at the next slot without burning a retry.
+
+**Why:** every item here came from diffing the two publish paths side by side, and the pattern is the
+same each time — Facebook was implemented once, early, and then every improvement landed on the
+YouTube side only. Privacy is the sharpest example: the campaign form offers public/unlisted/private,
+YouTube obeys it, and Facebook posted everything publicly regardless. That is not a missing feature,
+it is the product doing the opposite of what the operator asked, and on the one axis where "oops" is
+not recoverable. Reels is the largest in value: the README and the campaign form both promise
+"Shorts / Reels", the renderer produces 9:16 for exactly that reason, and the upload endpoint quietly
+threw that distribution away. The duplicate-post guard exists because the failure it prevents is
+invisible from our side — we see a timeout, the Page sees a video — and the only cheap moment to make
+it safe is the one the Reels API already hands us: an id that exists before the risky part.

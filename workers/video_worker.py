@@ -26,7 +26,7 @@ from core.config import settings
 from core.video_factory import Branding
 from database.db_session import SessionLocal
 from database.models import BufferPoolItem, Campaign, ChannelClipUsage, Channel, Task, User
-from database.types import BufferStatus, CampaignStatus, Platform, TaskStatus
+from database.types import BufferStatus, CampaignStatus, ChannelStatus, Platform, TaskStatus
 from workers.task_queue import (
     clear_progress,
     enqueue_publish,
@@ -280,7 +280,10 @@ def hydrate_buffers(db, *, buffer_size: int | None = None, enqueue=enqueue_rende
 
 
 # ── Publishing / notification dispatch (lazy imports) ────────────────────────
-def _publish(channel: Channel, video_path: str, metadata: dict, user: User) -> str:
+def _publish(channel: Channel, video_path: str, metadata: dict, user: User,
+             *, pending_video_id: str | None = None, on_pending=None) -> str:
+    """Upload to whichever platform this channel is. `pending_video_id`/`on_pending` are the
+    duplicate-post guard (ADR-073) — Facebook uses them; YouTube's resumable upload has its own."""
     if channel.platform == Platform.youtube:
         from services import youtube_service
 
@@ -288,15 +291,26 @@ def _publish(channel: Channel, video_path: str, metadata: dict, user: User) -> s
     if channel.platform == Platform.facebook:
         from services import facebook_service
 
-        return facebook_service.upload_video(channel, video_path, metadata)
+        return facebook_service.upload_video(channel, video_path, metadata,
+                                             pending_video_id=pending_video_id,
+                                             on_pending=on_pending)
     raise RuntimeError(f"Unknown platform: {channel.platform}")
 
 
-def published_url_for(platform: Platform, video_id: str) -> str:
-    """Human-clickable URL of a published video (shown in Task Logs)."""
+def published_url_for(platform: Platform, video_id: str, video_format: str = "short") -> str:
+    """Human-clickable URL of a published video (shown on the episode page and the activity feed).
+
+    The format decides the shape on BOTH platforms (ADR-073): a vertical short is a YouTube Short /
+    a Facebook Reel, long-form is a normal watch page. The Facebook branch used to build
+    `facebook.com/{video_id}`, which is not a video permalink at all — every "View ↗" for a Facebook
+    publish led nowhere."""
+    short = (video_format or "short") != "long"
     if platform == Platform.youtube:
-        return f"https://www.youtube.com/shorts/{video_id}"
-    return f"https://www.facebook.com/{video_id}"
+        return (f"https://www.youtube.com/shorts/{video_id}" if short
+                else f"https://www.youtube.com/watch?v={video_id}")
+    from services import facebook_service
+
+    return facebook_service.permalink(video_id, reel=short)
 
 
 def _notify(user: User, message: str) -> None:
@@ -388,16 +402,41 @@ def apply_reject(db, item, reason: str = "", *, rerender: bool = False) -> None:
         db.commit()
 
 
+class ChannelExpired(RuntimeError):
+    """The channel's credential is dead, so a rendered episode simply waits (ADR-073) — it is not a
+    failure of the episode, and must not consume a retry or read as a broken render."""
+
+
 # ── Publish step (shared by auto mode and review-approval) ───────────────────
 def _publish_buffer(db, task: Task, buf: BufferPoolItem, campaign: Campaign,
                     channel: Channel, user: User) -> str:
     """Upload a buffered episode, record the outcome on the task, clean up, and advance the
     campaign. Raises on failure (caller handles FAILED bookkeeping)."""
+    # An expired channel cannot publish anything (ADR-073). Skipping is deliberate: the episode is
+    # already rendered, so the honest outcome is "waiting for a working token", not FAILED. It stays
+    # in the buffer and goes out on the next slot once the operator pastes one.
+    if channel.status == ChannelStatus.expired:
+        raise ChannelExpired(
+            f"“{channel.channel_name}” has an expired access token, so this episode cannot publish "
+            "yet. It stays in the buffer — paste a fresh token on the Channels page and it goes out "
+            "at the next slot.")
+
     _set_status(db, task, TaskStatus.PUBLISHING, 92)
-    video_id = _publish(channel, buf.video_path, buf.metadata_json or {}, user)
+    fmt = (campaign.config_json or {}).get("video_format", "short")
+    meta = {**(buf.metadata_json or {}), "video_format": fmt}
+
+    def remember_pending(vid: str) -> None:
+        """Persist the reserved video id BEFORE the bytes go up, so a retry after a timeout can ask
+        Facebook whether that upload already landed instead of posting it twice (ADR-073)."""
+        buf.metadata_json = {**(buf.metadata_json or {}), "pending_video_id": vid}
+        db.commit()
+
+    video_id = _publish(channel, buf.video_path, meta, user,
+                        pending_video_id=(buf.metadata_json or {}).get("pending_video_id"),
+                        on_pending=remember_pending)
 
     task.published_video_id = video_id
-    task.published_url = published_url_for(channel.platform, video_id)
+    task.published_url = published_url_for(channel.platform, video_id, fmt)
     # Close the A/B loop: record WHICH metadata variant went live, so the Performance page can
     # compare real retention per variant instead of rotating variants blindly forever.
     task.ab_variant = (buf.metadata_json or {}).get("variant")
@@ -417,14 +456,42 @@ def _publish_buffer(db, task: Task, buf: BufferPoolItem, campaign: Campaign,
     return video_id
 
 
+def _mark_channel_expired(db, campaign: Campaign, exc: Exception) -> bool:
+    """A dead Page/OAuth token means the CHANNEL is broken, not this episode (ADR-072).
+
+    Nothing used to set `ChannelStatus.expired`, so the Channels page kept showing "● Active" for a
+    channel that could no longer publish anything, and its "Expired token" pill and filter chip were
+    decoration. Marking it here is what makes those honest — and what stops the operator debugging
+    episode after episode when the real fix is one new token."""
+    from services.facebook_service import FacebookAuthError
+
+    if not isinstance(exc, FacebookAuthError) or campaign is None:
+        return False
+    channel = db.get(Channel, campaign.channel_id)
+    if channel is None or channel.status == ChannelStatus.expired:
+        return False
+    channel.status = ChannelStatus.expired
+    db.commit()
+    logger.warning("Channel %s marked expired: %s", channel.id, exc)
+    return True
+
+
 def _fail_task(db, task: Task, user: User, campaign: Campaign, exc: Exception, job: str) -> None:
+    from services.facebook_service import scrub
+
     db.rollback()
     task.status = TaskStatus.FAILED
     task.finished_at = datetime.utcnow()
-    task.error_message = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-4000:]
+    # Scrubbed before storing: this string is rendered on the episode page and in the alert bell, and
+    # a Graph traceback carries `access_token=…` in the request URL (ADR-072).
+    trace = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    task.error_message = scrub(trace)[-4000:]
     db.commit()
     logger.exception("%s for task %s failed", job, task.id)
-    _notify(user, f"❌ Episode {task.episode_number} of '{campaign.topic_name}' failed: {exc}")
+    expired = _mark_channel_expired(db, campaign, exc)
+    note = " The channel is marked expired — paste a fresh Page token." if expired else ""
+    _notify(user, f"❌ Episode {task.episode_number} of '{campaign.topic_name}' failed: "
+                  f"{scrub(str(exc))}{note}")
     _maybe_trip_circuit_breaker(db, campaign, user)
 
 
@@ -806,6 +873,12 @@ def publish_task(buffer_item_id: int) -> None:
         return
     try:
         _publish_buffer(db, task, buf, campaign, channel, user)
+    except ChannelExpired as exc:
+        # Not a failure of this episode: the channel's credential is what is broken. Leaving the task
+        # untouched keeps the rendered video in the buffer, so it publishes at the next slot once the
+        # token is replaced — instead of burning a retry and reading as a broken render (ADR-073).
+        logger.warning("publish_task: %s", exc)
+        db.rollback()
     except Exception as exc:  # noqa: BLE001
         _fail_task(db, task, user, campaign, exc, "publish_task")  # rolls back first
         # Keep the file + buffer row so the operator can retry the upload without re-rendering.

@@ -18,6 +18,16 @@ from __future__ import annotations
 # existence, a spent quota is fixed by the reset (the scheduler already waits for it), and a safety
 # block is deterministic for the same script — only a reject/re-render (new script) clears it.
 PATTERNS: tuple[tuple[tuple[str, ...], str, str, str, str, bool], ...] = (
+    # Facebook's own OAuth wording, ahead of the generic key class because the FIX IS SOMEWHERE ELSE:
+    # an API key lives on /credentials, a Page token lives on the channel. These phrases only ever
+    # come from Graph. Before this, a dead Page token classified as a generic failure and the
+    # autopilot burned its whole retry cap re-uploading with the same dead credential (ADR-072).
+    (("error validating access token", "session has expired", "page access token", "oauthexception",
+      "oauth error"),
+     "The Facebook Page token is no longer valid",
+     "Facebook refused the Page Access Token — it expired, was revoked, or the Page's permissions "
+     "changed. The channel is marked expired; open it and paste a fresh permanent Page Access Token, "
+     "then retry this episode.", "/channels", "Fix the channel", False),
     (("api key", "api_key", "invalid key", "unauthorized", "401", "403 forbidden"),
      "A provider rejected the key",
      "The AI or footage provider refused the credentials this render used. Check the key is present "

@@ -1444,6 +1444,49 @@ unreachable, off by default, or unbuilt — ADR-071:
   and the save bar checked in a real browser at 375px and 1280px — including that a deliberate grade
   survives the auto-tune and that no button label clips.
 
+## R10 — Facebook: verify the right thing, and stay fixable `DONE`
+Reproduced in a browser first: a Page ID and token that were pure invention saved as "● Active" under
+a green "✓ Page connected and verified" banner. Seven fixes (ADR-072):
+- **The check asked the one question that cannot fail.** Reading a Page's public name proves nothing —
+  the short-lived USER token the Graph Explorer offers by default reads it perfectly, which is the
+  commonest mistake in this integration. It now asks `/me` (with a Page token, that IS the Page; only
+  a Page carries `category`), and refuses a token belonging to a different Page.
+- **The banner only says "verified" when it was.** "Could not tell" now says so.
+- **Paste anything**: a Page URL, `@handle`, username or raw id — and a verified save stores the
+  canonical NUMERIC id, which does not break the day the Page is renamed.
+- **Facebook's own words reach the operator**, token-scrubbed, instead of "400 Client Error: Bad
+  Request for url: …" — and an OAuth failure is classified as a credential fault pointing at
+  /channels, so the autopilot stops spending its retry cap re-uploading with a dead token.
+- **`expired` is finally written** — by the publish path and the analytics pass — so the pill and the
+  filter chip stop being decoration. Paired with a token-replacement panel on the channel, because
+  the only previous way back was Remove + re-add, which deletes the channel's campaigns and rendered
+  videos with it. Only a verified token clears the flag.
+- **One `GRAPH_VERSION`** (v20 → v23), and a test that fails if any file hardcodes a Graph URL again.
+- **The form explains how to get a permanent Page token** — the step that actually defeats people —
+  in one partial shared by Add-a-Page and Replace-token.
+- Verified: 520 tests (37 new), ruff clean, docs guard green; the add flow, the honest banner, the
+  token panel and the help checked in a real browser at 375px.
+
+## R11 — Facebook publishing catches up with YouTube `DONE`
+Diffed the two publish paths line by line. Facebook was implemented once, early, and every improvement
+since had landed on the YouTube side only (ADR-073):
+- **A vertical short is a Reel now.** Posting 9:16 to `/videos` made an ordinary Page video that never
+  entered Reels distribution — the whole reason this product renders vertical. The three-phase Reels
+  upload also makes the transfer **resumable**, which YouTube had been all along.
+- **A private campaign no longer publishes publicly.** YouTube read the privacy setting; Facebook
+  ignored it entirely. That is not a missing feature — it is the product doing the opposite of what
+  the operator asked, on the one axis where it cannot be taken back.
+- **The CTA is posted as a comment**, as YouTube always did. It carries the affiliate link, so
+  monetization simply did not exist on Facebook channels.
+- **"View ↗" leads somewhere.** `facebook.com/{video_id}` is not a video URL; it is `/reel/{id}` or
+  `/watch/?v={id}` now. YouTube got the same fix — it was building `/shorts/{id}` for 15-minute videos.
+- **No duplicate posts.** An upload that succeeds server-side but times out client-side looks exactly
+  like a failure, and the retry posted a second copy. The Reels API hands us the video id before the
+  bytes move, so it is persisted first and a retry asks whether that upload already landed.
+- One batched insights call instead of fifty, https-only avatars, and an expired channel parks its
+  rendered episode in the buffer rather than failing it and burning a retry.
+- Verified: 540 tests (57 new across R10+R11), ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

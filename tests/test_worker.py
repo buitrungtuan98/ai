@@ -174,7 +174,7 @@ def test_render_task_full_flow_and_failure(session, user, channel, monkeypatch):
     monkeypatch.setattr(video_worker.video_factory, "produce", lambda **k: _result())
     published = []
     monkeypatch.setattr(video_worker, "_publish",
-                        lambda channel, video_path, metadata, user: published.append(1) or "vid-1")
+                        lambda channel, video_path, metadata, user, **k: published.append(1) or "vid-1")
 
     video_worker.render_task(t.id)
     session.refresh(t)
@@ -235,7 +235,7 @@ def test_review_mode_awaits_then_publishes(session, user, channel, monkeypatch, 
     )
     published = []
     monkeypatch.setattr(video_worker, "_publish",
-                        lambda channel, video_path, metadata, user: published.append(video_path) or "vid-9")
+                        lambda channel, video_path, metadata, user, **k: published.append(video_path) or "vid-9")
 
     # Render: must STOP at review, not publish.
     video_worker.render_task(t.id)
