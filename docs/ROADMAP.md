@@ -1500,6 +1500,25 @@ token was refused, the save was blocked, a red banner said so. The experience wa
 - Verified: 546 tests (6 new), ruff clean, docs guard green; the operator's exact submission replayed
   in a desktop browser — the page lands on the form, open, prefilled, error above the fields.
 
+## R13 — no password manager may touch a credential box `DONE`
+
+The operator's follow-up: they had pasted the right token. So the substitution happened between
+their keyboard and the POST, and `/channels` was built to invite exactly that.
+
+- **The page looked like a login form.** A text input (`page_id`) directly above a `type="password"`
+  input is the shape Chrome saves as username+password — and every connected Page added one more
+  token box, none of them saying "do not manage this". A saved entry then refills a field nobody is
+  looking at, with a value nobody chose.
+- **One `ui.secret()` macro** now renders every secret box — the six suppression attributes it takes
+  to actually stop Chrome, 1Password, LastPass, Bitwarden and Dashlane are written once. Six
+  hand-written copies is five chances to forget one; that is the same defect that hid the `vintage`
+  grade and hardcoded four Graph versions.
+- **The token box checks itself at the field**, on input, before submit: a Page ID, an all-digit
+  value or anything under 40 characters is named and the submit is blocked. A server refusal arrives
+  a round-trip later on a reloaded page with the box blank again — which reads as "nothing happened".
+- Verified: 551 tests (5 new), ruff clean, docs guard green; replayed in Chromium at 390px — the
+  reported submission is refused at the form, a real token clears it.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

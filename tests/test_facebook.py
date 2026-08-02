@@ -929,3 +929,74 @@ def test_the_form_reopens_prefilled_and_shows_the_error_next_to_it(client):
     # The token field is empty — it is never round-tripped.
     token_field = form.split('name="page_access_token"', 1)[1].split(">", 1)[0]
     assert "value=" not in token_field
+
+
+# ── ADR-075 — no password manager may touch a credential box ────────────────────────────────
+# Reported live: an operator connected a Page, saw the screen flash, and no channel appeared. The
+# POST carried `page_id=1175508495653784&page_access_token=1175508495653784` — the Page ID in BOTH
+# boxes — yet they were certain they had pasted a real token. Nothing in our JS touches these fields
+# and the two forms are siblings, not nested, so the value was substituted by the browser: /channels
+# offered a text input directly above a `type="password"` input (a login form, as far as Chrome is
+# concerned) plus one more token box per connected Page, and not one of them said "do not manage
+# this". A saved entry then refills a field the operator is not looking at.
+
+def _password_inputs(html: str) -> list[str]:
+    """Every `<input …type="password"…>` tag in a rendered page, as raw tag text."""
+    import re
+
+    return [m.group(0) for m in re.finditer(r"<input\b[^>]*>", html)
+            if 'type="password"' in m.group(0)]
+
+
+SUPPRESSORS = ('autocomplete="new-password"', "data-1p-ignore", 'data-lpignore="true"',
+               "data-bwignore", 'data-form-type="other"')
+
+
+@pytest.mark.parametrize("path", ["/credentials", "/channels"])
+def test_no_credential_box_is_left_for_a_password_manager_to_fill(client, session, user, path):
+    """Every secret box on every page, including the per-Page token panels."""
+    from database.models import Channel
+    from database.types import ChannelStatus, Platform
+
+    session.add(Channel(user_id=user.id, platform=Platform.facebook, channel_name="Trang Bếp",
+                        encrypted_credentials="{}", status=ChannelStatus.expired))
+    session.commit()
+
+    boxes = _password_inputs(client.get(path).text)
+    assert boxes, f"{path} renders no password input — did the fixture stop seeding?"
+    for tag in boxes:
+        for attr in SUPPRESSORS:
+            assert attr in tag, f"{path}: credential box missing {attr} → {tag}"
+
+
+def test_the_page_id_box_is_not_offered_as_a_username(client):
+    """It sits directly above the token box, which is exactly the pair Chrome saves and refills."""
+    form = client.get("/channels").text.split('action="/channels/facebook"', 1)[1]
+    assert 'autocomplete="off"' in form.split(">", 1)[0]          # …on the form itself
+    page_id = form.split('name="page_id"', 1)[1].split(">", 1)[0]
+    assert 'autocomplete="off"' in page_id                        # …and on the field
+
+
+def test_a_page_id_cannot_even_be_submitted_as_a_token(client, session, user):
+    """Defence in depth: the server rejects `token == page_id`, but the browser should never let it
+    leave. A Page Access Token is ~200 characters; a Page ID is ~16 digits."""
+    from database.models import Channel
+    from database.types import Platform
+
+    session.add(Channel(user_id=user.id, platform=Platform.facebook, channel_name="Trang Bếp",
+                        encrypted_credentials="{}"))
+    session.commit()
+
+    for tag in _password_inputs(client.get("/channels").text):
+        assert 'minlength="40"' in tag, f"token box accepts a short value → {tag}"
+
+
+def test_secret_boxes_are_rendered_by_one_macro(client):
+    """Six hand-written copies is five chances to forget an attribute — the exact failure mode that
+    hid the `vintage` grade and hardcoded four Graph versions. There is one definition."""
+    import pathlib
+
+    offenders = [p.name for p in pathlib.Path("templates").glob("*.html")
+                 if 'type="password"' in p.read_text(encoding="utf-8")
+                 and p.name not in {"macros.html", "login.html"}]   # login IS a login: it may save
+    assert not offenders, f"hand-written secret input(s) — use ui.secret(): {offenders}"

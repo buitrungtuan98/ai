@@ -92,6 +92,25 @@
 </div>
 {%- endmacro %}
 
+{# THE only way to render a secret input (ADR-075). Every API key and access token on this app is
+   typed into a box the browser is desperate to manage: a `type="password"` field preceded by a text
+   field is exactly the shape Chrome reads as a login form, so it offers to save the pair and then
+   refills it on later visits — into a field the operator is not looking at, with a value they never
+   chose. These are not login credentials; nothing here should ever be remembered by a password
+   manager. The suppression takes five vendor-specific attributes to be effective, which is precisely
+   why it lives in one macro: written by hand six times it would be right five times.
+   `new-password` (not `off`) is the one Chrome actually honours for "do not fill a saved password".
+   `class` is passed through because the page layouts differ; `minlength` is a real attribute rather
+   than an HTML passthrough so autoescaping cannot silently neuter it (and so no caller can inject
+   markup through this macro). #}
+{% macro secret(name, placeholder='', required=false, class='', minlength=0) -%}
+<input name="{{ name }}" type="password" {% if class %}class="{{ class }}" {% endif %}
+       {% if required %}required {% endif %}{% if minlength %}minlength="{{ minlength }}" {% endif %}
+       placeholder="{{ placeholder }}"
+       autocomplete="new-password" autocorrect="off" autocapitalize="off" spellcheck="false"
+       data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other">
+{%- endmacro %}
+
 {# THE single episode filter bar. EVERY chip filters /episodes in place (ADR-065): two of them used
    to navigate to differently-shaped pages (/tasks, /assets) while looking identical to the filters
    beside them, so clicking a "filter" silently changed page, layout and vocabulary — testers

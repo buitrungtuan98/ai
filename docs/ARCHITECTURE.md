@@ -1634,3 +1634,44 @@ same channel list as before, minus your typing. A correct system that cannot be 
 has not finished the job. Anchoring the redirect is what makes the message and the mistake occupy the
 same screen. The local pre-check earns its place separately: it is the failure this form sees most,
 it costs nothing to detect, and it converts a provider's vocabulary into the operator's.
+
+### ADR-075 — A credential box is not a login box: one `ui.secret()` macro, and the token checks itself
+
+**Context.** An operator connected a Facebook Page, saw the screen flash, and got no channel. Their
+submission carried `page_id=1175508495653784&page_access_token=1175508495653784` — the Page ID in
+both boxes. The first reading was operator error, and it was wrong: they had pasted a real token.
+
+Nothing in our JS writes to that field, and the two `page_access_token` forms on `/channels` are
+siblings, not nested, so the browser substituted the value. `/channels` had made that easy. A text
+input sits directly above a `type="password"` input, which is precisely what Chrome reads as a login
+form: it offers to save the pair, then refills it on later visits. Every connected Page added one
+more token box — six `type="password"` inputs across the app, and **not one carried an autocomplete
+or vendor-ignore attribute**. The one field that legitimately wants a password manager, the login
+form, was the only one that had them.
+
+**Decision.**
+
+1. **One `ui.secret(name, …)` macro renders every secret input.** Suppressing autofill takes
+   `autocomplete="new-password"` (the value Chrome honours for "do not fill a saved password", where
+   `off` is ignored) plus `data-1p-ignore`, `data-lpignore`, `data-bwignore` and
+   `data-form-type="other"` for 1Password, LastPass, Bitwarden and Dashlane, with `autocomplete="off"`
+   on the enclosing form and on the `page_id` field so the username heuristic has nothing to bind to.
+   Written by hand six times that is right five times — the same copy-instead-of-share defect that
+   hid the `vintage` grade and hardcoded four Graph versions. A test walks `templates/` and fails on
+   any hand-written `type="password"` outside `login.html`.
+2. **`type="password"` stays.** Masking via `-webkit-text-security` on a text input would take these
+   fields outside password-manager heuristics entirely, but it degrades to plaintext where
+   unsupported. Trading a guaranteed security property for a heuristic one is the wrong direction.
+3. **The token box validates itself at the field.** On input, blur and submit it names a Page ID, an
+   all-digit value, or anything under 40 characters (a Page Access Token is ~200) and blocks the
+   submit. `minlength="40"` says the same thing to the browser's own validator.
+
+**Why not rely on the server.** It already refuses `token == page_id` (ADR-074), and it still must —
+this is defence in depth, not a replacement. But that refusal arrives one round-trip later, on a
+reloaded page, with the token box blank again. To the operator who just pasted a token that is
+indistinguishable from nothing happening, which is exactly what they reported. A substituted value is
+only visible if it is named where the operator is looking, while they are looking.
+
+**Cost.** `new-password` makes Safari and Chrome occasionally offer to *generate* a strong password
+in these boxes. That is a suggestion the operator can see and dismiss — strictly better than a stale
+value silently taking the place of the one they pasted.
