@@ -948,6 +948,9 @@ def _password_inputs(html: str) -> list[str]:
             if 'type="password"' in m.group(0)]
 
 
+# `new-password` is the load-bearing one — Chrome ignores `off` on a password field. The rest are
+# cheap insurance for third-party managers. NOT asserted: autocorrect/autocapitalize/spellcheck,
+# which the platform already disables on type="password" (they were noise, and are gone).
 SUPPRESSORS = ('autocomplete="new-password"', "data-1p-ignore", 'data-lpignore="true"',
                "data-bwignore", 'data-form-type="other"')
 

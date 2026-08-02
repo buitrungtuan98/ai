@@ -105,12 +105,15 @@
         <svg class="gc-line" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
           <polyline points="
             {%- for p in g.points -%}
-            {%- if p.sub_delta is not none %}{{ (100 * loop.index0 / (g.days - 1))|round(2) }},{{ (100 - 100 * p.sub_delta / d_max)|round(2) }} {% endif -%}
+            {%- if p.sub_delta is not none %}{{ (100 * loop.index0 / (g.samples - 1))|round(2) }},{{ (100 - 100 * p.sub_delta / d_max)|round(2) }} {% endif -%}
             {%- endfor -%}"/>
         </svg>
       </div>
+      {# Span AND sample count, because they part company: a snapshot lands once per local day only
+         while the box is up, so a two-day outage leaves gaps the chart cannot show (ADR-076). #}
       <p class="hint">Bars = episodes published per day · line = subscribers gained per day, last
-        {{ g.days }} day{{ 's' if g.days != 1 }}.</p>
+        {{ g.days }} day{{ 's' if g.days != 1 }}{% if g.samples < g.days %} ({{ g.samples }} daily
+        sample{{ 's' if g.samples != 1 }} — the rest are days the factory was offline){% endif %}.</p>
       {% else %}
       <p class="hint">Growth needs two daily samples — the curve appears tomorrow.</p>
       {% endif %}
@@ -128,6 +131,12 @@
       Page’s token, so nothing can publish here. Paste a fresh <b>permanent Page Access Token</b>
       below — your campaigns and rendered episodes are untouched and resume once it is accepted.
       {% else %}Re-authorise this channel to resume publishing — reconnect it via OAuth above.{% endif %}</p>
+    {% endif %}
+    {% if c.analytics_error %}
+    {# Publishing works; measurement does not. Without this the operator sees retention that simply
+       never arrives, and the only trace is a 403 in a log file they never open (ADR-076). #}
+    <p class="hint mt-sm">📉 <b>Not measurable.</b> {{ c.analytics_error }}
+      {% if c.platform.value == 'youtube' %}<a href="/oauth/google/start">Reconnect this channel →</a>{% endif %}</p>
     {% endif %}
     {% if c.platform.value == 'facebook' %}
     {# A token rotates; a channel's campaigns and videos must not have to be deleted with it. #}
@@ -343,6 +352,8 @@
     note.hidden = true;
     tok.insertAdjacentElement("afterend", note);
 
+    // Only what `minlength` cannot already say for itself: a short value gets the browser's own
+    // native message, so repeating it here would be a second voice saying the same thing.
     function why() {
       var v = tok.value.trim();
       if (!v) return "";
@@ -353,8 +364,6 @@
       if (/^\d+$/.test(v))
         return "⚠ That is an ID, not an access token. A Page Access Token is a long string " +
                "starting with “EAA”.";
-      if (v.length < 40)
-        return "⚠ Too short for a Page Access Token — they are around 200 characters.";
       return "";
     }
     function check() {

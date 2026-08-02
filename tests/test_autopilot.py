@@ -179,7 +179,7 @@ def test_autopilot_retry_skips_quota_and_operator_rejects():
                     retry_count=0)
     capped = Task(campaign_id=camp.id, user_id=user.id, episode_number=4,
                   status=TaskStatus.FAILED, error_message="ffmpeg exited 1",
-                  retry_count=scheduler.AUTOPILOT_MAX_RETRIES)
+                  auto_retry_count=scheduler.AUTOPILOT_MAX_RETRIES)
     db.add_all([genuine, quota, rejected, capped])
     db.commit()
 
@@ -615,4 +615,190 @@ def test_prune_autopilot_log_drops_old_done_only():
     assert scheduler.prune_autopilot_log(db) == 1  # only the stale DONE row
     left = {r.summary for r in db.scalars(select(AutopilotAction)).all()}
     assert left == {"new", "kept"}  # recent done + applied history both survive
+    db.close()
+
+
+# ── ADR-076 — the autopilot must not be able to spend the box on one episode ──────────────────
+# Three defects found by audit, each reproduced before it was fixed: an uncapped auto-reject loop, a
+# cadence key that banked a failed pass, and one retry counter serving three different budgets.
+
+def test_auto_reject_stops_re_rendering_and_hands_the_episode_over():
+    """Rejecting re-renders, and a re-render can score badly again. Nothing bounded that loop: the
+    circuit breaker never sees it, because apply_reject doesn't route through _fail_task."""
+    from database.models import BufferPoolItem, Task
+    from database.types import BufferStatus, TaskStatus
+    from workers import scheduler
+
+    db, user, ch, camp = _seed_ch("autopilot")
+    t, b = _review_item(db, ch, camp, 1, 2)          # a score the judge will keep rejecting
+
+    rerenders = 0
+    for _cycle in range(6):
+        counts = scheduler.autopilot_review_channel(db, ch, "autopilot", 7, 4)
+        rerenders += counts["rejected"]
+        if not counts["rejected"]:
+            break
+        # What a real re-render does: drop the old buffer row, park an equally-bad new one.
+        db.delete(db.get(BufferPoolItem, b.id))
+        db.flush()
+        t.status = TaskStatus.AWAITING_REVIEW
+        b = BufferPoolItem(campaign_id=camp.id, channel_id=ch.id, episode_number=1,
+                           video_path="/nonexistent/1.mp4", status=BufferStatus.awaiting_review,
+                           metadata_json={"qc": {"score": 2, "passed": False}})
+        db.add(b)
+        db.commit()
+        db.refresh(b)
+
+    assert rerenders == scheduler.AUTOPILOT_MAX_REJECTS      # bounded, and bounded by the cap
+    assert db.get(Task, t.id).auto_reject_count == scheduler.AUTOPILOT_MAX_REJECTS
+    # Past the cap it escalates instead — parked for the operator, not re-rendered again.
+    assert counts["escalated"] == 1
+    hint = (db.get(BufferPoolItem, b.id).metadata_json or {}).get("ap_hint") or {}
+    assert hint["action"] == "escalate" and "needs your eye" in hint["reason"]
+    assert db.get(BufferPoolItem, b.id).status == BufferStatus.awaiting_review
+    db.close()
+
+
+def test_a_manual_retry_does_not_spend_the_autopilots_healing_budget():
+    """`retry_count` is what the operator sees and every path bumps it; the autopilot's budget is
+    its own. Sharing them meant two clicks of Retry disabled the self-healing R7 added."""
+    from database.models import Task
+    from database.types import TaskStatus
+    from workers import scheduler
+
+    db, user, ch, camp = _seed_ch("autopilot")
+    t = Task(campaign_id=camp.id, user_id=user.id, episode_number=1, status=TaskStatus.FAILED,
+             error_message="ffmpeg exited 1",
+             retry_count=scheduler.AUTOPILOT_MAX_RETRIES + 3)   # the human tried, repeatedly
+    db.add(t)
+    db.commit()
+
+    assert scheduler.autopilot_retry_channel(db, ch) == 1       # still willing to help
+    assert db.get(Task, t.id).auto_retry_count == 1
+    db.close()
+
+
+def test_an_optional_step_failing_cannot_silence_review_retry_and_catchup():
+    """A Gemini 503 in the strategist used to skip the whole channel — and, with the cadence key
+    already banked, keep skipping it for up to 24h."""
+    from workers import scheduler
+
+    db, user, ch, camp = _seed_ch("autopilot")
+    _review_item(db, ch, camp, 1, 9)                            # an approve-eligible render
+
+    def boom(*_a, **_k):
+        raise RuntimeError("Gemini 503")
+
+    import pytest as _pytest
+    mp = _pytest.MonkeyPatch()
+    mp.setattr(scheduler, "autopilot_strategist_channel", boom)
+    try:
+        summary = scheduler.autopilot_pass(db, respect_cadence=False)
+    finally:
+        mp.undo()
+
+    assert summary["approved"] == 1        # the free, load-bearing step still ran
+    assert summary["partial"] == 1         # and the pass is recorded as incomplete
+    db.close()
+
+
+def test_a_failed_pass_does_not_bank_the_full_cadence():
+    """The key is claimed up front (it is also the overlap guard), so a failed pass must shorten it
+    rather than buy silence until the next interval."""
+    from workers import scheduler
+
+    db, user, ch, camp = _seed_ch("autopilot")
+
+    class FakeRedis:
+        def __init__(self):
+            self.keys, self.ttl = {}, {}
+
+        def set(self, k, v, nx=False, ex=None):
+            if nx and k in self.keys:
+                return False
+            self.keys[k], self.ttl[k] = v, ex
+            return True
+
+        def expire(self, k, seconds):
+            self.ttl[k] = seconds
+
+    fake = FakeRedis()
+
+    def boom(*_a, **_k):
+        raise RuntimeError("Gemini 503")
+
+    import pytest as _pytest
+    mp = _pytest.MonkeyPatch()
+    mp.setattr(scheduler.task_queue, "conn", fake)
+    mp.setattr(scheduler, "autopilot_strategist_channel", boom)
+    try:
+        scheduler.autopilot_pass(db)
+    finally:
+        mp.undo()
+
+    assert fake.ttl[f"autopilot:ch:{ch.id}"] == scheduler.FAILED_PASS_RETRY_SECONDS
+    db.close()
+
+
+def test_autopilot_leaves_a_channel_whose_token_died_alone():
+    """It cannot publish, so approving only queues uploads that fail — while the buffer keeps being
+    rendered and then expired. On one render slot, that is the whole box spent on nothing."""
+    from database.types import BufferStatus, ChannelStatus
+    from workers import scheduler
+
+    db, user, ch, camp = _seed_ch("autopilot")
+    _t, b = _review_item(db, ch, camp, 1, 9)                    # would be auto-approved
+    ch.status = ChannelStatus.expired
+    db.commit()
+
+    summary = scheduler.autopilot_pass(db, respect_cadence=False)
+    assert summary["channels"] == 0 and summary["approved"] == 0
+    from database.models import BufferPoolItem
+    assert db.get(BufferPoolItem, b.id).status == BufferStatus.awaiting_review
+    db.close()
+
+
+def test_a_channel_deleted_mid_pass_does_not_cost_the_others_their_turn():
+    """The heartbeat re-reads the row before its read-modify-write; the same concurrency that makes
+    that necessary means the row may be gone. It runs outside every step's own isolation."""
+    from workers import scheduler
+
+    db, user, ch, camp = _seed_ch("copilot")
+    review = {"approved": 0, "rejected": 0, "recommended": 0, "escalated": 0}
+    db.delete(ch)
+    db.commit()
+
+    scheduler._record_heartbeat(db, ch, review, 0, 0, 0, 0)   # must not raise
+    db.close()
+
+
+def test_the_tick_stops_rendering_for_a_channel_that_cannot_publish():
+    """Guarding only the autopilot fixed half of it: the eager hydrator kept feeding the one render
+    slot for a channel whose every upload would fail and then age out of the buffer."""
+    from workers import scheduler, video_worker
+    from database.types import ChannelStatus
+
+    db, user, ch, camp = _seed_ch("off")
+    hydrated = []
+
+    import pytest as _pytest
+    mp = _pytest.MonkeyPatch()
+    mp.setattr(video_worker, "hydrate_campaign",
+               lambda _db, c, **_k: (hydrated.append(c.id), [])[1])
+    mp.setattr(scheduler, "sweep_orphans", lambda *_a, **_k: 0)
+    mp.setattr(scheduler.task_queue, "active_render_task_ids", lambda: set())
+    mp.setattr(scheduler, "clear_orphaned_render_lock", lambda _db: False)
+    mp.setattr(scheduler, "reap_stuck_tasks", lambda _db: 0)
+    try:
+        scheduler.periodic_tick(db)
+        assert hydrated == [camp.id]              # healthy channel: rendered as usual
+
+        hydrated.clear()
+        ch.status = ChannelStatus.expired
+        db.commit()
+        summary = scheduler.periodic_tick(db)
+        assert hydrated == []                     # dead token: nothing rendered
+        assert summary["stalled_channels"] == 1   # …and it is counted, not silently skipped
+    finally:
+        mp.undo()
     db.close()

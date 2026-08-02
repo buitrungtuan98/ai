@@ -477,6 +477,17 @@ def hourly_stats_pass(db, now: datetime | None = None) -> dict:
 
 # ── Autopilot: the "hands" — AI review / auto-reject / retry / catch-up publish (ADR-044) ──
 AUTOPILOT_MAX_RETRIES = 2  # auto-retry a genuine render failure at most this many times
+AUTOPILOT_MAX_REJECTS = 2  # …and auto-reject-and-re-render one episode at most this many times
+
+
+def _auto_rejects_spent(db, item) -> int:
+    """How many re-renders the autopilot has already spent on this episode's quality (ADR-076).
+    Lives on the Task, not the buffer row: a re-render DELETES the buffer row and inserts a fresh
+    one, so a counter kept there would reset itself every cycle — which is exactly how the loop
+    stayed invisible."""
+    task = db.scalar(select(Task).where(Task.campaign_id == item.campaign_id,
+                                        Task.episode_number == item.episode_number))
+    return (task.auto_reject_count or 0) if task is not None else 0
 
 # How long a FAILED render's workspace survives as a resume checkpoint (ADR-069). Long enough for
 # the slowest autopilot cadence (24h) and for an operator who retries the next morning; bounded so
@@ -576,8 +587,19 @@ def autopilot_review_channel(db, channel, mode: str, approve_min: int, reject_ma
         score = (qc or {}).get("score")
         ep = item.episode_number
         action, reason = autopilot.review_decision(qc, approve_min, reject_max)
+        if action == "reject" and _auto_rejects_spent(db, item) >= AUTOPILOT_MAX_REJECTS:
+            # Rejecting re-renders, and a re-render can score badly again — so an episode the judge
+            # keeps disliking is an unbounded loop on the one render slot this box has (ADR-076).
+            # Nothing else stops it: `apply_reject` never routes through `_fail_task`, so the
+            # consecutive-failure circuit breaker is never even consulted. Hand it to the operator
+            # instead: escalating parks it, costs nothing, and is the honest answer — after this
+            # many tries the machine has no better idea.
+            action = "escalate"
+            reason = (f"auto-QC rejected {AUTOPILOT_MAX_REJECTS} re-renders of this episode "
+                      f"({reason}) — it needs your eye, not another render")
         if action == "reject":
-            video_worker.apply_reject(db, item, "auto-review: " + reason, rerender=True)
+            video_worker.apply_reject(db, item, "auto-review: " + reason, rerender=True,
+                                      automatic=True)
             counts["rejected"] += 1
             _log_action(db, channel, "rejected", f"Rejected Ep {ep}: {reason}; re-rendering.",
                         campaign_id=item.campaign_id, evidence={"episode": ep, "qc_score": score})
@@ -622,7 +644,10 @@ def autopilot_retry_channel(db, channel) -> int:
         msg = (t.error_message or "").lower()
         if "rejected in review" in msg and "auto-review" not in msg:
             continue  # a human rejected this — don't silently re-render it
-        if t.retry_count >= AUTOPILOT_MAX_RETRIES:
+        # The autopilot's OWN budget (ADR-076). This used to read `retry_count`, which every path
+        # increments — so an operator who pressed Retry twice by hand, or two earlier auto-QC
+        # rejections, silently spent the self-healing budget R7 exists to provide.
+        if (t.auto_retry_count or 0) >= AUTOPILOT_MAX_RETRIES:
             continue
         if not failure.is_transient(msg):
             continue  # a retry can't mint a key, refill a quota, or unblock deterministic content
@@ -630,6 +655,7 @@ def autopilot_retry_channel(db, channel) -> int:
         t.error_message = None
         t.progress_pct = 0
         t.retry_count += 1
+        t.auto_retry_count = (t.auto_retry_count or 0) + 1
         db.commit()
         task_queue.clear_progress(t.id)  # drop any ghost % from the interrupted attempt (F1)
         t.rq_job_id = task_queue.enqueue_render(t.id)
@@ -637,9 +663,9 @@ def autopilot_retry_channel(db, channel) -> int:
         retried += 1
         _log_action(db, channel, "retried",
                     f"Retried failed render Ep {t.episode_number} (attempt "
-                    f"{t.retry_count}/{AUTOPILOT_MAX_RETRIES}).",
+                    f"{t.auto_retry_count}/{AUTOPILOT_MAX_RETRIES}).",
                     campaign_id=t.campaign_id,
-                    evidence={"episode": t.episode_number, "attempt": t.retry_count})
+                    evidence={"episode": t.episode_number, "attempt": t.auto_retry_count})
     return retried
 
 
@@ -999,41 +1025,101 @@ def autopilot_strategist_channel(db, user, channel, respect_cadence: bool = True
     return 1
 
 
+FAILED_PASS_RETRY_SECONDS = 600  # a partly-failed pass may try again in 10 min, not in `interval`
+
+
+def _channel_can_act(db, channel) -> bool:
+    """Can this channel actually publish right now? (ADR-076)
+
+    The pass used to iterate every channel regardless of status, so a Page whose token had died kept
+    auto-approving: each approval queued a publish that failed, rolled back, and left the episode
+    ready to fail again — while the buffer kept being topped up and then expired. On a box that
+    renders one video at a time, that is the render slot being spent on videos that cannot be posted.
+    An expired channel needs a token, not another episode; the Channels page already says so."""
+    from database.types import ChannelStatus
+
+    if channel.status == ChannelStatus.active:
+        return True
+    logger.info("Autopilot skipped channel %s — status %s (needs re-authorisation)",
+                channel.id, channel.status.value)
+    return False
+
+
+def _ap_step(db, channel, name: str, fn, default, failures: list):
+    """Run ONE autopilot step in its own blast radius (ADR-076).
+
+    These steps were a single try block, so the last one could cancel the first: a Gemini 503 inside
+    the strategist — an optional, once-a-week creative suggestion — skipped review, retry, catch-up
+    and auto-apply, and (because the cadence key was already set) kept skipping them for the whole
+    interval, up to 24 hours. Those four need no AI and are the safety net; nothing an optional step
+    does should be able to silence them. Records the step name so the caller can shorten the cadence
+    instead of banking a failed pass as if it had succeeded."""
+    try:
+        return fn()
+    except Exception:  # noqa: BLE001 — one step's fault must not cost the others their turn
+        logger.warning("Autopilot step %r failed for channel %s", name, channel.id, exc_info=True)
+        db.rollback()
+        failures.append(name)
+        return default
+
+
 def autopilot_pass(db=None, now: datetime | None = None, respect_cadence: bool = True) -> dict:
     """One autopilot cycle across every channel that has it enabled. Per-channel cadence is enforced
     with a Redis NX guard (default 3h, operator-set) so a frequent scheduler tick doesn't over-run a
-    channel. Read/enqueue only — never renders inline, so the single-render guarantee holds."""
+    channel. Read/enqueue only — never renders inline, so the single-render guarantee holds.
+
+    Steps run cheapest-and-most-important first (review → catch-up → retry, none of which call AI),
+    then the optional strategy work, each isolated from the others (ADR-076)."""
     from core import autopilot
 
     own = db is None
     db = db or SessionLocal()
     summary: dict = {"channels": 0, "approved": 0, "rejected": 0, "recommended": 0,
-                     "escalated": 0, "retried": 0, "caught_up": 0, "proposed": 0, "auto_applied": 0}
+                     "escalated": 0, "retried": 0, "caught_up": 0, "proposed": 0, "auto_applied": 0,
+                     "partial": 0}
     try:
         channels = db.scalars(select(Channel)).all()
         for ch in channels:
             mode = autopilot.ap_mode(ch)
             if mode == "off":
                 continue
+            if not _channel_can_act(db, ch):
+                continue
             if respect_cadence:
                 try:
+                    # Claimed BEFORE the work, deliberately: this key is also the mutual-exclusion
+                    # guard against two overlapping ticks acting on one channel. A failed pass
+                    # shortens it below (it must not bank the full interval it never earned).
                     if not task_queue.conn.set(f"autopilot:ch:{ch.id}", "1", nx=True,
                                                ex=autopilot.ap_interval_seconds(ch)):
                         continue  # not due yet for this channel
                 except Exception:  # noqa: BLE001 — no Redis → run every tick rather than never
                     pass
             approve_min, reject_max = autopilot.review_thresholds(ch)
-            try:
-                r = autopilot_review_channel(db, ch, mode, approve_min, reject_max)
-                caught = autopilot_catchup_channel(db, ch, now=now)
-                retried = autopilot_retry_channel(db, ch)
-                proposed = autopilot_propose_channel(db, ch, now=now)
-                proposed += autopilot_strategist_channel(db, db.get(User, ch.user_id), ch)
-                autoapplied = autopilot_autoapply_channel(db, ch) if mode == "autopilot" else {}
-            except Exception:  # noqa: BLE001 — one channel's fault must not stop the others
-                logger.warning("Autopilot failed for channel %s", ch.id, exc_info=True)
-                db.rollback()
-                continue
+            failures: list[str] = []
+            zero_review = {"approved": 0, "rejected": 0, "recommended": 0, "escalated": 0}
+            # Free and load-bearing first — these are the safety net.
+            r = _ap_step(db, ch, "review", lambda: autopilot_review_channel(
+                db, ch, mode, approve_min, reject_max), zero_review, failures)
+            caught = _ap_step(db, ch, "catchup",
+                              lambda: autopilot_catchup_channel(db, ch, now=now), 0, failures)
+            retried = _ap_step(db, ch, "retry", lambda: autopilot_retry_channel(db, ch), 0, failures)
+            # Optional strategy work — may call AI, may be rate-limited, may simply be down.
+            proposed = _ap_step(db, ch, "propose",
+                                lambda: autopilot_propose_channel(db, ch, now=now), 0, failures)
+            proposed += _ap_step(db, ch, "strategist", lambda: autopilot_strategist_channel(
+                db, db.get(User, ch.user_id), ch), 0, failures)
+            autoapplied = _ap_step(db, ch, "autoapply", lambda: autopilot_autoapply_channel(db, ch),
+                                   {}, failures) if mode == "autopilot" else {}
+            if failures:
+                summary["partial"] += 1
+                if respect_cadence:
+                    try:  # come back in minutes; a half-run pass has not earned the full interval
+                        task_queue.conn.expire(f"autopilot:ch:{ch.id}",
+                                               min(FAILED_PASS_RETRY_SECONDS,
+                                                   autopilot.ap_interval_seconds(ch)))
+                    except Exception:  # noqa: BLE001 — no Redis; the next tick runs anyway
+                        pass
             summary["channels"] += 1
             for k in ("approved", "rejected", "recommended", "escalated"):
                 summary[k] += r[k]
@@ -1074,6 +1160,18 @@ def _record_heartbeat(db, channel, review: dict, retried: int, caught: int,
         bits.append(f"filed {proposed} proposal(s)")
     if auto_applied:
         bits.append(f"applied {auto_applied} change(s)")
+    # Re-read the row first (ADR-076). This is a read-modify-write on a JSON blob the operator edits
+    # from the Channels form, and it runs on every pass in a different process from the web app —
+    # so a stale in-memory copy here would silently undo a mode or cadence change saved seconds ago.
+    # Guarded: the same concurrency that makes the re-read necessary also means the row may be GONE
+    # (the operator removed the channel mid-pass), and an unguarded refresh would raise here — past
+    # every step's own isolation — and cost the remaining channels their turn.
+    try:
+        db.refresh(channel)
+    except Exception:  # noqa: BLE001 — deleted or detached; there is nothing left to stamp
+        logger.info("Channel %s vanished mid-pass — no heartbeat recorded", channel.id)
+        db.rollback()
+        return
     cfg = dict(channel.autopilot_json or {})
     cfg["last_run"] = {"at": datetime.utcnow().isoformat(),
                        "summary": ", ".join(bits) if bits else "no action needed"}
@@ -1129,10 +1227,20 @@ def periodic_tick(db=None, now: datetime | None = None) -> dict:
         summary["expired"] = expire_stale_buffers(db)
 
         campaigns = db.scalars(select(Campaign).where(Campaign.status == CampaignStatus.active)).all()
+        summary["stalled_channels"] = 0
         for campaign in campaigns:
             # Isolate each campaign — one campaign's fault must not starve the others' hydration or
             # cost them their posting slot this tick.
             try:
+                # A campaign on a channel whose token has died must not keep rendering (ADR-076).
+                # Every episode it makes would queue a publish that fails, roll back, and then age
+                # out of the buffer — on a box that renders one video at a time, that is the whole
+                # factory working for nothing while a real campaign waits its turn. The Channels
+                # page and the alert bell already say what to do; stopping is the honest response.
+                channel = db.get(Channel, campaign.channel_id)
+                if channel is not None and not _channel_can_act(db, channel):
+                    summary["stalled_channels"] += 1
+                    continue
                 # Render eagerly — a full buffer is what makes on-the-dot slot publishing possible.
                 summary["hydrated"] += video_worker.hydrate_campaign(db, campaign)
                 # Publish exactly one pre-rendered episode if this campaign's slot is now.
@@ -1155,7 +1263,12 @@ def periodic_tick(db=None, now: datetime | None = None) -> dict:
         # tick. Separate from the daily pass; each fetch internally throttles per-episode work.
         try:
             if task_queue.conn.set("stats:hourly", "1", nx=True, ex=3600):
-                summary["stats"] = hourly_stats_pass(db, now=now)
+                # UTC explicitly, NOT this tick's `now` (ADR-076). `now` here is LOCAL time — it
+                # drives the posting-slot check — while the stats pass compares it against
+                # `Task.finished_at`, which is UTC. In production `now` is None so both are UTC and
+                # the bug never fires; any caller passing a local `now` would have shifted the
+                # "old enough to measure" cutoff by the whole timezone offset.
+                summary["stats"] = hourly_stats_pass(db, now=datetime.utcnow())
         except Exception:  # noqa: BLE001
             logger.warning("Hourly stats pass failed", exc_info=True)
 

@@ -1519,6 +1519,52 @@ their keyboard and the POST, and `/channels` was built to invite exactly that.
 - Verified: 551 tests (5 new), ruff clean, docs guard green; replayed in Chromium at 390px — the
   reported submission is refused at the form, a real token clears it.
 
+## R14 — audit: the autopilot must not be able to spend the box, and measurement must not lose what it measured `DONE`
+
+Every item below was reproduced before it was fixed, not inferred from reading.
+
+**Autopilot**
+- **The auto-reject loop had no cap.** Rejecting re-renders, and a re-render can score badly again —
+  eight cycles produced eight re-renders in a simulation, campaign still `active`. Nothing bounded it:
+  `apply_reject` never routes through `_fail_task`, so the consecutive-failure circuit breaker is never
+  consulted. On one render slot, one bad episode could starve every other campaign. Capped, then
+  escalated to the operator — after that many tries the machine has no better idea.
+- **One failure silenced the whole channel for a day.** The cadence key was claimed before the work and
+  a single `except` wrapped every step, so a Gemini 503 in the optional weekly strategist skipped
+  review, retry, catch-up and auto-apply — and kept skipping them until the interval expired. Steps are
+  isolated now, cheapest and most load-bearing first; a partial pass shortens the key to 10 minutes.
+- **One counter, three budgets.** `retry_count` is what the operator sees, so every path bumps it —
+  including the autopilot's own cap. Two hand-pressed Retries disabled the self-healing R7 added.
+  Split into `auto_retry_count` / `auto_reject_count`.
+- **A dead-token channel kept being fed.** Autopilot iterated every channel regardless of status:
+  approve → publish → fail → roll back, while the buffer kept rendering and then expiring. The tick's
+  eager hydrator did the same, so guarding only the autopilot would have fixed half of it — both stop
+  now, and the tick counts the stalled channels rather than skipping them silently.
+- `_record_heartbeat` re-reads the row before its read-modify-write of the operator's config JSON.
+
+**Analytics**
+- **`collect_stats` deleted what it could not re-fetch.** It rebuilt `stats_json` from scratch, so a
+  rate-limited geography call — or simply an episode past the 50-video curve cap, no error at all —
+  wiped the retention curve, the scene drop attribution and the top-viewer country. Those are the
+  inputs to the playbook distiller and the audience verdict. Merged now.
+- Curves are requested only for episodes that lack one (one sequential HTTP round trip each, in the
+  scheduler thread), truncation is logged instead of silent, and the due list is ordered
+  never-measured-then-oldest so a cap drains rather than starving a busy channel's tail.
+- **A channel that may not read analytics now says so.** A pre-`yt-analytics.readonly` connection 403s
+  hourly into a log file; the operator just saw retention that never arrived.
+- Facebook reports no “% viewed”, so every autopilot verdict is unavailable there — named, and said in
+  the UI, instead of grading every campaign “healthy” forever.
+- The growth caption reports the calendar span AND the sample count; they part company after an outage.
+- The stats pass is handed UTC explicitly — the tick's `now` is LOCAL time and was being compared
+  against UTC timestamps (latent: production passes `None`).
+
+**R13 trim.** `autocorrect`/`autocapitalize`/`spellcheck` removed from `ui.secret()` — every browser
+already disables them on `type="password"`; they looked like diligence and did nothing. The token
+field's "too short" branch went with them: `minlength` already says it, in the browser's own words.
+
+- Verified: 564 tests (18 new), ruff clean, docs guard green; the reject loop, the cadence lockout and
+  the stats data-loss each reproduced first, then pinned; new UI states checked in Chromium at 390px.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

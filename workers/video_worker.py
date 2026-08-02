@@ -367,12 +367,17 @@ def drop_script_checkpoint(task) -> None:
         task.render_json = rj or None
 
 
-def apply_reject(db, item, reason: str = "", *, rerender: bool = False) -> None:
+def apply_reject(db, item, reason: str = "", *, rerender: bool = False,
+                 automatic: bool = False) -> None:
     """Reject a render: delete its files, mark the buffer row rejected + the task FAILED with the
     reason, and feed the reason into the campaign's avoid-list (learning loop). When `rerender`,
     also queue a fresh render of the same episode — autopilot rejects re-render so the episode
     regenerates with the new avoid-note; the manual Review reject leaves it FAILED for an explicit
-    Retry (unchanged behavior)."""
+    Retry (unchanged behavior).
+
+    `automatic` marks a rejection the autopilot decided, so it is charged to the autopilot's own
+    re-render budget (`auto_reject_count`) and not to the operator's. The caller enforces the cap —
+    this only keeps the count (ADR-076)."""
     _safe_remove(*[p for p in (item.video_path, item.thumbnail_path) if p])
     item.status = BufferStatus.rejected
     reason = (reason or "").strip()[:200]
@@ -396,6 +401,8 @@ def apply_reject(db, item, reason: str = "", *, rerender: bool = False) -> None:
         task.error_message = None
         task.progress_pct = 0
         task.retry_count += 1
+        if automatic:
+            task.auto_reject_count = (task.auto_reject_count or 0) + 1
         clear_progress(task.id)  # no ghost % carries into the re-queued render (F1)
         db.commit()
         task.rq_job_id = enqueue_render(task.id)

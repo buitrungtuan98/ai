@@ -2468,6 +2468,10 @@ def campaign_overview(request: Request, user: CurrentUser, db: DbDep,
          "op": _campaign_ops(db, user.id, [campaign])[campaign.id],  # Now & next strip
          "cls": autopilot.classify_campaigns(db, [campaign]).get(campaign.id),  # performance verdict
          "autopilot_min": autopilot.MIN_MEASURED,
+         # Facebook publishes fine but reports no "% viewed", so every verdict on this page is built
+         # from a number that will never arrive there. Say so instead of showing "No data" forever
+         # as though the episodes were simply too young (ADR-076).
+         "measures_retention": autopilot.measurable(hub["channel"]) if hub["channel"] else True,
          "audience": autopilot.audience_summary(  # measured viewer country vs the channel target
              episodes, hub["channel"].profile_json if hub["channel"] else None),
          "hub_active": "overview", **hub},
@@ -3164,6 +3168,13 @@ def _credential_alerts(db, user) -> list[dict]:
                           "Its access token was refused — nothing can publish here until you paste a "
                           "fresh one. Rendered episodes keep waiting, they are not lost.",
                           channel=ch.channel_name, href="/channels", action="Fix the channel"))
+    # Amber, not red: this channel publishes perfectly well — it just cannot be MEASURED, so the
+    # playbook, the A/B verdicts and the autopilot's classification are all flying blind on it. The
+    # symptom is silence, which is why it needs saying out loud (ADR-076).
+    for ch in db.scalars(select(Channel).where(
+            Channel.user_id == user.id, Channel.analytics_error.isnot(None))).all():
+        out.append(_alert("amber", f"channel-analytics:{ch.id}", ch.analytics_error,
+                          channel=ch.channel_name, href="/channels", action="Reconnect"))
     active = db.scalars(select(Campaign).where(
         Campaign.user_id == user.id, Campaign.status == CampaignStatus.active)).all()
     if not active:

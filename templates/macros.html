@@ -99,16 +99,20 @@
    chose. These are not login credentials; nothing here should ever be remembered by a password
    manager. The suppression takes five vendor-specific attributes to be effective, which is precisely
    why it lives in one macro: written by hand six times it would be right five times.
-   `new-password` (not `off`) is the one Chrome actually honours for "do not fill a saved password".
-   `class` is passed through because the page layouts differ; `minlength` is a real attribute rather
-   than an HTML passthrough so autoescaping cannot silently neuter it (and so no caller can inject
-   markup through this macro). #}
+   `new-password`, not `off`, is the one that works: Chrome ignores `off` on a password field but
+   honours `new-password` as "do not fill a saved password". The `data-*` attributes are belt and
+   braces for third-party managers — those show a visible fill icon rather than filling silently, so
+   they are not the mechanism that was reported, just cheap insurance in one place. Deliberately NOT
+   here: `autocorrect`/`autocapitalize`/`spellcheck`, which every browser already disables on a
+   password input — three attributes that looked like diligence and did nothing.
+   `minlength` is a real parameter rather than an HTML passthrough so autoescaping cannot neuter it
+   (and no caller can inject markup through this macro). #}
 {% macro secret(name, placeholder='', required=false, class='', minlength=0) -%}
 <input name="{{ name }}" type="password" {% if class %}class="{{ class }}" {% endif %}
        {% if required %}required {% endif %}{% if minlength %}minlength="{{ minlength }}" {% endif %}
        placeholder="{{ placeholder }}"
-       autocomplete="new-password" autocorrect="off" autocapitalize="off" spellcheck="false"
-       data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other">
+       autocomplete="new-password" data-1p-ignore data-lpignore="true" data-bwignore
+       data-form-type="other">
 {%- endmacro %}
 
 {# THE single episode filter bar. EVERY chip filters /episodes in place (ADR-065): two of them used

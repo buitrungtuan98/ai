@@ -36,6 +36,11 @@
 {% if cls and cls.label not in ['unmeasured', 'too_early'] %}
 <p class="verdict {{ cls.label }} mt-sm">{{ cls.icon }} <b>{{ cls.name }}</b> — this campaign averages
   {{ cls.retention }}% retention{% if cls.baseline %} against the {{ cls.baseline }}% channel average{% endif %}.</p>
+{% elif measures_retention is defined and not measures_retention %}
+{# Not "too early" and not "no data yet" — this number is never coming (ADR-076). #}
+<p class="hint mt-sm">📉 <b>Facebook does not report retention.</b> The Graph API gives view counts
+  but no “average % viewed”, so this campaign cannot be graded against the channel — and the
+  autopilot cannot call a winner or a laggard here. Views and publishing are unaffected.</p>
 {% elif cls and cls.label == 'too_early' %}
 <p class="hint mt-sm">🌱 Too early to judge — needs {{ autopilot_min }} measured episodes (has {{ cls.measured }}).</p>
 {% endif %}
