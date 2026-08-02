@@ -513,3 +513,345 @@ def test_the_help_lives_in_one_partial():
     src = pathlib.Path("templates/channels.html").read_text(encoding="utf-8")
     assert src.count('include "_fb_token_help.html"') == 2
     assert "Extend Access Token" not in src        # the text itself lives only in the partial
+
+
+# ── G1: a permalink that actually resolves ───────────────────────────────────
+def test_a_facebook_permalink_is_a_real_video_url():
+    """`facebook.com/{video_id}` is not a video permalink, so every "View ↗" for a Facebook publish
+    led nowhere — on the episode page and in the dashboard feed alike."""
+    from services import facebook_service as fb
+
+    assert fb.permalink("123", reel=True) == "https://www.facebook.com/reel/123"
+    assert fb.permalink("123", reel=False) == "https://www.facebook.com/watch/?v=123"
+
+
+def test_the_permalink_follows_the_format_on_both_platforms():
+    from database.types import Platform
+    from workers.video_worker import published_url_for
+
+    assert published_url_for(Platform.facebook, "9", "short").endswith("/reel/9")
+    assert published_url_for(Platform.facebook, "9", "long").endswith("watch/?v=9")
+    assert published_url_for(Platform.youtube, "9", "short").endswith("/shorts/9")
+    # A 15-minute video is not a Short; /shorts/ was being built for those too.
+    assert published_url_for(Platform.youtube, "9", "long").endswith("watch?v=9")
+
+
+# ── G2: a vertical short is a REEL ───────────────────────────────────────────
+def test_a_short_goes_to_the_reels_endpoint_and_long_form_does_not():
+    from services import facebook_service as fb
+
+    assert fb.is_reel({"video_format": "short"}) is True
+    assert fb.is_reel({}) is True                       # short is the product's default
+    assert fb.is_reel({"video_format": "long"}) is False
+
+
+def test_a_reel_is_uploaded_in_three_phases(monkeypatch, tmp_path, channel):
+    """Posting a 9:16 clip to /videos makes an ordinary Page video that never enters Reels
+    distribution — the entire reason this product renders vertical video."""
+    import requests
+
+    from services import facebook_service as fb
+
+    channel.encrypted_credentials = json.dumps({"page_id": "P", "page_access_token": "tok"})
+    f = tmp_path / "v.mp4"
+    f.write_bytes(b"video-bytes")
+    calls = []
+
+    def fake_post(url, **kw):
+        calls.append((url, kw.get("data") if isinstance(kw.get("data"), dict) else "<bytes>",
+                      kw.get("headers") or {}))
+        if url.endswith("/video_reels") and (kw.get("data") or {}).get("upload_phase") == "start":
+            return FakeResp(200, {"video_id": "REEL1", "upload_url": "https://rupload/x"})
+        return FakeResp(200, {"success": True})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    monkeypatch.setattr(fb, "find_existing_upload", lambda *a, **k: None)
+    vid = fb.upload_video(channel, str(f), {"video_format": "short", "description": "d"})
+    assert vid == "REEL1"
+    phases = [(c[1] or {}).get("upload_phase") for c in calls if isinstance(c[1], dict)]
+    assert "start" in phases and "finish" in phases
+    # The bytes go to the reserved upload URL with an offset header — resumable, not one big POST.
+    transfer = [c for c in calls if c[0] == "https://rupload/x"][0]
+    assert transfer[2]["offset"] == "0" and "file_size" in transfer[2]
+    assert transfer[2]["Authorization"].startswith("OAuth ")
+
+
+def test_long_form_still_goes_to_the_page_video_endpoint(monkeypatch, tmp_path, channel):
+    import requests
+
+    from services import facebook_service as fb
+
+    channel.encrypted_credentials = json.dumps({"page_id": "P", "page_access_token": "tok"})
+    f = tmp_path / "v.mp4"
+    f.write_bytes(b"x")
+    seen = {}
+
+    def fake_post(url, **kw):
+        seen["url"] = url
+        seen["data"] = kw.get("data")
+        return FakeResp(200, {"id": "VID9"})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    monkeypatch.setattr(fb, "find_existing_upload", lambda *a, **k: None)
+    assert fb.upload_video(channel, str(f), {"video_format": "long", "title": "T"}) == "VID9"
+    assert seen["url"].endswith("/P/videos")
+
+
+# ── The comparison with YouTube: privacy and the CTA ─────────────────────────
+def test_a_private_campaign_does_not_publish_publicly_on_facebook(monkeypatch, tmp_path, channel):
+    """Found by diffing the two publish paths: YouTube honoured `privacy`, Facebook ignored it — so a
+    campaign set to private posted PUBLICLY to the Page (ADR-073)."""
+    import requests
+
+    from services import facebook_service as fb
+
+    channel.encrypted_credentials = json.dumps({"page_id": "P", "page_access_token": "tok"})
+    f = tmp_path / "v.mp4"
+    f.write_bytes(b"x")
+    states = []
+
+    def fake_post(url, **kw):
+        d = kw.get("data") if isinstance(kw.get("data"), dict) else {}
+        if d.get("upload_phase") == "start":
+            return FakeResp(200, {"video_id": "R1", "upload_url": "https://rupload/x"})
+        if d.get("upload_phase") == "finish":
+            states.append(d.get("video_state"))
+        return FakeResp(200, {"id": "R1"})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    monkeypatch.setattr(fb, "find_existing_upload", lambda *a, **k: None)
+
+    fb.upload_video(channel, str(f), {"video_format": "short", "privacy": "private"})
+    fb.upload_video(channel, str(f), {"video_format": "short", "privacy": "public"})
+    assert states == ["DRAFT", "PUBLISHED"]
+
+
+def test_an_unlisted_long_video_is_not_published(monkeypatch, tmp_path, channel):
+    import requests
+
+    from services import facebook_service as fb
+
+    channel.encrypted_credentials = json.dumps({"page_id": "P", "page_access_token": "tok"})
+    f = tmp_path / "v.mp4"
+    f.write_bytes(b"x")
+    seen = {}
+    monkeypatch.setattr(requests, "post",
+                        lambda url, **kw: (seen.update(kw.get("data") if isinstance(kw.get("data"), dict) else {}),
+                                           FakeResp(200, {"id": "V"}))[1])
+    monkeypatch.setattr(fb, "find_existing_upload", lambda *a, **k: None)
+    fb.upload_video(channel, str(f), {"video_format": "long", "privacy": "unlisted"})
+    assert seen["published"] == "false"
+
+
+def test_the_cta_is_posted_as_a_comment_like_youtube_does(monkeypatch, tmp_path, channel):
+    """YouTube has always posted the CTA (which carries the affiliate link) as a comment; Facebook
+    dropped it silently, so monetization simply did not exist on half the channels."""
+    import requests
+
+    from services import facebook_service as fb
+
+    channel.encrypted_credentials = json.dumps({"page_id": "P", "page_access_token": "tok"})
+    f = tmp_path / "v.mp4"
+    f.write_bytes(b"x")
+    comments = []
+
+    def fake_post(url, **kw):
+        d = kw.get("data") if isinstance(kw.get("data"), dict) else {}
+        if url.endswith("/comments"):
+            comments.append(d.get("message"))
+            return FakeResp(200, {"id": "c1"})
+        if d.get("upload_phase") == "start":
+            return FakeResp(200, {"video_id": "R1", "upload_url": "https://rupload/x"})
+        return FakeResp(200, {"id": "R1"})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    monkeypatch.setattr(fb, "find_existing_upload", lambda *a, **k: None)
+    fb.upload_video(channel, str(f), {"video_format": "short", "cta": "Shop → https://x (affiliate)"})
+    assert comments == ["Shop → https://x (affiliate)"]
+
+
+def test_a_failed_cta_comment_never_fails_a_published_video(monkeypatch, tmp_path, channel):
+    import requests
+
+    from services import facebook_service as fb
+
+    channel.encrypted_credentials = json.dumps({"page_id": "P", "page_access_token": "tok"})
+    f = tmp_path / "v.mp4"
+    f.write_bytes(b"x")
+
+    def fake_post(url, **kw):
+        d = kw.get("data") if isinstance(kw.get("data"), dict) else {}
+        if url.endswith("/comments"):
+            return _graph_error("comments disabled", code=200)
+        if d.get("upload_phase") == "start":
+            return FakeResp(200, {"video_id": "R1", "upload_url": "https://rupload/x"})
+        return FakeResp(200, {"id": "R1"})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    monkeypatch.setattr(fb, "find_existing_upload", lambda *a, **k: None)
+    assert fb.upload_video(channel, str(f), {"video_format": "short", "cta": "hi"}) == "R1"
+
+
+# ── G3: never post the same episode twice ────────────────────────────────────
+def test_an_upload_that_already_landed_is_adopted_not_reposted(monkeypatch, tmp_path, channel):
+    """An upload that succeeds server-side but times out client-side looks exactly like a failure, so
+    the retry used to put a second copy on the Page."""
+    from services import facebook_service as fb
+
+    channel.encrypted_credentials = json.dumps({"page_id": "P", "page_access_token": "tok"})
+    f = tmp_path / "v.mp4"
+    f.write_bytes(b"x")
+    monkeypatch.setattr(fb, "find_existing_upload", lambda *a, **k: "ALREADY")
+
+    import requests
+
+    monkeypatch.setattr(requests, "post",
+                        lambda *a, **k: pytest.fail("must not upload a second copy"))
+    assert fb.upload_video(channel, str(f), {"video_format": "short"},
+                           pending_video_id="ALREADY") == "ALREADY"
+
+
+def test_the_reel_id_is_persisted_before_the_bytes_go_up(monkeypatch, tmp_path, channel):
+    """That is what makes the retry check possible at all: the id exists before the risky part."""
+    import requests
+
+    from services import facebook_service as fb
+
+    channel.encrypted_credentials = json.dumps({"page_id": "P", "page_access_token": "tok"})
+    f = tmp_path / "v.mp4"
+    f.write_bytes(b"x")
+    order = []
+
+    def fake_post(url, **kw):
+        d = kw.get("data") if isinstance(kw.get("data"), dict) else {}
+        if d.get("upload_phase") == "start":
+            return FakeResp(200, {"video_id": "R7", "upload_url": "https://rupload/x"})
+        order.append("transfer" if url == "https://rupload/x" else "other")
+        return FakeResp(200, {"id": "R7"})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    monkeypatch.setattr(fb, "find_existing_upload", lambda *a, **k: None)
+    fb.upload_video(channel, str(f), {"video_format": "short"},
+                    on_pending=lambda vid: order.append(f"pending:{vid}"))
+    assert order[0] == "pending:R7", order      # persisted first, uploaded second
+
+
+def test_the_worker_stores_the_pending_id_before_uploading(session, user, channel, monkeypatch,
+                                                           tmp_path):
+    from database.models import BufferPoolItem, Campaign, Task
+    from database.types import BufferStatus, CampaignStatus, Platform
+    from workers import video_worker
+
+    channel.platform = Platform.facebook
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="T", total_episodes=1,
+                   status=CampaignStatus.active, config_json={"video_format": "short"})
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    f = tmp_path / "v.mp4"
+    f.write_bytes(b"x")
+    buf = BufferPoolItem(campaign_id=cam.id, channel_id=channel.id, episode_number=1,
+                         status=BufferStatus.ready, video_path=str(f), metadata_json={"title": "T"})
+    t = Task(campaign_id=cam.id, user_id=user.id, episode_number=1)
+    session.add_all([buf, t])
+    session.commit()
+    session.refresh(buf)
+    session.refresh(t)
+
+    def fake_publish(channel, path, metadata, user, *, pending_video_id=None, on_pending=None):
+        assert metadata["video_format"] == "short"      # the format reaches the uploader
+        on_pending("R42")
+        return "R42"
+
+    monkeypatch.setattr(video_worker, "_publish", fake_publish)
+    monkeypatch.setattr(video_worker, "_notify", lambda *a, **k: None)
+    video_worker._publish_buffer(session, t, buf, cam, channel, user)
+    session.refresh(t)
+    assert t.published_url == "https://www.facebook.com/reel/R42"
+
+
+# ── G5: one batched insights call ────────────────────────────────────────────
+def test_insights_are_fetched_in_one_batch(monkeypatch, channel):
+    """Fifty round trips every stats pass was fifty chances to be rate-limited, for data that fits
+    in one response."""
+    import requests
+
+    from services import analytics_service
+
+    channel.encrypted_credentials = json.dumps({"page_id": "P", "page_access_token": "tok"})
+    posts = []
+
+    def fake_post(url, **kw):
+        posts.append(kw.get("data") or {})
+        return FakeResp(200, [{"code": 200, "body": json.dumps({"data": [{"values": [{"value": 12}]}]})},
+                              {"code": 200, "body": json.dumps({"data": [{"values": [{"value": 7}]}]})}])
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    monkeypatch.setattr(requests, "get", lambda *a, **k: pytest.fail("should not fetch one by one"))
+    out = analytics_service.fetch_facebook_stats(channel, ["v1", "v2"])
+    assert out == {"v1": {"views": 12}, "v2": {"views": 7}}
+    assert len(posts) == 1 and "batch" in posts[0]
+
+
+def test_one_unreadable_video_does_not_discard_the_others(monkeypatch, channel):
+    import requests
+
+    from services import analytics_service
+
+    channel.encrypted_credentials = json.dumps({"page_id": "P", "page_access_token": "tok"})
+    monkeypatch.setattr(requests, "post", lambda *a, **k: FakeResp(200, [
+        {"code": 400, "body": json.dumps({"error": {"message": "no access"}})},
+        {"code": 200, "body": json.dumps({"data": [{"values": [{"value": 5}]}]})},
+    ]))
+    assert analytics_service.fetch_facebook_stats(channel, ["bad", "good"]) == {"good": {"views": 5}}
+
+
+# ── G6: only an https avatar reaches the page ────────────────────────────────
+@pytest.mark.parametrize(("raw", "want"), [
+    ("https://scontent.example/p.jpg", "https://scontent.example/p.jpg"),
+    ("http://insecure.example/p.jpg", None),      # mixed content over the tunnel
+    ("javascript:alert(1)", None),
+    ("not a url", None),
+    ("", None),
+])
+def test_only_an_https_avatar_is_stored(raw, want):
+    import main
+
+    assert main._safe_avatar(raw) == want
+
+
+# ── G7: an expired channel parks the episode instead of failing it ───────────
+def test_an_expired_channel_keeps_the_episode_in_the_buffer(session, user, channel, monkeypatch,
+                                                            tmp_path):
+    """The credential is what is broken, not this episode — failing it would burn a retry and read as
+    a broken render, and the rendered video is perfectly good."""
+    from database.models import BufferPoolItem, Campaign, Task
+    from database.types import BufferStatus, CampaignStatus, ChannelStatus, Platform, TaskStatus
+    from workers import video_worker
+
+    channel.platform = Platform.facebook
+    channel.status = ChannelStatus.expired
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="T", total_episodes=1,
+                   status=CampaignStatus.active, config_json={})
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    f = tmp_path / "v.mp4"
+    f.write_bytes(b"x")
+    buf = BufferPoolItem(campaign_id=cam.id, channel_id=channel.id, episode_number=1,
+                         status=BufferStatus.ready, video_path=str(f), metadata_json={})
+    t = Task(campaign_id=cam.id, user_id=user.id, episode_number=1, status=TaskStatus.SCHEDULED)
+    session.add_all([buf, t])
+    session.commit()
+    session.refresh(buf)
+    session.refresh(t)
+
+    monkeypatch.setattr(video_worker, "_publish",
+                        lambda *a, **k: pytest.fail("must not upload to an expired channel"))
+    video_worker.publish_task(buf.id)
+    session.expire_all()
+    session.refresh(buf)
+    session.refresh(t)
+    assert buf.status == BufferStatus.ready          # still there, ready for the next slot
+    assert t.status != TaskStatus.FAILED             # not a failure of this episode
+    assert t.retry_count == 0                        # and it did not burn a retry

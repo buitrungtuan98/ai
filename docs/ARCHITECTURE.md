@@ -1574,3 +1574,41 @@ route back was to delete the channel — taking its campaigns and rendered episo
 common is that the system knew the answer and either did not ask, did not say it, or had nowhere to
 put it. Storing the canonical numeric id is the one change with no visible symptom yet: a username
 works until the day the Page is renamed, and then every call 404s at once.
+
+### ADR-073 — Facebook publishing reaches parity with YouTube (Reels, privacy, CTA, permalink, idempotency)
+**Decision:** the Facebook publish path is brought level with `youtube_service`, feature for feature,
+and where the platforms genuinely differ the difference is named rather than left implicit.
+1. **A vertical short is published as a REEL** (`/{page_id}/video_reels`, three-phase start → transfer
+   → finish). Posting 9:16 to `/{page_id}/videos` produced an ordinary Page video that never enters
+   Reels distribution — the entire reason this product renders vertical video. Long-form 16:9 stays a
+   Page video. The three phases also give a **resumable** transfer with an `offset` header, replacing
+   one 600-second all-or-nothing POST while YouTube had been resumable all along.
+2. **The campaign's privacy choice is honoured.** It was read by YouTube and ignored by Facebook, so a
+   campaign set to `private` published **publicly** to the Page. Facebook has no "unlisted", so the
+   honest mapping is public → `PUBLISHED` / `published=true`, anything else → Reel `DRAFT` /
+   `published=false`.
+3. **The CTA is posted as a comment**, as YouTube has always done. It carries the affiliate line, so
+   monetization silently did not exist on Facebook channels.
+4. **A permalink that resolves**: `/reel/{id}` or `/watch/?v={id}`. `facebook.com/{video_id}` is not a
+   video URL, so every "View ↗" for a Facebook publish led nowhere. YouTube gained the same
+   format-awareness — it was building `/shorts/{id}` for 15-minute videos too.
+5. **No duplicate posts.** The Reels `start` phase reserves the video id before any bytes move, so it
+   is persisted on the buffer item first and a retry asks Facebook whether that upload already landed;
+   the Page-video path falls back to matching our own title among recent uploads. An upload that
+   succeeds server-side but times out client-side is indistinguishable from a failure, and the retry
+   used to post a second copy.
+6. **One batched insights call** instead of up to fifty, with per-entry status so one unreadable video
+   does not discard the rest; **https-only avatars** (`_safe_avatar`); and an **expired channel parks
+   the episode** (`ChannelExpired`) instead of failing it — the credential is broken, the rendered
+   video is fine, so it waits in the buffer and goes out at the next slot without burning a retry.
+
+**Why:** every item here came from diffing the two publish paths side by side, and the pattern is the
+same each time — Facebook was implemented once, early, and then every improvement landed on the
+YouTube side only. Privacy is the sharpest example: the campaign form offers public/unlisted/private,
+YouTube obeys it, and Facebook posted everything publicly regardless. That is not a missing feature,
+it is the product doing the opposite of what the operator asked, and on the one axis where "oops" is
+not recoverable. Reels is the largest in value: the README and the campaign form both promise
+"Shorts / Reels", the renderer produces 9:16 for exactly that reason, and the upload endpoint quietly
+threw that distribution away. The duplicate-post guard exists because the failure it prevents is
+invisible from our side — we see a timeout, the Page sees a video — and the only cheap moment to make
+it safe is the one the Reels API already hands us: an id that exists before the risky part.

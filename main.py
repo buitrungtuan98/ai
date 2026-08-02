@@ -830,7 +830,7 @@ def add_facebook_channel(
     # The operator may leave the label and avatar blank and take the Page's own (ADR-072) — retyping
     # what Facebook just told us is busywork, and a hand-typed name drifts from the real Page.
     name = (channel_name or "").strip() or (verdict.name if verified else "") or f"Page {page_id}"
-    avatar = (avatar_url or "").strip() or (verdict.picture if verified else None)
+    avatar = _safe_avatar((avatar_url or "").strip() or (verdict.picture if verified else None))
     creds = json.dumps({"page_id": page_id, "page_access_token": page_access_token})
     channel = Channel(
         user_id=user.id, platform=Platform.facebook, channel_name=name[:120],
@@ -842,6 +842,16 @@ def add_facebook_channel(
     # ask about is exactly the lie this check exists to remove.
     return RedirectResponse(
         "/channels?flash=" + ("fb_added" if verified else "fb_added_unverified"), status_code=303)
+
+
+def _safe_avatar(url: str | None) -> str | None:
+    """Only an https image URL may be rendered into the channel card's `<img src>` (ADR-073).
+
+    It is operator-supplied text going straight into the page: an `http://` avatar makes the whole
+    dashboard mixed-content over the tunnel, and anything that is not a URL at all just breaks the
+    card. Graph's own picture URLs are https, so the auto-filled path is unaffected."""
+    u = (url or "").strip()
+    return u[:500] if u.lower().startswith("https://") else None
 
 
 @app.post("/channels/{channel_id}/facebook-token")

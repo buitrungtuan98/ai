@@ -111,28 +111,45 @@ def fetch_facebook_stats(channel: Channel, video_ids: list[str]) -> dict[str, di
     import requests
 
     from services.facebook_service import GRAPH, FacebookAuthError, raise_for_graph
+    from services.facebook_service import scrub as _scrub
 
     data = _json.loads(channel.encrypted_credentials or "{}")
     token = data.get("page_access_token")
     if not token:
         return {}
+    ids = video_ids[:50]
+    if not ids:
+        return {}
+    # ONE batched Graph call instead of one request per video (ADR-073). Fifty round trips every
+    # stats pass was fifty chances to be rate-limited and fifty times the latency, for data that
+    # arrives in a single response. Graph caps a batch at 50, which is the cap already applied above.
+    batch = [{"method": "GET", "relative_url": f"{vid}/video_insights/total_video_views"}
+             for vid in ids]
+    try:
+        resp = requests.post(GRAPH, data={"access_token": token, "batch": _json.dumps(batch)},
+                             timeout=60)
+        raise_for_graph(resp, token=token, what="Facebook insights")
+        results = resp.json() or []
+    except FacebookAuthError:
+        # A dead token fails identically for every video — let the caller retire the channel rather
+        # than log the same failure fifty times (ADR-072).
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("FB insights batch failed: %s", _scrub(str(exc), token))
+        return {}
     out: dict[str, dict] = {}
-    for vid in video_ids[:50]:
+    for vid, item in zip(ids, results):
+        # Each entry carries its OWN status code: one video the Page can no longer read must not
+        # discard the other forty-nine.
+        if not isinstance(item, dict) or item.get("code") != 200:
+            logger.warning("FB insights unavailable for video %s", vid)
+            continue
         try:
-            resp = requests.get(
-                f"{GRAPH}/{vid}/video_insights/total_video_views",
-                params={"access_token": token}, timeout=20,
-            )
-            raise_for_graph(resp, token=token, what="Facebook insights")
-            rows = resp.json().get("data", [])
+            rows = (_json.loads(item.get("body") or "{}") or {}).get("data", [])
             views = rows[0]["values"][0]["value"] if rows else 0
             out[vid] = {"views": int(views)}
-        except FacebookAuthError:
-            # A dead token fails identically for every remaining video — stop, and let the caller
-            # mark the channel expired instead of logging the same failure fifty times (ADR-072).
-            raise
-        except Exception:  # noqa: BLE001
-            logger.warning("FB insights failed for video %s", vid)
+        except Exception:  # noqa: BLE001 — an unexpected shape for one video, not for all of them
+            logger.warning("FB insights unreadable for video %s", vid)
     return out
 
 

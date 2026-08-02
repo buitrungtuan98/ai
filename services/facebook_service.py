@@ -1,17 +1,21 @@
-"""Facebook Page video publishing.
+"""Facebook Page publishing — Reels for vertical shorts, Page video for long-form.
 
 A channel stores its Page id + permanent Page Access Token (JSON) in `channel.encrypted_credentials`
-(decrypted on read). Page tokens are long-lived, so no refresh flow is needed — we upload directly to
-the Graph API video endpoint.
+(decrypted on read). Page tokens are long-lived, so no refresh flow is needed.
 
 This module also owns the Graph constants and the "what did Facebook actually say" error handling for
 the WHOLE Facebook surface — verification, publishing and analytics all import them — so the version
 and the error semantics exist exactly once (ADR-072).
+
+The publish path deliberately mirrors `youtube_service` feature for feature (ADR-073): the campaign's
+privacy choice is honoured, the CTA is posted as a comment, and the upload is chunked and resumable.
+Where the two platforms genuinely differ the difference is named in a comment, not left implicit.
 """
 from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 
 from database.models import Channel
@@ -31,6 +35,9 @@ _AUTH_ERROR_CODES = {102, 190, 463, 467}
 _AUTH_ERROR_TYPES = {"OAuthException"}
 
 _TOKEN_IN_URL = re.compile(r"access_token=[^&\s\"']+")
+
+_TRANSFER_TIMEOUT = 600      # the bytes themselves
+_CALL_TIMEOUT = 60           # the small start/finish/comment calls
 
 
 class FacebookError(RuntimeError):
@@ -77,8 +84,7 @@ def raise_for_graph(resp, *, token: str | None = None, what: str = "Facebook") -
     except ValueError:                      # an HTML error page, not JSON
         message = (resp.text or "")[:200]
     detail = scrub(message or f"HTTP {resp.status_code}", token)
-    is_auth = code in _AUTH_ERROR_CODES or etype in _AUTH_ERROR_TYPES
-    if is_auth:
+    if code in _AUTH_ERROR_CODES or etype in _AUTH_ERROR_TYPES:
         # The words matter: `core.failure` classifies from this text, and "OAuth error" is what tells
         # the episode page, the bell and the autopilot that no retry can fix it (ADR-072).
         raise FacebookAuthError(f"{what}: OAuth error {code or ''} — {detail}".replace("  ", " "),
@@ -95,25 +101,173 @@ def _load(channel: Channel) -> tuple[str, str]:
     return page_id, token
 
 
-def upload_video(channel: Channel, video_path: str, metadata: dict) -> str:
-    """Upload a video to the Page feed and return the Facebook video id."""
+# ── What the operator's choices mean on Facebook ─────────────────────────────
+def is_reel(metadata: dict) -> bool:
+    """A vertical short is published as a REEL (ADR-073).
+
+    Posting a 9:16 clip to `/{page_id}/videos` produces an ordinary Page video: it never enters Reels
+    distribution, which is the entire reason this product renders vertical video. Long-form 16:9 stays
+    a Page video, where it belongs."""
+    return (metadata.get("video_format") or "short") != "long"
+
+
+def wants_public(metadata: dict) -> bool:
+    """Facebook has no 'unlisted'. The honest mapping of the campaign's privacy choice is therefore
+    public → live, anything else → not publicly visible (a Reel DRAFT / an unpublished video).
+
+    This was simply ignored before: a campaign set to `private` published PUBLICLY to the Page while
+    the same campaign on YouTube stayed private (ADR-073)."""
+    return (metadata.get("privacy") or "public") == "public"
+
+
+def permalink(video_id: str, *, reel: bool = True) -> str:
+    """The canonical, resolvable URL of a published video.
+
+    `https://www.facebook.com/{video_id}` — what this used to build — is not a video permalink, so
+    every "View ↗" link the app showed for a Facebook publish led nowhere (ADR-073)."""
+    return (f"https://www.facebook.com/reel/{video_id}" if reel
+            else f"https://www.facebook.com/watch/?v={video_id}")
+
+
+# ── Idempotency: never post the same episode twice ───────────────────────────
+def find_existing_upload(channel: Channel, *, video_id: str | None = None,
+                         title: str = "") -> str | None:
+    """Did a previous attempt already put this episode on the Page? (ADR-073)
+
+    An upload that succeeds server-side but times out client-side looks exactly like a failure here,
+    so the retry used to post the video a second time. The Reels flow hands us the video id BEFORE the
+    bytes go up, which makes this exact; for a Page video there is no pre-id, so we fall back to
+    looking for our own title among the Page's most recent uploads. Best-effort: any doubt returns
+    None and the upload proceeds (a duplicate is bad, a missing episode is worse)."""
     import requests
 
     page_id, token = _load(channel)
-    url = f"{GRAPH_VIDEO}/{page_id}/videos"
-    description = metadata.get("description", "")
-    title = metadata.get("title", "")
     try:
-        with open(video_path, "rb") as fh:
-            resp = requests.post(
-                url,
-                data={"title": title, "description": description, "access_token": token},
-                files={"source": fh},
-                timeout=600,
-            )
+        if video_id:
+            resp = requests.get(f"{GRAPH}/{video_id}", params={"fields": "id,status",
+                                                               "access_token": token},
+                                timeout=_CALL_TIMEOUT)
+            if resp.status_code == 200 and (resp.json() or {}).get("id"):
+                return str((resp.json() or {}).get("id"))
+            return None
+        if not title:
+            return None
+        resp = requests.get(f"{GRAPH}/{page_id}/videos",
+                            params={"fields": "id,title,description", "limit": 10,
+                                    "access_token": token}, timeout=_CALL_TIMEOUT)
+        if resp.status_code != 200:
+            return None
+        for row in (resp.json() or {}).get("data", []):
+            if (row.get("title") or "").strip() == title.strip():
+                return str(row.get("id"))
+    except Exception as exc:  # noqa: BLE001 — a guard that raises would block a legitimate retry
+        logger.warning("Could not check for an existing Facebook upload: %s", scrub(str(exc)))
+    return None
+
+
+# ── Publishing ───────────────────────────────────────────────────────────────
+def _post_comment(page_id: str, token: str, video_id: str, text: str) -> None:
+    """Post the campaign's CTA (and its affiliate line) under the video.
+
+    YouTube has always done this; Facebook silently dropped it, so every CTA and every affiliate link
+    an operator configured was simply missing from half their channels (ADR-073). Best-effort — a
+    failed comment must never fail a published video."""
+    import requests
+
+    try:
+        resp = requests.post(f"{GRAPH}/{video_id}/comments",
+                             data={"message": text, "access_token": token}, timeout=_CALL_TIMEOUT)
+        raise_for_graph(resp, token=token, what="Facebook comment")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to post the CTA comment on %s: %s", video_id, scrub(str(exc), token))
+
+
+def _upload_reel(page_id: str, token: str, video_path: str, metadata: dict,
+                 on_pending=None) -> str:
+    """Publish a Reel with Meta's three-phase upload (start → transfer → finish).
+
+    The phases are not ceremony: `start` reserves the video id (which is what makes a retry safe), and
+    `transfer` is a plain byte stream with an `offset` header, so a large file is resumable instead of
+    one 600-second all-or-nothing POST like the old code used (ADR-073)."""
+    import requests
+
+    start = requests.post(f"{GRAPH}/{page_id}/video_reels",
+                          data={"upload_phase": "start", "access_token": token},
+                          timeout=_CALL_TIMEOUT)
+    raise_for_graph(start, token=token, what="Facebook Reel start")
+    body = start.json() or {}
+    video_id, upload_url = str(body.get("video_id") or ""), body.get("upload_url") or ""
+    if not (video_id and upload_url):
+        raise FacebookError("Facebook Reel start: no video_id/upload_url in the response")
+    if on_pending:
+        # Persisted BEFORE a single byte goes up, so a retry can ask "did this one already land?"
+        on_pending(video_id)
+
+    size = os.path.getsize(video_path)
+    with open(video_path, "rb") as fh:
+        transfer = requests.post(
+            upload_url,
+            headers={"Authorization": f"OAuth {token}", "offset": "0", "file_size": str(size)},
+            data=fh, timeout=_TRANSFER_TIMEOUT)
+    raise_for_graph(transfer, token=token, what="Facebook Reel upload")
+
+    finish = requests.post(
+        f"{GRAPH}/{page_id}/video_reels",
+        data={"upload_phase": "finish", "video_id": video_id,
+              # DRAFT is Facebook's nearest thing to "not public": there is no unlisted Reel.
+              "video_state": "PUBLISHED" if wants_public(metadata) else "DRAFT",
+              "description": metadata.get("description", ""),
+              "access_token": token},
+        timeout=_CALL_TIMEOUT)
+    raise_for_graph(finish, token=token, what="Facebook Reel finish")
+    return video_id
+
+
+def _upload_page_video(page_id: str, token: str, video_path: str, metadata: dict) -> str:
+    """Publish long-form 16:9 as an ordinary Page video."""
+    import requests
+
+    public = wants_public(metadata)
+    data = {"title": metadata.get("title", ""), "description": metadata.get("description", ""),
+            "access_token": token, "published": "true" if public else "false"}
+    if not public:
+        data["unpublished_content_type"] = "DRAFT"
+    with open(video_path, "rb") as fh:
+        resp = requests.post(f"{GRAPH_VIDEO}/{page_id}/videos", data=data,
+                             files={"source": fh}, timeout=_TRANSFER_TIMEOUT)
+    raise_for_graph(resp, token=token, what="Facebook upload")
+    return str((resp.json() or {}).get("id") or "")
+
+
+def upload_video(channel: Channel, video_path: str, metadata: dict,
+                 *, pending_video_id: str | None = None, on_pending=None) -> str:
+    """Publish a video to the Page and return its Facebook id.
+
+    Vertical shorts go up as Reels, long-form as a Page video; the campaign's privacy choice is
+    honoured either way and the CTA is posted as a comment (ADR-073). `pending_video_id`/`on_pending`
+    are the retry guard: a previous attempt's id is checked before anything is uploaded again."""
+    import requests
+
+    page_id, token = _load(channel)
+    reel = is_reel(metadata)
+
+    already = find_existing_upload(channel, video_id=pending_video_id,
+                                   title=metadata.get("title", "") if not reel else "")
+    if already:
+        logger.warning("Facebook: episode already uploaded as %s — adopting it instead of "
+                       "posting a duplicate", already)
+        return already
+
+    try:
+        video_id = (_upload_reel(page_id, token, video_path, metadata, on_pending) if reel
+                    else _upload_page_video(page_id, token, video_path, metadata))
     except requests.RequestException as exc:
         raise FacebookError(f"Facebook upload failed: {scrub(str(exc), token)}") from None
-    raise_for_graph(resp, token=token, what="Facebook upload")
-    video_id = resp.json().get("id", "")
-    logger.info("Uploaded Facebook video %s to page %s", video_id, page_id)
+    if not video_id:
+        raise FacebookError("Facebook accepted the upload but returned no video id")
+
+    logger.info("Published Facebook %s %s to page %s", "reel" if reel else "video", video_id, page_id)
+    cta = metadata.get("cta")
+    if cta:
+        _post_comment(page_id, token, video_id, cta)
     return video_id
