@@ -855,3 +855,77 @@ def test_an_expired_channel_keeps_the_episode_in_the_buffer(session, user, chann
     assert buf.status == BufferStatus.ready          # still there, ready for the next slot
     assert t.status != TaskStatus.FAILED             # not a failure of this episode
     assert t.retry_count == 0                        # and it did not burn a retry
+
+
+# ── ADR-074: the refusal an operator reported as "the screen flashed, nothing happened" ──────
+def test_pasting_the_page_id_into_the_token_box_is_named_exactly(real_check):
+    """The real report. Graph answers this with "Cannot parse access token", which is true and
+    useless — it never says WHICH of the two boxes is wrong. Caught locally, before any call."""
+    from services import verification
+
+    check = verification.check_facebook_page("1175508495653784", "1175508495653784")
+    assert check.ok is False
+    assert "pasted the Page ID into the token box" in check.detail
+    assert "EAA" in check.detail
+
+
+def test_a_bare_number_is_never_mistaken_for_a_token(real_check, monkeypatch):
+    import requests
+
+    from services import verification
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: pytest.fail("no call needed to know this"))
+    check = verification.check_facebook_page("MyPage", "9876543210")
+    assert check.ok is False and "not an access token" in check.detail
+
+
+def test_a_real_looking_token_still_goes_to_facebook(real_check, monkeypatch):
+    """The local guard must only catch the obvious mistake, never shortcut a genuine token."""
+    import requests
+
+    from services import verification
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResp(200, _page()))
+    assert verification.check_facebook_page("1234567890", "EAAabc123").ok is True
+
+
+def test_a_refusal_returns_the_operator_to_the_form_with_their_values(client, session, monkeypatch):
+    """The disclosure sits at the bottom of a long page. Reloading to the top with the form collapsed
+    and emptied is why a refusal read as "nothing happened"."""
+    from services import verification
+
+    monkeypatch.setattr(verification, "check_facebook_page",
+                        lambda page_id, token: verification.PageCheck(False, "Cannot parse token"))
+    r = client.post("/channels/facebook", data={
+        "page_id": "1175508495653784", "page_access_token": "1175508495653784",
+        "channel_name": "Trang Bếp", "avatar_url": ""}, follow_redirects=False)
+    loc = r.headers["location"]
+    assert loc.endswith("#fb-form")                      # scrolls back to the form that failed
+    assert "fb_page_id=1175508495653784" in loc
+    assert "fb_name=Trang" in loc                        # their label survives too
+    assert "1175508495653784&fb" not in loc.split("fb_page_id=")[0]   # sanity: no stray duplication
+
+
+def test_the_token_is_never_echoed_into_the_url(client, monkeypatch):
+    """Everything else comes back; a credential must not travel in a query string."""
+    from services import verification
+
+    monkeypatch.setattr(verification, "check_facebook_page",
+                        lambda page_id, token: verification.PageCheck(False, "nope"))
+    r = client.post("/channels/facebook", data={
+        "page_id": "1", "page_access_token": "EAAsupersecret"}, follow_redirects=False)
+    assert "EAAsupersecret" not in r.headers["location"]
+
+
+def test_the_form_reopens_prefilled_and_shows_the_error_next_to_it(client):
+    page = client.get("/channels?flash=fb_rejected&flash_reason=Cannot+parse+access+token"
+                      "&fb_page_id=1175508495653784&fb_name=Trang+B%E1%BA%BFp").text
+    form = page.split('id="fb-form"', 1)[1]
+    assert form.lstrip().startswith("open")              # the disclosure is open again
+    assert 'value="1175508495653784"' in form            # the Page id is still there
+    assert 'value="Trang Bếp"' in form                   # and the label
+    # The error is repeated AT the form, not only in a banner two screens above it.
+    assert "Not connected" in form and "Cannot parse access token" in form
+    # The token field is empty — it is never round-tripped.
+    token_field = form.split('name="page_access_token"', 1)[1].split(">", 1)[0]
+    assert "value=" not in token_field

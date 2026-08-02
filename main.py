@@ -748,7 +748,8 @@ _CHANNEL_STATUS_FILTERS = ("active", "expired")
 
 @app.get("/channels", response_class=HTMLResponse)
 def channels_page(request: Request, user: CurrentUser, db: DbDep, status: str = "", q: str = "",
-                  flash: str = "", flash_reason: str = ""):
+                  flash: str = "", flash_reason: str = "", fb_page_id: str = "",
+                  fb_name: str = "", fb_avatar: str = ""):
     status_counts = {s.value: n for s, n in db.execute(
         select(Channel.status, func.count())
         .where(Channel.user_id == user.id).group_by(Channel.status)).all()}
@@ -788,7 +789,11 @@ def channels_page(request: Request, user: CurrentUser, db: DbDep, status: str = 
                                      "fb_token_unverified", "fb_token_bad") else "",
          # Facebook's own words for why it refused. Truncated and escaped by Jinja on the way out;
          # never contains the token (see services/verification.check_facebook_page).
-         "flash_reason": flash_reason[:200]},
+         "flash_reason": flash_reason[:200],
+         # What the operator typed, handed back so a refusal does not cost them the whole form
+         # (ADR-074). The token is absent on purpose — a credential does not belong in a URL.
+         "fb_form": {"page_id": fb_page_id[:200], "name": fb_name[:120],
+                     "avatar": fb_avatar[:500]}},
     )
 
 
@@ -810,18 +815,26 @@ def add_facebook_channel(
 
     page_id = verification.normalize_page_id(page_id)
     page_access_token = (page_access_token or "").strip()
+    def _back(reason: str) -> RedirectResponse:
+        """Back to the FORM, not just to the page (ADR-074). The disclosure sits at the bottom of a
+        long Channels page, so a bare `/channels?flash=…` reloaded to the top with the form collapsed
+        and emptied — which is why a refusal read as "the screen flashed and nothing happened". The
+        anchor scrolls to it, the template re-opens it, and the fields below refill it. The TOKEN is
+        deliberately never echoed: it is a credential and this is a URL."""
+        keep = {"flash": "fb_rejected", "flash_reason": reason[:200], "fb_page_id": page_id,
+                "fb_name": (channel_name or "").strip(), "fb_avatar": (avatar_url or "").strip()}
+        qs = "&".join(f"{k}={quote(v)}" for k, v in keep.items() if v)
+        return RedirectResponse(f"/channels?{qs}#fb-form", status_code=303)
+
     if not page_id or not page_access_token:
-        return RedirectResponse(
-            "/channels?flash=fb_rejected&flash_reason="
-            + quote("A Page ID and a Page Access Token are both required."), status_code=303)
+        return _back("A Page ID and a Page Access Token are both required.")
     verdict = None
     try:
         verdict = verification.check_facebook_page(page_id, page_access_token)
     except Exception:  # noqa: BLE001 — verification is a guard, never a gate on our own bugs
         logger.warning("Facebook page verification raised", exc_info=True)
     if verdict is not None and verdict.ok is False:
-        return RedirectResponse(
-            "/channels?flash=fb_rejected&flash_reason=" + quote(verdict.detail[:200]), status_code=303)
+        return _back(verdict.detail)
     verified = verdict is not None and verdict.ok is True
     if verified:
         # Store the CANONICAL numeric id Graph resolved, not the username or URL that was typed: a

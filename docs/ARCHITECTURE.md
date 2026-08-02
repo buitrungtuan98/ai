@@ -1612,3 +1612,25 @@ not recoverable. Reels is the largest in value: the README and the campaign form
 threw that distribution away. The duplicate-post guard exists because the failure it prevents is
 invisible from our side — we see a timeout, the Page sees a video — and the only cheap moment to make
 it safe is the one the Reels API already hands us: an id that exists before the risky part.
+
+### ADR-074 — A refused Facebook connect must land on the form, not two screens above it
+**Decision:** three changes, from a real operator report of "the screen flashed and nothing happened".
+1. **Name the actual mistake.** Pasting the Page ID into the token box is caught locally, before any
+   Graph call, and says so in those words. Graph's own answer — "Cannot parse access token" — is
+   accurate and useless: it never says *which* of the two boxes is wrong. A bare all-digit value is
+   rejected the same way.
+2. **Come back to the form.** The redirect now anchors `#fb-form`, the template re-opens the
+   disclosure, and the Page id / name / avatar are handed back so nothing has to be retyped. The
+   **token is never echoed** — it is a credential and that redirect is a URL.
+3. **Repeat the error at the form**, not only in the page-top banner.
+
+**Why:** the code was already behaving correctly — it verified, Facebook refused, the save was
+blocked, and a red banner explained it. The operator still experienced nothing at all, and the reason
+is geometry: the "Add a Facebook Page" disclosure is the LAST element of a page that is several
+screens long once a few channels have cards, charts and cast lists. You open it at the bottom, type,
+submit — and the reply renders at the very top, while the form you were looking at collapses and
+empties. The evidence for what happened is real, correct, and off-screen; what is on-screen is the
+same channel list as before, minus your typing. A correct system that cannot be perceived as correct
+has not finished the job. Anchoring the redirect is what makes the message and the mistake occupy the
+same screen. The local pre-check earns its place separately: it is the failure this form sees most,
+it costs nothing to detect, and it converts a provider's vocabulary into the operator's.

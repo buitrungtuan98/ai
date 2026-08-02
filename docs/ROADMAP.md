@@ -1487,6 +1487,19 @@ since had landed on the YouTube side only (ADR-073):
   rendered episode in the buffer rather than failing it and burning a retry.
 - Verified: 540 tests (57 new across R10+R11), ruff clean, docs guard green.
 
+## R12 — "The screen flashed and nothing happened" `DONE`
+An operator reported that adding a Facebook Page did nothing. The code was right — it verified, the
+token was refused, the save was blocked, a red banner said so. The experience was still nothing
+(ADR-074). Their submission showed the cause: the Page ID had been pasted into BOTH boxes.
+- **The mistake is named now**, locally, before any Graph call: "You pasted the Page ID into the token
+  box." Facebook's own answer, "Cannot parse access token", is accurate and never says which box.
+- **A refusal returns to the form**: the redirect anchors `#fb-form`, the disclosure re-opens, and the
+  Page id / name / avatar come back so nothing is retyped. The token is never echoed into the URL.
+- **The error is repeated at the form.** The Add-a-Page panel is the last element of a page several
+  screens long; a banner at the top is invisible to whoever just submitted from the bottom.
+- Verified: 546 tests (6 new), ruff clean, docs guard green; the operator's exact submission replayed
+  in a desktop browser — the page lands on the form, open, prefilled, error above the fields.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download
