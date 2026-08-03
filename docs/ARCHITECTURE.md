@@ -1756,3 +1756,55 @@ one that works; the `data-*` attributes stay as cheap insurance, labelled as suc
 **Rejected: make auto-rejects trip the circuit breaker.** It would pause the whole campaign over a QC
 opinion, which is a much heavier action than the evidence supports. Escalating one episode is
 proportionate; the operator can still stop the campaign themselves.
+
+### ADR-077 — Identify a Page with Graph's introspection, not by asking for a field that errors
+
+**Context.** An operator reported: *"add facebook thấy chớp cái rồi không vô"*, with the banner
+
+> ⚠ Not connected. (#100) Tried accessing nonexisting field (category)
+
+The verdict was correct — that really was a User token, the exact mistake ADR-072 was built to catch
+— but the explanation was about a field the operator never typed, and the carefully-worded message
+written for precisely this case never appeared.
+
+ADR-072 reasoned: with a Page token `/me` IS the Page, and only a Page carries `category`, so that one
+field separates a Page from a person. The reasoning is right about Graph's **data model** and wrong
+about its **API**. Graph does not answer a User node with `category: null` — it refuses the entire
+request:
+
+    (#100) Tried accessing nonexisting field (category) on node type (User)
+
+So `check_facebook_page` never reached its own `if not data.get("category")` branch for a User token;
+it fell through to the generic "quote Graph's message" path and printed Graph's complaint about *our*
+request. The branch was unreachable code that looked, in review and in tests, like the feature working.
+
+**The test made it invisible.** `test_a_user_token_is_refused_however_readable_the_page_is` faked Graph
+returning `200` with no `category` — my assumption, not Graph's behaviour. It passed for months over a
+dead branch. A fake is a claim about the world, and this one was never checked against it.
+
+**Decision.**
+
+1. **Ask only for fields every node type has** (`id,name,picture`) and add **`metadata=1`**, Graph's
+   documented introspection, which returns `metadata.type` — `page` / `user` / `application` — as
+   *data*. The request can no longer be the thing that fails, so identification is never an error.
+2. **Translate a `#100 nonexisting field` error into what it means**, wherever it still arrives, and
+   lift the node type out of Graph's own text (`on node type (User)`) to say what was pasted. That
+   complaint is never news the operator can act on: it is about our request, not their token.
+3. **Keep a direct probe as the fallback.** If `metadata` is ever absent, ask the Page-only question
+   on its own, where a `#100` *is* the answer rather than an accident. If that is inconclusive the
+   result is `None` — "saved without checking" — never `True`. Trusting an unidentified token is the
+   failure this whole function exists to prevent.
+4. **`Why:` replaces `Facebook said:` in the banner.** The reason is sometimes Graph's sentence and
+   sometimes our translation of it; attributing our words to Facebook is a small lie, and this surface
+   is the one that must not tell them. The generic "check the Page ID and that it's a permanent token"
+   advice that used to trail the reason is gone — once the reason names the exact mistake, restating
+   the general case reads as though we are not sure.
+5. **A refusal opens the guide it points at.** The message says to switch a dropdown in the Graph API
+   Explorer; those steps sat in a collapsed `<details>`. Following our own advice should not need one
+   more hunt at the moment the operator is already stuck.
+
+**Why this keeps happening in this file.** Three times now the Facebook surface has been wrong in the
+same way: confident about what a remote API returns, with a test that encoded the confidence instead
+of checking it. The structural answer is not more care — it is that a check gating a save must be
+built from responses that cannot fail (`metadata`, universal fields), so there is no error path left
+to mistranslate.

@@ -31,14 +31,18 @@
   channel keeps its current status. Use <b>Check token</b> once you’re back online.{% endcall %}
 {% elif flash == 'fb_token_bad' %}
 {% call ui.banner('failed') %}⚠ <b>That token was refused — the old one is still in place.</b>
-  {% if flash_reason %}Facebook said: “{{ flash_reason }}”{% endif %}{% endcall %}
+  {% if flash_reason %}<b>Why:</b> {{ flash_reason }}{% endif %}{% endcall %}
 {% elif flash == 'fb_rejected' %}
-{# The save was refused, so nothing was stored — say that plainly and quote Facebook's own reason. #}
+{# The save was refused, so nothing was stored — say that plainly, then the reason.
+   “Why:” and not “Facebook said:” (ADR-077). The reason is sometimes Graph's own sentence and
+   sometimes OUR translation of it — attributing our words to Facebook is a small lie, and the whole
+   point of this check is to say only what is true. The generic "check the Page ID and that it's a
+   permanent token" advice that used to follow is gone: when the reason already names the exact
+   mistake, restating the general case reads as though we are not sure. #}
 {% call ui.banner('failed') %}⚠ <b>Facebook refused those details, so the Page was not connected.</b>
-  {% if flash_reason %}Facebook said: “{{ flash_reason }}”{% endif %}
-  Check the <b>Page ID</b> and that the token is a <b>permanent Page Access Token</b> for that same
-  Page (a short-lived User token expires within hours). Then
-  <a href="#fb-form">try again</a>.{% endcall %}
+  {% if flash_reason %}<b>Why:</b> {{ flash_reason }}{% else %}Check the <b>Page ID</b> and that the
+  token is a <b>permanent Page Access Token</b> for that same Page.{% endif %}
+  <a href="#fb-form">Try again below</a>.{% endcall %}
 {% elif flash == 'no_google_client' %}
 {# The operator did nothing wrong — the box itself has no Google OAuth client configured yet. Google
    would have answered this click with a bare "Error 400: invalid_request" (ADR-068). #}
@@ -152,7 +156,9 @@
           {% endcall %}
           <button class="btn sm" type="submit">Save &amp; check token</button>
         </form>
-        {% include "_fb_token_help.html" %}
+        {% with help_open = flash == 'fb_token_bad' or c.status.value != 'active' %}
+          {% include "_fb_token_help.html" %}
+        {% endwith %}
       </div>
     </details>
     {% endif %}
@@ -328,7 +334,9 @@
         <input name="avatar_url" value="{{ fb.get('avatar', '') }}" placeholder="https://…">{% endcall %}
       <button class="btn" type="submit">Connect Page</button>
     </form>
-    {% include "_fb_token_help.html" %}
+    {% with help_open = flash == 'fb_rejected' %}
+      {% include "_fb_token_help.html" %}
+    {% endwith %}
   </div>
 </details>
 {% endblock %}

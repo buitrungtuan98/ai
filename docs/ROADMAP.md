@@ -1565,6 +1565,30 @@ field's "too short" branch went with them: `minlength` already says it, in the b
 - Verified: 564 tests (18 new), ruff clean, docs guard green; the reject loop, the cadence lockout and
   the stats data-loss each reproduced first, then pinned; new UI states checked in Chromium at 390px.
 
+## R15 — the refusal must name the mistake, not our own request `DONE`
+
+Reported: *"add facebook thấy chớp cái rồi không vô"* — banner
+`⚠ Not connected. (#100) Tried accessing nonexisting field (category)`.
+
+- **The verdict was right and the explanation was ours.** That was a User token — the mistake ADR-072
+  exists to catch — but `check_facebook_page` asked `/me?fields=…,category,…` because only a Page has
+  `category`. True of Graph's data model, false of its API: Graph refuses the WHOLE request for a node
+  without that field, so the "that is a personal User token" branch was **unreachable** and the
+  operator read a complaint about a field they never typed.
+- **The test hid it.** It faked `200` with no `category` — my assumption rather than Graph's behaviour
+  — and passed for months over dead code. Rewritten to the real response shape.
+- **Identification now uses `metadata=1`**, Graph's own introspection, with only universally-valid
+  fields — the request cannot be the thing that fails. A `#100` that still arrives is translated into
+  what it means, reading the node type out of Graph's text (`on node type (User)`). A direct probe is
+  the fallback, and an unidentifiable token is "saved without checking", never "verified".
+- **`Why:` replaces `Facebook said:`** — the reason is sometimes Graph's words and sometimes ours, and
+  attributing ours to Facebook is a small lie on the one surface that must not tell them.
+- **A refusal opens the token guide it points at**, instead of telling the operator to follow steps
+  that are still collapsed.
+- Verified: 572 tests (8 new), ruff clean, docs guard green; the operator's exact submission replayed
+  in Chromium at 390px against a Graph stub returning their verbatim error — the banner now names the
+  mistake, leaks none of Graph's complaint about our request, keeps the Page ID, and opens the guide.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download
