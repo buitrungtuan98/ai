@@ -915,6 +915,37 @@ def _create_successor(db, parent, *, auto_start: bool = False, review_first: boo
     return new.id
 
 
+def autopilot_council_channel(db, user, channel) -> dict:
+    """The daily judged pass (ADR-081) — Gemini reads the evidence pack and files proposals through
+    the rails. Guarded like the strategist: a Gemini key, the 80% budget reserve (rendering is never
+    starved for strategy), and once per UTC day per channel — the pack-hash cache inside makes even
+    that call free when nothing changed. Returns the council summary dict (zeros when skipped)."""
+    from core import council
+    from core.usage import ai_calls_today
+
+    zeros = {"filed": 0, "refused": 0, "held": 0, "skipped_unchanged": False}
+    gemini_key = None
+    if user is not None:
+        gemini_key = user.gemini_api_key or settings.GEMINI_API_KEY
+    if not gemini_key:
+        return zeros
+    state = (channel.autopilot_json or {}).get("council") or {}
+    if str(state.get("at", ""))[:10] == datetime.utcnow().strftime("%Y-%m-%d"):
+        return zeros    # already judged today
+    budget = int((user.settings_json or {}).get("ai_daily_budget") or 0) if user else 0
+    if budget and ai_calls_today() >= budget * 0.8:
+        return zeros    # strategy never outbids rendering for the daily AI budget
+    model = (user.gemini_model if user else None) or settings.GEMINI_MODEL
+    result = council.run_council(db, channel, api_key=gemini_key, model=model)
+    if result["filed"] or result["refused"]:
+        _log_action(db, channel, "council",
+                    f"Council reviewed the channel: filed {result['filed']} proposal(s), "
+                    f"rails refused {result['refused']}.",
+                    evidence={"summary": (channel.autopilot_json or {})
+                              .get("council", {}).get("summary", "")})
+    return result
+
+
 def apply_autopilot_action(db, action, *, auto_start_successor: bool = False,
                            review_first_successor: bool = False) -> bool:
     """Apply a proposed action — reversible config changes only, never a delete. Marks the row
@@ -947,6 +978,22 @@ def apply_autopilot_action(db, action, *, auto_start_successor: bool = False,
             new_id = _create_successor(db, campaign, auto_start=auto_start_successor,
                                        review_first=review_first_successor)
             action.params = {**(action.params or {}), "created_campaign_id": new_id}
+        elif action.kind == "slot_change":
+            # Golden-hour move (ADR-081): swap ONE posting slot, reversibly — the config keeps its
+            # other slots and everything else. The council's rails already enforced HH:MM shape,
+            # membership and the weekly cooldown; re-check membership here because the operator may
+            # have edited slots between proposal and approval.
+            if campaign is None:
+                raise ValueError("campaign gone")
+            cfg = dict(campaign.config_json or {})
+            slots = list(cfg.get("posting_slots") or [])
+            frm, to = (action.params or {}).get("from"), (action.params or {}).get("to")
+            if frm not in slots:
+                raise ValueError(f"slot {frm!r} no longer exists on the campaign")
+            slots[slots.index(frm)] = to
+            cfg["posting_slots"] = slots
+            campaign.config_json = cfg
+            db.commit()
         else:
             raise ValueError(f"unknown action kind {action.kind!r}")
         action.status = "applied"
@@ -983,9 +1030,11 @@ def autopilot_autoapply_channel(db, channel) -> dict:
             if apply_autopilot_action(db, a, auto_start_successor=True, review_first_successor=True):
                 successors += 1
                 applied["successor"] += 1
-        elif a.kind in ("extend", "wind_down"):
+        elif a.kind in ("extend", "wind_down", "slot_change"):
+            # slot_change is bounded upstream: the council's rails enforce one applied change per
+            # campaign per week, so full-auto cannot thrash the schedule.
             if apply_autopilot_action(db, a):
-                applied[a.kind] += 1
+                applied[a.kind] = applied.get(a.kind, 0) + 1
     return applied
 
 
@@ -1147,6 +1196,9 @@ def autopilot_pass(db=None, now: datetime | None = None, respect_cadence: bool =
                                 lambda: autopilot_propose_channel(db, ch, now=now), 0, failures)
             proposed += _ap_step(db, ch, "strategist", lambda: autopilot_strategist_channel(
                 db, db.get(User, ch.user_id), ch), 0, failures)
+            council_r = _ap_step(db, ch, "council", lambda: autopilot_council_channel(
+                db, db.get(User, ch.user_id), ch), {"filed": 0}, failures)
+            proposed += council_r.get("filed", 0)
             autoapplied = _ap_step(db, ch, "autoapply", lambda: autopilot_autoapply_channel(db, ch),
                                    {}, failures) if mode == "autopilot" else {}
             if failures:
