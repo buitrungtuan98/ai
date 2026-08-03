@@ -1861,3 +1861,107 @@ legacy "on" maps to.
 flash instead of a permanent billboard. That is the point of the change, and the old behaviour is
 deliberately not preserved as an option — a mode whose observed effect is "cover half the video with
 text for its whole length" has no defensible use.
+
+### ADR-079 — Anti-slop and anti-flop: kill bad content where it is cheapest
+
+**Context.** The factory's only quality judge was vision QC on the FINISHED video — a bad script
+cost 30-60 minutes of CPU before anything noticed. And its only performance feedback was retention,
+which arrives ~2 days late — by then two more episodes had shipped into the same hole. Two loops,
+both closing too late.
+
+**Decision — four gates, ordered by cost:**
+
+1. **Deterministic script gate (0 AI, pre-render).** Word-3-gram similarity vs the campaign's
+   recent episodes catches "the model wrote the same episode again" (synopsis memory steers the
+   premise, never the sentences); a duplicate title blocks outright (a spam signal to both
+   platforms); cliché filler (VN+EN defaults + operator additions from Settings) and a rambling
+   first sentence warn into review. Every finished episode leaves a narration+title fingerprint in
+   `render_json` for future gates.
+2. **AI script judge (1 call, pre-render, C2).** Scores hook/specificity on the SAME /10 scale and
+   reject threshold as the vision QC — one vocabulary of quality. Fail-open: an outage is "no
+   verdict", never a stalled factory; skipped above the 80% AI-budget reserve.
+3. **One regenerate, total.** Gate and judge share a single regenerate budget; the retry carries
+   the specific issues as avoid-notes. A second failure fails the task honestly, classified
+   NON-transient (an autopilot retry would spend AI calls failing identically), with no checkpoint
+   — Retry writes a fresh script.
+4. **Early-flop detection (post-publish).** `views_24h` is stamped once at 24h; a flop = <30% of
+   the campaign's OWN median, judged only past 5 measured episodes — silence beats a guess. The
+   autopsy (views vs typical, variant, local publish hour, premise) writes itself into the same
+   avoid-notes the next script reads; when the retention curve later blames scene 1, the note gains
+   its cause ("the hook failed"). Three straight flops propose a wind-down (the flop breaker) days
+   before retention could say the same — proposing, never auto-stopping.
+
+**Why the gate is not an AI call first.** The n-gram check is exact, free, and catches the dominant
+failure (self-repetition) better than a judge reading one script in isolation ever could — the
+judge never sees the other episodes; the gate is built from them.
+
+### ADR-080 — Measure the money: watch time, thresholds, and the series playlist
+
+**Context.** Monetization thresholds are written in watch TIME (YPP: 4,000 hours/365d; Facebook
+in-stream: 600,000 minutes/60d) and the factory collected minutes nowhere — it could not see how
+far a channel was from being paid, let alone steer toward it.
+
+**Decision.** `estimatedMinutesWatched` rides the existing per-video Analytics query; Facebook's
+batched insight call adds `total_video_view_total_time`; each daily snapshot stamps the two YPP
+trailing windows (365d minutes, 90d views) — two tiny channel-level queries. `core/monetize.py`
+turns them into a per-channel scoreboard with honesty rules baked in: the 90d views bar is labeled
+an approximation (the free API does not split Shorts out), Facebook minutes are a labeled lower
+bound (only OUR episodes are summed), and no data means no bar — a progress bar over a guess is
+worse than none. The daily pass announces 80%/100% of each bar exactly once per level
+(`autopilot_json.milestones`); only 100% pings the phone. Every YouTube upload also lands in a
+per-campaign series playlist (created once, id cached on the campaign, one recreate if the operator
+deleted it, fail-open end to end) — binge navigation, session-time signal, and every extra minute
+counts toward the threshold.
+
+### ADR-081 — The strategy council: Gemini decides, rails keep it honest
+
+**Context.** The operator asked for an autopilot that "uses Gemini to crosscheck and decide,
+everything data-driven with reason and decision" — and that feels like a manager who understands,
+not a rule table. The danger in that ask is well known: an LLM given authority invents statistics
+and actions. The design answer is a boundary, not trust.
+
+**Decision — map-reduce with rails:**
+
+    code computes every number → the model interprets and chooses → code validates the choice
+
+`evidence_pack` (0 AI) computes everything the council may reason from — classification, flop
+counts, the publish-hour → first-day-views table, A/B retention, QC scores, monetization progress,
+and the council's own recent decisions (its memory, so it stays consistent instead of re-litigating
+daily). ONE structured call per channel per day (temperature 0.3) returns decisions from a CLOSED
+menu — extend / wind_down / successor / tune / slot_change / compile / hold — each with a reason in
+the channel's language, cited evidence, and confidence. The rails then refuse anything out of
+bounds: unknown action, dead campaign, params past their caps (extend ≤ +50%, one applied
+slot-change per week, compile needs ≥10 measured episodes), and **any number ≥ 10 in the model's
+prose that does not literally exist in the pack** — the anti-hallucination line. Valid decisions
+file as ordinary AutopilotAction proposals: copilot = inbox, full-auto = the existing auto-apply.
+Cached on the evidence hash (own filings excluded, or every verdict would invalidate its own
+cache); guarded by key, the 80% budget reserve, and one-per-day; step-isolated per ADR-076.
+
+The council's verdict doubles as the **manager report**: what I saw, what I filed, what I'm
+watching — logged daily, sent to the phone only when something was filed. No extra AI call; the
+verdict IS the report.
+
+**What this deliberately is not.** Review, retry and catch-up stay 100% deterministic — Gemini
+down means strategy pauses, never safety. And "feels like it understands" is engineered honestly:
+real numbers, real memory, consistent decisions — while correctness is guaranteed by the rails and
+the data, never by the model's understanding.
+
+### ADR-082 — Best-of compilations: the long-form money format from work already done
+
+**Context.** Shorts RPM is cents; long-form RPM is 10-30× and mid-rolls need 8+ minutes. The
+factory only made Shorts — and deleted every master at publish, destroying the raw material.
+
+**Decision.** Published masters are retained into a per-campaign library (moved at publish, capped
+at the 24 newest, fail-open to plain deletion so retention can never block a publish). A
+compilation is a stream-copy concat of the top-retention masters — near-zero CPU, zero AI — with a
+deterministic title/description in the campaign's language whose chapter lines YouTube turns into
+chapters, and a poster thumbnail. It runs as a queued job under the render lock (one ffmpeg at a
+time is the law of this box) and **always parks for review, in every mode** — approving the
+council's compile proposal only creates and queues the build. Compilations are Tasks with sentinel
+episode numbers (9001+): `unique(campaign, episode)` holds, hydration ignores them, and publishing
+one never advances the campaign. Retries route by `video_kind` — re-running `render_task` on a
+compilation would try to write a script for it. Facebook publishes it as a normal Page video (the
+format-aware path from ADR-073), never a Reel.
+
+**Honest bound.** Only masters published after this shipped exist in the library; old episodes are
+gone. The first compilation becomes possible ~10-12 publishes after deployment.

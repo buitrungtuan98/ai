@@ -348,6 +348,35 @@ def _strip_code_fence(text: str) -> str:
     return s.strip()
 
 
+# ── Script judge (ADR-079, C2) — one cheap call that saves a render ──────────
+class ScriptVerdict(BaseModel):
+    """The judge's verdict on a script BEFORE it costs a render: `score` shares the channel's QC
+    scale (/10) so one pair of thresholds governs both judges; `issues` are written as avoid-notes
+    the regenerator can act on."""
+
+    score: int = Field(ge=1, le=10)
+    issues: list[str] = Field(default_factory=list, max_length=5)
+
+
+_JUDGE_SYSTEM = (
+    "You judge short-video scripts before they are rendered. Score 1-10 for: a hook that lands in "
+    "the first sentence (concrete, surprising, specific), specificity over generic filler, and "
+    "whether a viewer would finish it. Judge the writing that is there — never invent facts or "
+    "check factual accuracy. Issues must be short, actionable instructions for a rewrite."
+)
+
+
+def judge_script(narration: str, title: str, *, api_key: str, language: str = "en",
+                 model: str = DEFAULT_MODEL) -> ScriptVerdict:
+    """One structured judging call over the narration text. Raises on AI failure — the caller
+    treats that as 'no verdict' (fail-open): the deterministic gate has already run, and a judge
+    outage must not stop the factory."""
+    return generate_structured(
+        prompt=(f"Language: {language}\nTitle: {title}\n\nSCRIPT (narration):\n{narration[:6000]}"),
+        schema=ScriptVerdict, api_key=api_key, system_prompt=_JUDGE_SYSTEM,
+        model=model, temperature=0.2, max_output_tokens=1024)
+
+
 # ── AI campaign designer (propose a whole campaign from a title, or from scratch) ─
 class ChannelTune(BaseModel):
     """A small, bounded creative tweak the weekly autopilot strategist may suggest for a campaign —

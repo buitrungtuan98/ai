@@ -372,6 +372,29 @@ def apply_approve(db, item) -> None:
     enqueue_publish(item.id)
 
 
+def _judge_script_safe(user, channel, cfg, fp: dict, api_key: str, model: str):
+    """Run the AI script judge (ADR-079, C2) when it is allowed to run: campaign toggle on
+    (default), and the daily AI budget below its 80% reserve — a strategy call never outbids
+    rendering. Returns a ScriptVerdict or None ('no verdict'); NEVER raises — the deterministic
+    gate has already run, and a judge outage must not stop the factory."""
+    if cfg.get("script_judge", "on") == "off":
+        return None
+    try:
+        from core.usage import ai_calls_today
+
+        budget = int((user.settings_json or {}).get("ai_daily_budget") or 0)
+        if budget and ai_calls_today() >= budget * 0.8:
+            logger.info("Script judge skipped — AI budget reserve reached")
+            return None
+        from core.ai_engine import judge_script
+
+        return judge_script(fp["narration"], fp["title"], api_key=api_key,
+                            language=cfg.get("language", "en"), model=model)
+    except Exception:  # noqa: BLE001 — no verdict beats no factory
+        logger.warning("Script judge unavailable — proceeding without a verdict", exc_info=True)
+        return None
+
+
 def _recent_fingerprints(db, campaign, before_episode: int) -> list[dict]:
     """The narration/title fingerprints of this campaign's most recent episodes (ADR-079) — what a
     new script is judged against. Reads the persisted fingerprint of finished episodes AND the saved
@@ -483,6 +506,12 @@ def _publish_buffer(db, task: Task, buf: BufferPoolItem, campaign: Campaign,
 
     task.published_video_id = video_id
     task.published_url = published_url_for(channel.platform, video_id, fmt)
+    if channel.platform == Platform.youtube:
+        # Series playlist (ADR-080): binge navigation + session-time signal + watch-hours toward
+        # the money threshold. Fail-open inside — the publish above already succeeded.
+        from services.youtube_service import add_to_series_playlist
+
+        add_to_series_playlist(channel, campaign, db, video_id)
     # Close the A/B loop: record WHICH metadata variant went live, so the Performance page can
     # compare real retention per variant instead of rotating variants blindly forever.
     task.ab_variant = (buf.metadata_json or {}).get("variant")
@@ -813,7 +842,20 @@ def render_task(task_id: int) -> None:
                 gate = slop_gate.check_script(fp["narration"], fp["title"], recent=recent,
                                               cliches=cliches, content_style=content_style)
                 if not gate.blocked:
-                    break
+                    # C2 (ADR-079): the AI judge shares the ONE regenerate budget with the
+                    # deterministic gate and the channel's reject threshold with the vision QC —
+                    # one scale, one discipline. Fail-open: a judge outage is "no verdict", never
+                    # a stalled factory (the deterministic gate has already run).
+                    verdict = _judge_script_safe(user, channel, cfg, fp, gemini_key, gemini_model)
+                    if verdict is None:
+                        break
+                    from core import autopilot as _ap
+
+                    _approve_min, reject_max = _ap.review_thresholds(channel)
+                    if verdict.score > reject_max:
+                        break
+                    gate = slop_gate.GateReport(
+                        "block", [f"script judge scored it {verdict.score}/10"] + verdict.issues)
                 logger.info("Task %s: script blocked by the quality gate (%s) — regenerating once",
                             task.id, "; ".join(gate.issues))
                 avoid_notes = avoid_notes + [f"your previous draft was rejected: {i}"

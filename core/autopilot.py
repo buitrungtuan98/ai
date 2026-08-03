@@ -153,6 +153,7 @@ def review_decision(qc: dict | None, approve_min: int, reject_max: int) -> tuple
 EXTEND_AT_PCT = 0.8        # a campaign this far through its run is "near its cap"
 EXTEND_BY = 0.25           # extend a winner by +25% episodes
 WIND_DOWN_CONSECUTIVE = 5  # this many straight measured episodes below the bar → wind down
+FLOP_BREAKER_CONSECUTIVE = 3  # straight first-day flops → propose the pause days before retention can
 
 
 def _trailing_low(tasks, threshold: float) -> int:
@@ -204,6 +205,30 @@ def propose_actions(campaign, tasks, verdict: dict) -> list[dict]:
                         "summary": f"Wind down “{campaign.topic_name}” — {low} straight episodes well "
                                    f"below the channel average. Stops new episodes; nothing is deleted.",
                         "evidence": {"consecutive_low": low, "retention": ret, "baseline": baseline},
+                        "params": {"total_episodes": campaign.current_episode}})
+    # The flop breaker (ADR-079): first-day views fail days before retention can. Three straight
+    # measured flops is the campaign telling us its current angle is dead — propose stopping NEW
+    # episodes now, not after retention confirms it in a week. Same reversible action as the
+    # retention path (kind idempotency keeps it to one live wind_down proposal per campaign);
+    # deciding to stop stays the operator's (or full-auto's) explicit call — never automatic here.
+    if not any(p["kind"] == "wind_down" for p in out):
+        from core import flop as _flop
+
+        streak = 0
+        for t in sorted(tasks, key=lambda x: x.episode_number, reverse=True):
+            verdict = (t.stats_json or {}).get("flop")
+            if verdict is None:
+                continue
+            if verdict:
+                streak += 1
+            else:
+                break
+        if streak >= FLOP_BREAKER_CONSECUTIVE and _flop.campaign_median_24h(tasks) is not None:
+            out.append({"kind": "wind_down",
+                        "summary": f"Pause “{campaign.topic_name}” — its last {streak} measured "
+                                   "episodes all flopped on first-day views. Stop new episodes and "
+                                   "pivot the angle; nothing is deleted, extend re-opens it.",
+                        "evidence": {"consecutive_flops": streak},
                         "params": {"total_episodes": campaign.current_episode}})
     return out
 

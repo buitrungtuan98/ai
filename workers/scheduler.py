@@ -937,12 +937,20 @@ def autopilot_council_channel(db, user, channel) -> dict:
         return zeros    # strategy never outbids rendering for the daily AI budget
     model = (user.gemini_model if user else None) or settings.GEMINI_MODEL
     result = council.run_council(db, channel, api_key=gemini_key, model=model)
-    if result["filed"] or result["refused"]:
-        _log_action(db, channel, "council",
-                    f"Council reviewed the channel: filed {result['filed']} proposal(s), "
-                    f"rails refused {result['refused']}.",
-                    evidence={"summary": (channel.autopilot_json or {})
-                              .get("council", {}).get("summary", "")})
+    if not result["skipped_unchanged"]:
+        # The manager report (D4, ADR-081): the council's own verdict text, delivered like a human
+        # manager's daily note — what I saw, what I filed, what I'm watching. No extra AI call:
+        # the verdict IS the report. Logged always; Telegram only when something was filed.
+        state = (channel.autopilot_json or {}).get("council") or {}
+        watching = "; ".join(state.get("watching") or [])
+        report = (state.get("summary", "") +
+                  (f" — filed {result['filed']} proposal(s) for your review." if result["filed"]
+                   else " — no changes proposed today.") +
+                  (f" Watching: {watching}." if watching else ""))
+        _log_action(db, channel, "report", report[:300],
+                    evidence={"filed": result["filed"], "refused": result["refused"]})
+        if result["filed"] and user is not None:
+            video_worker._notify(user, f"🧠 {channel.channel_name} — {report[:400]}")
     return result
 
 

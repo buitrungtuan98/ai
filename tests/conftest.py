@@ -44,6 +44,19 @@ def no_live_credential_checks(monkeypatch):
     monkeypatch.setattr(
         verification, "check_facebook_page",
         lambda page_id, token: verification.PageCheck(None, "not checked in tests"))
+    # The AI script judge (ADR-079, C2) is likewise a live call on every fresh script. Its no-verdict
+    # state is the one that must never block a render, so that is what the suite gets; judge tests
+    # monkeypatch `_judge_script_safe` themselves, which wins over this.
+    from workers import video_worker
+
+    monkeypatch.setattr(video_worker, "_judge_script_safe",
+                        lambda user, channel, cfg, fp, api_key, model: None)
+    # Playlist maintenance is a live YouTube call after every publish — fail-open in production,
+    # silence here. Playlist tests monkeypatch it themselves.
+    from services import youtube_service
+
+    monkeypatch.setattr(youtube_service, "add_to_series_playlist",
+                        lambda channel, campaign, db, video_id: None)
 
 
 @pytest.fixture

@@ -1609,6 +1609,42 @@ copies, for all 54 seconds.
   with the operator's exact 13-word hook (41% of frame + doubled → 13% for 3s → clean), poster
   thumbnail produced by the real PIL path.
 
+## R17 — the money machine: autopilot with a brain, anti-flop, anti-slop `DONE`
+
+Approved in full ("Duyệt làm hết tất cả"): automate M1-M4 under the autopilot, add anti-flop and
+anti-AI-slop layers, and give the autopilot a Gemini decision layer — data-driven, with a reason on
+every decision — behind hard rails. Shipped as six commits, each test-green:
+
+- **C1 — script quality gate** (ADR-079): deterministic, pre-render, 0 AI — self-repetition
+  (3-gram), duplicate titles, cliché filler (operator-extendable in Settings), rambling hooks.
+  Block → one regenerate with the issues as avoid-notes → honest non-transient failure.
+- **B1+B2 — early-flop detection + autopsy** (ADR-079): `views_24h` stamped once at 24h, flop =
+  <30% of the campaign's own median (≥5 measured, silence below), autopsy note self-feeds the next
+  scripts; the retention curve later upgrades it when scene 1 is to blame.
+- **A1 — measure the money** (ADR-080): watched minutes collected on both platforms, YPP windows on
+  the daily snapshot, an honest per-channel scoreboard on Channels, milestones announced once per
+  level (phone only at 100%).
+- **D1-D3 — the strategy council** (ADR-081): code computes → Gemini interprets (1 call/channel/day,
+  closed action menu, reasons in the channel's language) → rails validate (bounds, live campaign,
+  and the anti-hallucination rule: numbers ≥10 must exist in the pack). Proposals ride the existing
+  inbox/auto-apply. Review/retry/catch-up stay 100% deterministic.
+- **A2 — best-of compilations** (ADR-082): masters retained at publish (capped library), stream-copy
+  concat of top-retention episodes with chapters, sentinel numbering, review-always, kind-aware
+  retries. The long-form format that actually pays, built from work already done.
+- **A3 — golden-hour slot changes**: the council proposes from the measured hour table; applied
+  reversibly (one slot swapped), one change per campaign per week, full-auto allowed within that.
+- **B3 — the flop breaker**: 3 straight first-day flops → a wind-down proposal days before
+  retention could say the same. Proposes; never auto-stops.
+- **C2 — AI script judge**: same /10 scale and reject threshold as vision QC, shares the single
+  regenerate budget with the gate, fail-open, skipped above the 80% AI-budget reserve.
+- **D4 — manager report**: the council's verdict delivered as a daily manager's note (log always,
+  phone only when something was filed) — no extra AI call.
+- **A4 — series playlists**: every YouTube upload joins its campaign's playlist (created once,
+  cached, fail-open) — session time + watch-hours toward the threshold.
+- Verified: 618 tests (32 new across the batch), ruff clean, docs guard green; every loop capped
+  (one regenerate, one slot change/week, one council run/day, milestone once per level); every
+  autopilot behaviour simulated in tests including AI-garbage verdicts and judge outages.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download
