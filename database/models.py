@@ -95,6 +95,11 @@ class Channel(Base):
         _enum(ChannelStatus), default=ChannelStatus.active
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    # Why analytics cannot be read for this channel, if it cannot (ADR-076). NULL = fine. A channel
+    # connected before `yt-analytics.readonly` existed answers 403 to every stats call: publishing
+    # keeps working, so nothing was wrong enough to notice, and the operator just saw retention that
+    # never arrived. This is what the Channels card reads to say "reconnect to enable analytics".
+    analytics_error: Mapped[str | None] = mapped_column(String(200))
     # Autopilot config (NOT secrets): {mode, interval_hours, review thresholds, brief, …}. NULL/off
     # = the operator drives everything by hand (default). See core/autopilot.py + ADR-044.
     autopilot_json: Mapped[dict | None] = mapped_column(JSON)
@@ -173,7 +178,16 @@ class Task(Base):
     # Transparency: timing + publish outcome (surfaced in the Task Logs panel).
     started_at: Mapped[datetime | None] = mapped_column(DateTime)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # How many times this episode has been re-rendered, from ANY source — this is the number the
+    # operator sees ("retry 3"), so every path increments it.
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    # The autopilot's OWN budgets, kept apart from `retry_count` (ADR-076). They used to share it,
+    # which meant an operator who pressed Retry twice by hand silently spent the autopilot's
+    # self-healing budget for that episode — the exact capability R7 added. Two budgets because they
+    # bound different costs: a failed render is retried to finish it, a QC-rejected render is redone
+    # to improve it, and only the second can loop forever.
+    auto_retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    auto_reject_count: Mapped[int] = mapped_column(Integer, default=0)
     published_video_id: Mapped[str | None] = mapped_column(String(128))
     published_url: Mapped[str | None] = mapped_column(String(512))
     # Which A/B metadata variant (A/B/C) actually went live — closes the A/B loop: joined with

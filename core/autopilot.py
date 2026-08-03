@@ -31,6 +31,18 @@ CLASSIFICATIONS: dict[str, tuple[str, str, str]] = {
     "unmeasured": ("·", "No data", "no measured episodes yet"),
 }
 
+# Retention is the metric every verdict here is built on, and only YouTube gives it away for free.
+# The Graph API exposes view counts but no comparable "average percentage viewed", so a Facebook
+# channel has no baseline, which silently means EVERY campaign on it grades "healthy" and the
+# engine can never call a winner or a laggard (ADR-076). That is a real limit of the free data, not
+# a verdict — so it is named, and the UI says it rather than showing confident green.
+MEASURES_RETENTION = {"youtube"}
+
+
+def measurable(channel) -> bool:
+    """Can this channel's platform tell us how much of a video people actually watched?"""
+    return getattr(channel.platform, "value", channel.platform) in MEASURES_RETENTION
+
 
 def _label(rets: list[float], baseline: float | None) -> dict:
     """Turn a campaign's measured retentions + the channel baseline into a classification dict."""

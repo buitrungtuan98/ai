@@ -23,6 +23,56 @@ MIN_AGE_HOURS = 48        # Shorts stats are meaningless before ~2 days
 MAX_AGE_DAYS = 30         # stop refreshing month-old episodes
 REFRESH_HOURS = 24        # re-fetch at most daily
 
+# Per-pass work caps. `video==` takes a list, so views/likes/geography are two queries whatever the
+# count; the retention CURVE dimension is per-video, so it is one HTTP round trip each — sequential,
+# inside the scheduler thread, on a 4-core ARM box. Curves are also stable once measured, so the
+# cap only bites while a backlog drains: `collect_stats` asks for curves it does not already have,
+# newest first, and the rest arrive on later passes (ADR-076).
+MAX_STATS_IDS = 200
+MAX_CURVES_PER_PASS = 20
+
+
+def scope_problem(exc: Exception) -> str | None:
+    """A short, operator-readable reason if `exc` says "this token may not read analytics" — else
+    None (ADR-076).
+
+    A YouTube channel connected before `yt-analytics.readonly` was requested answers 403 to every
+    stats call forever. Publishing keeps working, so nothing looked broken; retention simply never
+    appeared, with the only trace a warning in a log file the operator does not read. Returned as
+    plain text because it is shown on the Channels card, never as the raw exception — a googleapi
+    error stringifies the request URI."""
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    if status not in (401, 403):
+        return None
+    if status == 401:
+        return "YouTube rejected this channel's sign-in — reconnect it to restore analytics."
+    return ("This channel was connected before analytics access was requested, so YouTube refuses "
+            "to share retention and audience data. Reconnect it to enable them — nothing else "
+            "changes, and publishing is unaffected.")
+
+
+def _note_analytics_health(db, channel, problem: str | None) -> None:
+    """Record (or clear) why a channel's stats cannot be read. Writes only on change, so the hourly
+    pass does not rewrite the row 24 times a day for a channel that is perfectly fine."""
+    if (channel.analytics_error or None) == problem:
+        return
+    channel.analytics_error = problem
+    db.commit()
+    if problem:
+        logger.warning("Channel %s cannot be measured: %s", channel.id, problem)
+    else:
+        logger.info("Channel %s analytics are readable again", channel.id)
+
+
+def _capped(video_ids: list[str], limit: int, what: str) -> list[str]:
+    """Trim a work list to `limit` and SAY SO. These caps were bare `[:200]`/`[:50]` slices: real,
+    load-bearing, and invisible — a channel over the cap looked fully measured while its tail was
+    never fetched at all. A cap that is not logged reads as "we covered everything"."""
+    if len(video_ids) > limit:
+        logger.info("Capped %s to %d of %d video(s) this pass — the rest follow next pass.",
+                    what, limit, len(video_ids))
+    return video_ids[:limit]
+
 
 def fetch_youtube_stats(channel: Channel, video_ids: list[str]) -> dict[str, dict]:
     """Return {video_id: {views, avg_pct_viewed, likes}} via the YouTube Analytics API."""
@@ -38,8 +88,8 @@ def fetch_youtube_stats(channel: Channel, video_ids: list[str]) -> dict[str, dic
         endDate=datetime.utcnow().strftime("%Y-%m-%d"),
         metrics="views,likes,averageViewedPercentage",
         dimensions="video",
-        filters="video==" + ",".join(video_ids[:200]),
-        maxResults=200,
+        filters="video==" + ",".join(_capped(video_ids, MAX_STATS_IDS, "views/likes")),
+        maxResults=MAX_STATS_IDS,
     ).execute()
     out: dict[str, dict] = {}
     for row in resp.get("rows", []) or []:
@@ -62,7 +112,8 @@ def fetch_youtube_geography(channel: Channel, video_ids: list[str]) -> dict[str,
         ids="channel==MINE", startDate="2020-01-01",
         endDate=datetime.utcnow().strftime("%Y-%m-%d"),
         metrics="views", dimensions="video,country",
-        filters="video==" + ",".join(video_ids[:200]), maxResults=1000,
+        filters="video==" + ",".join(_capped(video_ids, MAX_STATS_IDS, "geography")),
+        maxResults=1000,
     ).execute()
     by_video: dict[str, list[tuple[str, int]]] = {}
     for row in resp.get("rows", []) or []:
@@ -88,7 +139,7 @@ def fetch_youtube_retention(channel: Channel, video_ids: list[str]) -> dict[str,
     analytics = build("youtubeAnalytics", "v2", credentials=creds, cache_discovery=False)
     end = datetime.utcnow().strftime("%Y-%m-%d")
     out: dict[str, list] = {}
-    for vid in video_ids[:50]:
+    for vid in _capped(video_ids, MAX_CURVES_PER_PASS, "retention curves"):
         try:
             resp = analytics.reports().query(
                 ids="channel==MINE", startDate="2020-01-01", endDate=end,
@@ -117,7 +168,7 @@ def fetch_facebook_stats(channel: Channel, video_ids: list[str]) -> dict[str, di
     token = data.get("page_access_token")
     if not token:
         return {}
-    ids = video_ids[:50]
+    ids = _capped(video_ids, 50, "Facebook insights")  # Graph caps a batch at 50
     if not ids:
         return {}
     # ONE batched Graph call instead of one request per video (ADR-073). Fifty round trips every
@@ -257,6 +308,11 @@ def collect_stats(db, now: datetime | None = None) -> int:
     ]
     if not due:
         return 0
+    # Oldest measurement first, never-measured before that (ADR-076). The per-pass caps are real, so
+    # order decides who is covered: taking them in id order meant the SAME leading episodes were
+    # re-measured every pass while a busy channel's tail was never reached at all. Sorted this way
+    # the cap becomes a queue that drains rather than a wall that starves.
+    due.sort(key=lambda t: (t.stats_json or {}).get("fetched_at") or "")
 
     # Group by channel so each platform is called once per channel.
     by_channel: dict[int, list[Task]] = {}
@@ -284,18 +340,38 @@ def collect_stats(db, now: datetime | None = None) -> int:
                 except Exception:  # noqa: BLE001
                     logger.warning("Geography fetch failed for channel %s", channel_id)
                 try:  # retention curve → drop-off analysis; also a bonus, never fatal
-                    curves = fetch_youtube_retention(channel, ids)
+                    # One HTTP round trip PER VIDEO, sequentially, inside the scheduler thread — so
+                    # only ask for curves we do not already have (ADR-076). A curve does not change
+                    # once the video has settled, and re-fetching every stored one made the steady
+                    # state cost 50 requests an hour to learn nothing.
+                    want = [t.published_video_id for t in channel_tasks
+                            if not (t.stats_json or {}).get("retention_curve")]
+                    curves = fetch_youtube_retention(channel, want) if want else {}
                 except Exception:  # noqa: BLE001
                     logger.warning("Retention fetch failed for channel %s", channel_id)
             else:
                 stats = fetch_facebook_stats(channel, ids)
-        except Exception:  # noqa: BLE001 — stats must never break the factory
-            logger.warning("Stats fetch failed for channel %s", channel_id, exc_info=True)
+            _note_analytics_health(db, channel, None)   # it worked — clear any stale complaint
+        except Exception as exc:  # noqa: BLE001 — stats must never break the factory
+            problem = scope_problem(exc)
+            if problem:
+                # Not a blip: this channel will answer 403 every hour until it is reconnected. Say
+                # so once, on the channel, where the operator can act (ADR-076).
+                _note_analytics_health(db, channel, problem)
+            else:
+                logger.warning("Stats fetch failed for channel %s", channel_id, exc_info=True)
             continue
         for t in channel_tasks:
             if t.published_video_id not in stats:
                 continue
-            entry = {**stats[t.published_video_id], "fetched_at": now.isoformat()}
+            # MERGE, never replace (ADR-076). This used to build `entry` from scratch, so anything
+            # not returned by THIS pass was deleted: a rate-limited geography call, or simply an
+            # episode past `fetch_youtube_retention`'s 50-video cap, silently wiped the retention
+            # curve, the scene-level drop attribution and the top-viewer country that were already
+            # measured and correct. Those feed the playbook distiller and the audience-match verdict,
+            # so the learning loop lost its inputs at random and nothing reported it.
+            entry = {**(t.stats_json or {}), **stats[t.published_video_id],
+                     "fetched_at": now.isoformat()}
             curve = curves.get(t.published_video_id)
             scenes = (t.render_json or {}).get("scenes")
             if curve:
@@ -479,7 +555,12 @@ def channel_growth(db, channel_id: int, days: int = 30, now: datetime | None = N
         "sub_growth": sum(span_subs) if span_subs else None,
         "view_growth": sum(span_views) if span_views else None,
         "published": sum(p["published"] for p in points),
-        "days": len(points),
+        # SAMPLES, not days — and named so, because the two diverge (ADR-076). A snapshot is written
+        # once per local day only while the box is up; after a two-day outage `len(points)` is 5 for
+        # a 30-day window. Calling that "the last 5 days" quietly misdates the whole chart, so the
+        # span the samples actually cover is reported alongside it.
+        "samples": len(points),
+        "days": (points[-1]["day"] - points[0]["day"]).days + 1 if points else 0,
         # Two samples are the minimum for any delta at all — say so instead of drawing a flat line.
         "measurable": len(points) >= 2,
     }

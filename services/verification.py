@@ -165,6 +165,18 @@ def check_facebook_page(page_id: str, token: str) -> PageCheck:
     from services.facebook_service import GRAPH, scrub
 
     wanted = normalize_page_id(page_id)
+    token = (token or "").strip()
+    # Catch the mistake locally, before spending a call, because Graph's answer for it is useless:
+    # pasting the Page ID into the token box comes back as "Cannot parse access token", which tells
+    # the operator nothing about WHICH box is wrong (ADR-074). A real Page token is a long opaque
+    # string (they start "EAA…"); a short all-digit value is an id, not a credential.
+    if token and token == wanted:
+        return PageCheck(False, "You pasted the Page ID into the token box — the two fields need "
+                                "different values. The token is the long secret string that starts "
+                                "with “EAA”; see “How do I get a permanent Page Access Token?” below.")
+    if token.isdigit():
+        return PageCheck(False, "That looks like an ID, not an access token. A Page Access Token is "
+                                "a long string of letters and numbers starting with “EAA”.")
     try:
         import requests
 

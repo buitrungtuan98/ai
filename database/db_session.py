@@ -70,6 +70,8 @@ _COLUMN_UPGRADES: dict[str, dict[str, str]] = {
         "started_at": "DATETIME",
         "finished_at": "DATETIME",
         "retry_count": "INTEGER DEFAULT 0",
+        "auto_retry_count": "INTEGER DEFAULT 0",   # autopilot's failure-retry budget (ADR-076)
+        "auto_reject_count": "INTEGER DEFAULT 0",  # autopilot's QC-reject re-render budget
         "published_video_id": "VARCHAR(128)",
         "published_url": "VARCHAR(512)",
         "synopsis": "VARCHAR(300)",
@@ -87,6 +89,7 @@ _COLUMN_UPGRADES: dict[str, dict[str, str]] = {
         "autopilot_json": "TEXT",
         "profile_json": "TEXT",
         "characters_json": "TEXT",
+        "analytics_error": "VARCHAR(200)",  # why stats can't be read, if they can't (ADR-076)
     },
     "users": {
         "gemini_model": "VARCHAR(200)",

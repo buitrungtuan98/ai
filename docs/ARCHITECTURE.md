@@ -1612,3 +1612,147 @@ not recoverable. Reels is the largest in value: the README and the campaign form
 threw that distribution away. The duplicate-post guard exists because the failure it prevents is
 invisible from our side — we see a timeout, the Page sees a video — and the only cheap moment to make
 it safe is the one the Reels API already hands us: an id that exists before the risky part.
+
+### ADR-074 — A refused Facebook connect must land on the form, not two screens above it
+**Decision:** three changes, from a real operator report of "the screen flashed and nothing happened".
+1. **Name the actual mistake.** Pasting the Page ID into the token box is caught locally, before any
+   Graph call, and says so in those words. Graph's own answer — "Cannot parse access token" — is
+   accurate and useless: it never says *which* of the two boxes is wrong. A bare all-digit value is
+   rejected the same way.
+2. **Come back to the form.** The redirect now anchors `#fb-form`, the template re-opens the
+   disclosure, and the Page id / name / avatar are handed back so nothing has to be retyped. The
+   **token is never echoed** — it is a credential and that redirect is a URL.
+3. **Repeat the error at the form**, not only in the page-top banner.
+
+**Why:** the code was already behaving correctly — it verified, Facebook refused, the save was
+blocked, and a red banner explained it. The operator still experienced nothing at all, and the reason
+is geometry: the "Add a Facebook Page" disclosure is the LAST element of a page that is several
+screens long once a few channels have cards, charts and cast lists. You open it at the bottom, type,
+submit — and the reply renders at the very top, while the form you were looking at collapses and
+empties. The evidence for what happened is real, correct, and off-screen; what is on-screen is the
+same channel list as before, minus your typing. A correct system that cannot be perceived as correct
+has not finished the job. Anchoring the redirect is what makes the message and the mistake occupy the
+same screen. The local pre-check earns its place separately: it is the failure this form sees most,
+it costs nothing to detect, and it converts a provider's vocabulary into the operator's.
+
+### ADR-075 — A credential box is not a login box: one `ui.secret()` macro, and the token checks itself
+
+**Context.** An operator connected a Facebook Page, saw the screen flash, and got no channel. Their
+submission carried `page_id=1175508495653784&page_access_token=1175508495653784` — the Page ID in
+both boxes. The first reading was operator error, and it was wrong: they had pasted a real token.
+
+Nothing in our JS writes to that field, and the two `page_access_token` forms on `/channels` are
+siblings, not nested, so the browser substituted the value. `/channels` had made that easy. A text
+input sits directly above a `type="password"` input, which is precisely what Chrome reads as a login
+form: it offers to save the pair, then refills it on later visits. Every connected Page added one
+more token box — six `type="password"` inputs across the app, and **not one carried an autocomplete
+or vendor-ignore attribute**. The one field that legitimately wants a password manager, the login
+form, was the only one that had them.
+
+**Decision.**
+
+1. **One `ui.secret(name, …)` macro renders every secret input.** Suppressing autofill takes
+   `autocomplete="new-password"` (the value Chrome honours for "do not fill a saved password", where
+   `off` is ignored) plus `data-1p-ignore`, `data-lpignore`, `data-bwignore` and
+   `data-form-type="other"` for 1Password, LastPass, Bitwarden and Dashlane, with `autocomplete="off"`
+   on the enclosing form and on the `page_id` field so the username heuristic has nothing to bind to.
+   Written by hand six times that is right five times — the same copy-instead-of-share defect that
+   hid the `vintage` grade and hardcoded four Graph versions. A test walks `templates/` and fails on
+   any hand-written `type="password"` outside `login.html`.
+2. **`type="password"` stays.** Masking via `-webkit-text-security` on a text input would take these
+   fields outside password-manager heuristics entirely, but it degrades to plaintext where
+   unsupported. Trading a guaranteed security property for a heuristic one is the wrong direction.
+3. **The token box validates itself at the field.** On input, blur and submit it names a Page ID, an
+   all-digit value, or anything under 40 characters (a Page Access Token is ~200) and blocks the
+   submit. `minlength="40"` says the same thing to the browser's own validator.
+
+**Why not rely on the server.** It already refuses `token == page_id` (ADR-074), and it still must —
+this is defence in depth, not a replacement. But that refusal arrives one round-trip later, on a
+reloaded page, with the token box blank again. To the operator who just pasted a token that is
+indistinguishable from nothing happening, which is exactly what they reported. A substituted value is
+only visible if it is named where the operator is looking, while they are looking.
+
+**Cost.** `new-password` makes Safari and Chrome occasionally offer to *generate* a strong password
+in these boxes. That is a suggestion the operator can see and dismiss — strictly better than a stale
+value silently taking the place of the one they pasted.
+
+### ADR-076 — The autopilot may not spend the box on one episode, and measurement may not lose what it measured
+
+**Context.** An audit of the two automated loops — the autopilot that acts, and the analytics that
+tell it whether acting worked — found four defects that shared one shape: **a failure mode with no
+symptom.** Each was reproduced before it was fixed.
+
+**The autopilot could render forever on one episode.** `autopilot_review_channel` rejected any
+awaiting-review item scoring at or below `reject_max` and re-rendered it. A re-render can score
+badly again, so this is a loop, and nothing bounded it: `apply_reject` sets the Task to FAILED
+directly rather than routing through `_fail_task`, so the consecutive-failure circuit breaker is
+never even consulted. A simulation produced eight re-renders in eight cycles with the campaign still
+`active`. On hardware that renders exactly one video at a time, that is the whole factory spent on
+an episode a judge has already disliked twice.
+
+**One failing step silenced a channel for a day.** The Redis cadence key was claimed before the work,
+and one `try` wrapped every step. A Gemini 503 inside `autopilot_strategist_channel` — an optional,
+once-a-week creative suggestion, second from last — skipped review, retry, catch-up and auto-apply,
+and the already-banked key kept skipping them until the interval expired. Up to 24 hours of no
+safety net, caused by the least important thing in the pass.
+
+**One counter served three budgets.** `AUTOPILOT_MAX_RETRIES` gated on `retry_count`, but the manual
+Retry route and every auto-QC re-render increment it too. An operator who pressed Retry twice by hand
+silently disabled the autopilot self-healing that R7 exists to provide.
+
+**Measurement deleted its own results.** `collect_stats` rebuilt `stats_json` from scratch each pass,
+so anything the current pass did not return was dropped. Two everyday things trigger it: a
+rate-limited geography call, and — with no error whatsoever — an episode falling past
+`fetch_youtube_retention`'s per-video cap. What vanished was the retention curve, the scene-level drop
+attribution and the top-viewer country: the inputs to the playbook distiller and the audience-match
+verdict. Data loss and not-yet-collected look identical, so nothing reported it.
+
+**Decision.**
+
+1. **Bound the expensive loop and hand it back.** `AUTOPILOT_MAX_REJECTS`, counted on
+   `Task.auto_reject_count`, then escalate. Escalating parks the episode for the operator and costs
+   nothing — the honest answer, because past that point the machine has no better idea. The counter
+   lives on the Task, not the buffer row: a re-render deletes the buffer row, so a counter there
+   would reset itself every cycle, which is precisely how the loop stayed invisible.
+2. **Isolate every autopilot step, cheapest and most load-bearing first.** Review, catch-up and retry
+   call no AI and are the safety net; nothing optional may cancel them. A partial pass shortens the
+   cadence key to `FAILED_PASS_RETRY_SECONDS` rather than banking an interval it never earned. The
+   key is still claimed *before* the work, deliberately — it is also the overlap guard between ticks.
+3. **Separate budgets.** `retry_count` stays the operator-facing "how many times was this
+   re-rendered". `auto_retry_count` and `auto_reject_count` are the autopilot's own, and bound
+   different things: a failed render is retried to *finish* it, a rejected one is redone to *improve*
+   it, and only the second can loop.
+4. **Merge, never replace, in `collect_stats`** — and only ask for retention curves an episode does
+   not already have. A curve does not change once a video has settled, so re-fetching every stored
+   one cost fifty sequential round trips an hour to learn nothing.
+5. **Say what was skipped.** `_capped()` logs every truncation, and the due list is ordered
+   never-measured-then-oldest, so a per-pass cap drains like a queue instead of starving the same
+   tail forever. A cap that is not logged reads as "we covered everything".
+6. **Name the two silences.** `Channel.analytics_error` turns a permanent 403 (a channel connected
+   before `yt-analytics.readonly` was requested) into something the Channels card and the alert feed
+   can act on. `autopilot.MEASURES_RETENTION` names the fact that Facebook reports no "% viewed", so
+   a Facebook channel has no baseline and every campaign on it grades "healthy" — a limit of the free
+   data, now stated rather than displayed as confident green.
+
+**Scope note on (4).** Guarding the autopilot alone would have fixed half of the dead-token waste:
+the tick's eager hydrator renders for active campaigns without consulting the channel, so it kept
+feeding the one render slot too. Both stop at the same predicate, `_channel_can_act`. What is
+deliberately NOT changed is buffer expiry — episodes already rendered still age out on the normal
+window while the operator fixes the token. Holding them indefinitely would mean publishing
+week-old videos the moment a token is pasted, which is a worse surprise than losing a few renders.
+
+**Also fixed here.** `_record_heartbeat` re-reads the row before its read-modify-write of the config
+JSON the operator edits from another process; `channel_growth` reports `samples` and a real calendar
+`days` span separately (an outage makes them diverge, and the SVG divisor needs the former while the
+caption needs the latter); and the hourly stats pass is handed UTC explicitly, because the tick's
+`now` is LOCAL time being compared against UTC timestamps — latent only because production passes
+`None`.
+
+**R13 trimmed.** `autocorrect`/`autocapitalize`/`spellcheck` are gone from `ui.secret()`: every
+browser already disables them on `type="password"`. They looked like diligence and did nothing, which
+is worse than absent — it invites the next reader to copy them. `autocomplete="new-password"` is the
+one that works; the `data-*` attributes stay as cheap insurance, labelled as such.
+
+**Rejected: make auto-rejects trip the circuit breaker.** It would pause the whole campaign over a QC
+opinion, which is a much heavier action than the evidence supports. Escalating one episode is
+proportionate; the operator can still stop the campaign themselves.
