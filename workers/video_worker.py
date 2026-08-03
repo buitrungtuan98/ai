@@ -450,7 +450,11 @@ def apply_reject(db, item, reason: str = "", *, rerender: bool = False,
         task.error_message = ("Rejected in review: " + reason) if reason else \
             "Rejected in review. Use Retry to re-render."
         drop_script_checkpoint(task)  # judged bad — the re-render must write a FRESH script
-    if reason:  # the operator's/AI's reason becomes a permanent avoid-note (Loop 1 learning signal)
+    # The operator's/AI's reason becomes a permanent avoid-note (Loop 1 learning signal) — but only
+    # for ORDINARY episodes. A compilation's rejection ("wrong episode order", "too long") is about
+    # editing, not writing; feeding it to the scriptwriter would steer every future SCRIPT away
+    # from a complaint that was never about scripts (ADR-082).
+    if reason and (task is None or (task.video_kind or "episode") != "compilation"):
         campaign = db.get(Campaign, item.campaign_id)
         if campaign is not None:
             learning = dict(campaign.learning_json or {})

@@ -1641,7 +1641,13 @@ every decision — behind hard rails. Shipped as six commits, each test-green:
   phone only when something was filed) — no extra AI call.
 - **A4 — series playlists**: every YouTube upload joins its campaign's playlist (created once,
   cached, fail-open) — session time + watch-hours toward the threshold.
-- Verified: 618 tests (32 new across the batch), ruff clean, docs guard green; every loop capped
+- Self-audit hardening after the batch: a compilation is labeled “Best-of” everywhere (not
+  “Ep 9001”), rejecting one never writes a script avoid-note (an editing complaint must not steer
+  the scriptwriter), a thin-library compile failure is non-transient (it heals by publishing more,
+  not by retrying the concat), and a slot-change TARGET must be measured — ±1h of an hour with real
+  first-day numbers that beat the hour being abandoned, so “move to 03:00” can never pass on format
+  alone.
+- Verified: 621 tests (35 new across the batch), ruff clean, docs guard green; every loop capped
   (one regenerate, one slot change/week, one council run/day, milestone once per level); every
   autopilot behaviour simulated in tests including AI-garbage verdicts and judge outages.
 

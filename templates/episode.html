@@ -1,7 +1,8 @@
 {% extends "base.html" %}
 {% import "macros.html" as ui %}
 {% block title %}{% if task.video_kind == 'compilation' %}Best-of{% else %}Ep {{ task.episode_number }}{% endif %} · {{ campaign.topic_name if campaign else '' }} · AI Video Factory{% endblock %}
-{% block crumbs %}{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': channel.channel_name, 'href': '/campaigns?channel=' ~ channel.id}, {'label': campaign.topic_name, 'href': '/campaigns/' ~ campaign.id}, {'label': 'Ep ' ~ task.episode_number}]) }}{% endblock %}
+{% set ep_label = 'Best-of' if task.video_kind == 'compilation' else 'Ep ' ~ task.episode_number %}
+{% block crumbs %}{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': channel.channel_name, 'href': '/campaigns?channel=' ~ channel.id}, {'label': campaign.topic_name, 'href': '/campaigns/' ~ campaign.id}, {'label': ep_label}]) }}{% endblock %}
 {% block content %}
 {% if channel and campaign %}
 {% endif %}
@@ -16,7 +17,7 @@
 {% call ui.banner('danger') %}⚠️ <b>The video file is no longer on disk</b>, so it can't be published. Use <b>Re-render</b> below to produce it again.{% endcall %}
 {% endif %}
 
-{% call ui.page_head('Ep ' ~ task.episode_number ~ ' · ' ~ (campaign.topic_name if campaign else ''), (task.synopsis or '')) %}
+{% call ui.page_head(ep_label ~ ' · ' ~ (campaign.topic_name if campaign else ''), (task.synopsis or '')) %}
   {% if campaign %}<a class="btn ghost" href="/campaigns/{{ campaign.id }}">↑ Campaign</a>{% endif %}
 {% endcall %}
 
@@ -69,7 +70,7 @@
     </div>
     <div>
       {% set meta = buffer.metadata_json if buffer else {} %}
-      <h3 style="margin-top:0">{{ meta.get('title') if buffer else (task.synopsis or 'Ep ' ~ task.episode_number) }}</h3>
+      <h3 style="margin-top:0">{{ meta.get('title') if buffer else (task.synopsis or ep_label) }}</h3>
       <p class="meta">{{ task.synopsis or '—' }}</p>
       {% set qc = meta.get('qc') if buffer else none %}
       {% if qc %}

@@ -212,3 +212,27 @@ def test_slot_change_applies_reversibly_and_respects_edits(session, user, channe
     session.commit()
     assert scheduler.apply_autopilot_action(session, b) is False
     assert b.status == "failed"
+
+
+def test_slot_change_target_must_be_measured_and_better(session, user, channel):
+    """A valid HH:MM is not evidence. The destination (±1h) must be an hour this campaign has real
+    first-day numbers for, and those numbers must beat the hour being abandoned — otherwise the
+    model could argue a move to 03:00 where nothing was ever published."""
+    import json
+
+    cam = _seed(session, user, channel)                    # measured: 09:00 avg 90, 21:00 avg 800
+    pack = council.evidence_pack(session, channel)
+    pj = json.dumps(pack, ensure_ascii=False, default=str)
+
+    ok = council.validate_decision(session, _decision(cam.id, **{"from": "09:00", "to": "21:30"}),
+                                   pack, pj)
+    assert ok is None                                      # 21:30 is ±1h of measured-better 21:00
+
+    p1 = council.validate_decision(session, _decision(cam.id, **{"from": "09:00", "to": "03:00"}),
+                                   pack, pj)
+    assert p1 and "no measured evidence" in p1             # nothing ever published near 03:00
+
+    p2 = council.validate_decision(session, _decision(
+        cam.id, reason="Slot 21:00 avg 800 vs 90 at 09:00 — swap them around for freshness.",
+        evidence=["publish_hours"], **{"from": "21:00", "to": "09:30"}), pack, pj)
+    assert p2 and "does not outperform" in p2              # moving toward the WORSE hour is refused

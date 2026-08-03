@@ -211,3 +211,48 @@ def test_pending_compilation_does_not_shrink_the_episode_buffer(session, user, c
     session.commit()
     created = video_worker.hydrate_campaign(session, cam, buffer_size=2, enqueue=lambda t: "j")
     assert len(created) == 2                                     # the sentinel didn't count
+
+
+def test_rejecting_a_compilation_never_teaches_the_scriptwriter(session, user, channel,
+                                                                monkeypatch):
+    """'Wrong episode order' is an editing complaint. Fed into reject_reasons it would steer every
+    future SCRIPT away from a note that was never about scripts."""
+    from database.models import BufferPoolItem, Campaign, Task
+    from database.types import BufferStatus, TaskStatus
+    from workers import video_worker
+
+    cam = _campaign(session, user, channel)
+    t = Task(campaign_id=cam.id, user_id=user.id, episode_number=9001,
+             video_kind="compilation", status=TaskStatus.AWAITING_REVIEW)
+    b = BufferPoolItem(campaign_id=cam.id, channel_id=channel.id, episode_number=9001,
+                       video_path="/no/c.mp4", status=BufferStatus.awaiting_review,
+                       metadata_json={})
+    session.add_all([t, b])
+    session.commit()
+    monkeypatch.setattr(video_worker, "_safe_remove", lambda *a, **k: None)
+
+    video_worker.apply_reject(session, b, "sai thứ tự tập, dài quá", rerender=False)
+    session.refresh(t)
+    assert t.status == TaskStatus.FAILED                          # the reject itself still works
+    learning = session.get(Campaign, cam.id).learning_json or {}
+    assert not learning.get("reject_reasons")                     # …but no avoid-note pollution
+
+    # An ordinary episode's reject still teaches, unchanged.
+    t2 = Task(campaign_id=cam.id, user_id=user.id, episode_number=1,
+              status=TaskStatus.AWAITING_REVIEW)
+    b2 = BufferPoolItem(campaign_id=cam.id, channel_id=channel.id, episode_number=1,
+                        video_path="/no/e.mp4", status=BufferStatus.awaiting_review,
+                        metadata_json={})
+    session.add_all([t2, b2])
+    session.commit()
+    video_worker.apply_reject(session, b2, "mở đầu chậm", rerender=False)
+    assert session.get(Campaign, cam.id).learning_json["reject_reasons"] == ["mở đầu chậm"]
+
+
+def test_a_thin_library_failure_is_not_autopilot_retryable():
+    from core import failure
+
+    msg = "compile_task failed: only 1 compilable episode(s) in the library"
+    assert failure.is_transient(msg) is False
+    d = failure.diagnose(msg)
+    assert d and "library" in d["fix"]

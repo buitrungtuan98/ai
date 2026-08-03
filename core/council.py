@@ -230,6 +230,20 @@ def validate_decision(db, decision: CouncilDecision, pack: dict, pack_json: str)
             return "slot_change changes nothing"
         if _slot_change_recently_applied(db, decision.campaign_id):
             return f"a slot change was already applied within {SLOT_CHANGE_COOLDOWN_DAYS} days"
+        # Data-driven means the TARGET is measured too, not only well-formatted: the destination
+        # (±1h) must be an hour this campaign has real first-day numbers for, and those numbers must
+        # beat the hour being abandoned. Without this, "move to 03:00" is a perfectly valid HH:MM
+        # the model could argue for — into an hour nothing has ever been measured at.
+        hours = camp.get("publish_hours") or {}
+        to_h = int(p["to"][:2])
+        near = [v["avg_views_24h"] for k, v in hours.items()
+                if abs(int(k[:2]) - to_h) <= 1 or abs(int(k[:2]) - to_h) >= 23]  # midnight wrap
+        if not near:
+            return f"no measured evidence for publishing near {p['to']} — the target hour is a guess"
+        from_stats = hours.get(f"{int(p['from'][:2]):02d}:00")
+        if from_stats and max(near) <= from_stats["avg_views_24h"]:
+            return (f"the target hour ({p['to']}) does not outperform the current slot "
+                    f"({p['from']}) in the measured data")
     return None
 
 
