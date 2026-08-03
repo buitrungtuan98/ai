@@ -130,6 +130,15 @@
   {% if early %}
   <p class="hint mt-sm">👁 Views &amp; likes are <b>live</b> (updated hourly). ⏳ <b>Retention arrives ~2 days after publish</b> — YouTube only finalises watch-time analytics then; it isn't missing, just not ready yet.</p>
   {% endif %}
+  {% if task.stats_json.get('flop') %}
+  {# Named on day one from the campaign's own median (ADR-079) — retention would say it two days
+     later. The autopsy note is already in the campaign's avoid-list steering the next scripts. #}
+  <p class="hint mt-sm text-bad">📉 <b>Flopping:</b> {{ task.stats_json.get('views_24h', 0) }}
+    first-day views — well under this campaign's usual. The autopsy note is already steering the
+    next scripts away from this angle.</p>
+  {% elif task.stats_json.get('flop') is false %}
+  <p class="hint mt-sm">✅ First-day views cleared this campaign's bar.</p>
+  {% endif %}
   {% if retention_curve and retention_curve|length >= 2 %}
   <h4 class="sub-h mt">Audience retention <span class="meta">— % still watching across the video; ✕ marks where most left</span></h4>
   {% set W = 600 %}{% set H = 70 %}

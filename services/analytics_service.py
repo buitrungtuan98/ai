@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import select
 
-from core import retention
+from core import flop, retention
 from database.models import Campaign, Channel, Task
 from database.types import Platform, TaskStatus
 
@@ -281,12 +281,62 @@ def collect_early_stats(db, now: datetime | None = None) -> int:
             merged = {**(t.stats_json or {}), **stats[t.published_video_id],
                       "early_fetched_at": now.isoformat()}
             merged["early"] = merged.get("avg_pct_viewed") is None
+            # First-day snapshot (ADR-079): stamped ONCE on the first hourly refresh past 24h of
+            # age, so every episode's number means the same thing — "views at ~day one", the value
+            # flop judgments compare. Episodes are re-fetched hourly until 48h, so the 24-48h window
+            # guarantees the stamp lands.
+            if (merged.get("views_24h") is None and t.finished_at
+                    and (now - t.finished_at) >= timedelta(hours=flop.SNAPSHOT_AGE_H)):
+                merged["views_24h"] = int(merged.get("views") or 0)
             t.stats_json = merged
             updated += 1
     if updated:
         db.commit()
         logger.info("collect_early_stats updated %d young episode(s)", updated)
+        # Judge flops for every campaign that just gained a first-day snapshot — while the verdict
+        # can still change what renders next, not two days later with retention.
+        for campaign_id in {t.campaign_id for t in due}:
+            campaign = campaigns.get(campaign_id)
+            if campaign is not None:
+                judge_flops(db, campaign)
     return updated
+
+
+def _publish_hour(task, campaign) -> int | None:
+    """The local hour this episode went out, on the campaign's clock — evidence for the autopsy."""
+    if not task.finished_at:
+        return None
+    from zoneinfo import ZoneInfo
+
+    from core.config import settings as _settings
+
+    tz_name = (campaign.config_json or {}).get("timezone") or _settings.TIMEZONE
+    try:
+        return task.finished_at.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo(tz_name)).hour
+    except Exception:  # noqa: BLE001 — a bad zone loses one evidence field, not the autopsy
+        return task.finished_at.hour
+
+
+def judge_flops(db, campaign) -> int:
+    """Judge every not-yet-judged episode of a campaign against its own median first-day views
+    (ADR-079). Below MIN_MEASURED_24H measured episodes this is silent — "not enough data" must
+    never be dressed up as a verdict. Idempotent per episode. Returns new flops recorded."""
+    tasks = db.scalars(select(Task).where(Task.campaign_id == campaign.id,
+                                          Task.stats_json.isnot(None))).all()
+    median = flop.campaign_median_24h(tasks)
+    if median is None:
+        return 0
+    recorded = 0
+    for t in tasks:
+        verdict = flop.is_flop((t.stats_json or {}).get("views_24h"), median)
+        if verdict is None or (t.stats_json or {}).get("flop") is not None:
+            continue
+        if verdict:
+            if flop.record_flop(db, t, campaign, median=median, tz_hour=_publish_hour(t, campaign)):
+                recorded += 1
+        else:
+            flop.mark_fine(db, t)
+    return recorded
 
 
 def collect_stats(db, now: datetime | None = None) -> int:
@@ -380,6 +430,20 @@ def collect_stats(db, now: datetime | None = None) -> int:
                     summary = retention.summarize_drop(curve, scenes)
                     if summary:
                         entry["drop_summary"] = summary
+                        # Late autopsy (ADR-079): the early-views verdict said "flopped", the curve
+                        # now says WHERE. If the opening scene lost them, the flop note gets its
+                        # cause — written once, into the same avoid-notes the next script reads.
+                        if entry.get("flop") and not entry.get("hook_autopsy"):
+                            note = flop.late_autopsy_hook_note(t, summary)
+                            if note:
+                                campaign = campaigns.get(t.campaign_id)
+                                if campaign is not None:
+                                    learning = dict(campaign.learning_json or {})
+                                    notes = (learning.get("flop_notes")
+                                             or [])[-(flop.MAX_FLOP_NOTES - 1):]
+                                    learning["flop_notes"] = notes + [note]
+                                    campaign.learning_json = learning
+                                    entry["hook_autopsy"] = True
             t.stats_json = entry
             updated += 1
     if updated:

@@ -3234,6 +3234,26 @@ def _work_alerts(db, user) -> list[dict]:
         out.append(_alert("red", f"task-failed:{task.id}", f"Ep {task.episode_number} failed — {reason}",
                           channel=chan, campaign=camp, href=f"/episodes/{task.id}", action="Open",
                           at=task.finished_at or task.updated_at))
+    # Early flops (ADR-079): named within the first day, while the verdict can still change what
+    # renders next — retention says the same thing two days later. Amber: published fine, landed badly.
+    from datetime import timedelta as _td
+
+    recent_cut = datetime.utcnow() - _td(days=3)
+    for task in db.scalars(
+            select(Task).where(Task.user_id == user.id, Task.status == TaskStatus.COMPLETED,
+                               Task.finished_at >= recent_cut)
+            .order_by(Task.finished_at.desc())).all():
+        s = task.stats_json or {}
+        if not s.get("flop"):
+            continue
+        campaign = campaigns.get(task.campaign_id)
+        chan, camp = names(campaign)
+        out.append(_alert("amber", f"task-flop:{task.id}",
+                          f"Ep {task.episode_number} is flopping — {s.get('views_24h', 0)} first-day "
+                          "views vs this campaign's usual. The autopsy note already steers the next "
+                          "scripts; open the episode to judge it yourself.",
+                          channel=chan, campaign=camp, href=f"/episodes/{task.id}", action="Open",
+                          at=task.finished_at))
     for campaign in campaigns.values():
         if campaign.status == CampaignStatus.failed:
             chan, camp = names(campaign)
