@@ -728,7 +728,9 @@ def render_task(task_id: int) -> None:
                 # pixel-for-pixel and re-judged it — a whole episode of image calls for the same
                 # verdict. Attempt 1 stays salt-free so a resume reuses its checkpointed stills.
                 image_seed_salt=attempt - 1,
-                title_overlay=cfg.get("title_overlay") == "on",
+                # Raw config value — produce() normalizes every historical shape (bool / "on" /
+                # off|thumb|flash) in ONE place, so stored legacy campaigns need no migration.
+                title_overlay=cfg.get("title_overlay", "off"),
                 content_style=content_style,
                 signature=cfg.get("signature"),
                 vet_batch=vet_batch,

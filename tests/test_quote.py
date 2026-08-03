@@ -96,7 +96,7 @@ def test_thumbnail_scribble_cover_renders(tmp_path, monkeypatch):
     from core import thumbnail
 
     monkeypatch.setattr(thumbnail, "_select_frame",
-                        lambda v, f, frac, d: Image.new("RGB", (400, 700), (40, 55, 60)).save(f))
+                        lambda v, f, frac, d, **_kw: Image.new("RGB", (400, 700), (40, 55, 60)).save(f))
     out = str(tmp_path / "cover.jpg")
     thumbnail.generate_thumbnail("v.mp4", out, "unused title", scribble_word="calm",
                                  width=360, height=640)

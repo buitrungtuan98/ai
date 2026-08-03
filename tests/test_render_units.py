@@ -271,9 +271,10 @@ def test_split_two_tone():
 
 
 def test_build_ass_headline_billboard(tmp_path):
-    """The billboard title: a top-anchored two-tone Headline style + one event spanning the clip,
-    UPPERCASE, with the accent inline-colour on the second tone-line."""
-    from core.captions import build_ass, hex_to_ass
+    """The billboard title is a HOOK FLASH (ADR-078): a top-anchored two-tone Headline over the
+    first HEADLINE_FLASH_S seconds with a fade-out — NOT parked over the whole clip, which is what
+    ate half the frame for the entire video."""
+    from core.captions import HEADLINE_FLASH_S, build_ass, hex_to_ass
     from core.tts import WordTiming
 
     out = str(tmp_path / "h.ass")
@@ -284,12 +285,53 @@ def test_build_ass_headline_billboard(tmp_path):
     assert "CÁCH" in txt and "SỪNG" in txt                           # uppercased Vietnamese, diacritics kept
     accent = hex_to_ass("0xFF3B30")                                  # &H00BBGGRR
     assert (r"\c&H" + accent[4:] + "&") in txt                       # accent tone-line colour
-    assert "Headline,,0,0,0,,".replace(" ", "") in txt.replace(" ", "")  # a Headline event exists
-    assert "0:00:05.00" in txt                                       # spans the whole clip
+    headline_events = [ln for ln in txt.splitlines() if ",Headline," in ln]
+    assert len(headline_events) == 1
+    assert f"0:00:0{HEADLINE_FLASH_S:.0f}.00" in headline_events[0]  # ends at the flash window…
+    assert "0:00:05.00" not in headline_events[0]                    # …NOT at the end of the clip
+    assert r"\fad(150,400)" in headline_events[0]                    # and fades out, not a hard cut
     # No headline requested → no Headline style (unchanged behaviour).
     out2 = str(tmp_path / "n.ass")
     build_ass([WordTiming("x", 0.0, 1.0)], out2, clip_duration=2.0)
     assert "Style: Headline" not in open(out2, encoding="utf-8").read()
+
+
+def test_headline_flash_never_outlives_a_short_clip(tmp_path):
+    """A clip shorter than the flash window caps the event at the clip end."""
+    from core.captions import build_ass
+    from core.tts import WordTiming
+
+    out = str(tmp_path / "s.ass")
+    build_ass([WordTiming("hi", 0.0, 1.0)], out, clip_duration=2.0,
+              headline="ngắn thôi", headline_accent_hex=None)
+    event = next(ln for ln in open(out, encoding="utf-8") if ",Headline," in ln)
+    assert "0:00:02.00" in event
+
+
+def test_a_13_word_hook_is_teased_and_capped_not_half_the_frame(tmp_path):
+    """The reported failure: a long Vietnamese hook wrapped to ~6 rows of 100px — half of 1920 —
+    for the whole video. The drawn title is now a word-boundary teaser fitted into ≤3 rows."""
+    from core.captions import HEADLINE_MAX_ROWS, TEASER_MAX_CHARS, build_ass, teaser
+    from core.tts import WordTiming
+
+    hook = "vị hoàng đế bỏ ngai vàng vào chiến khu rồi lưu đày xứ người"
+    out = str(tmp_path / "long.ass")
+    build_ass([WordTiming("hello", 0.0, 1.0)], out, clip_duration=54.0,
+              headline=hook, headline_accent_hex="0xFF3B30")
+    event = next(ln for ln in open(out, encoding="utf-8") if ",Headline," in ln)
+    text = event.split(",,", 2)[-1]
+    # ≤ HEADLINE_MAX_ROWS rows means at most HEADLINE_MAX_ROWS-1 visual breaks, plus one \N that
+    # joins the two tone-lines — so the raw count of \N never exceeds HEADLINE_MAX_ROWS.
+    assert text.count(r"\N") <= HEADLINE_MAX_ROWS
+    assert "…" in text                                               # teased, not dumped whole
+    assert "XỨ NGƯỜI" not in text                                    # the tail was cut…
+    assert "VỊ HOÀNG ĐẾ" in text                                     # …the opening kept
+
+    # The teaser itself: word boundary + ellipsis; short titles untouched.
+    assert teaser("ngắn gọn") == "ngắn gọn"
+    t = teaser(hook)
+    assert len(t) <= TEASER_MAX_CHARS + 1 and t.endswith("…")
+    assert not t[:-1].endswith(" ")                                  # no dangling space before …
 
 
 def test_thumbnail_accent_and_fit_helpers():
@@ -311,7 +353,7 @@ def test_poster_thumbnail_renders(tmp_path, monkeypatch):
 
     from core import thumbnail
 
-    def fake_select(video, frame_png, frac, dur):
+    def fake_select(video, frame_png, frac, dur, **_kw):
         Image.new("RGB", (400, 300), (30, 40, 60)).save(frame_png)
 
     monkeypatch.setattr(thumbnail, "_select_frame", fake_select)
@@ -792,3 +834,74 @@ def test_ffmpeg_runner_uses_nice_threads(monkeypatch):
     assert "ffmpeg" in cmd and "-threads" in cmd and "-progress" in cmd
     if fr.shutil.which("nice"):
         assert cmd[0] == "nice"
+
+
+def test_frame_sampling_dodges_the_flash_window(monkeypatch):
+    """ADR-078, the doubled-text thumbnail: with a hook flash burned into the opening seconds, an
+    early frame already carries a title — and _frame_score REWARDS edge density, so giant outlined
+    text was actively preferred. Every sample (and both fallbacks) must land after `min_at_s`."""
+    from PIL import Image
+
+    from core import thumbnail
+
+    grabbed: list[float] = []
+
+    def fake_extract(video, out, at_seconds):
+        grabbed.append(at_seconds)
+        Image.new("RGB", (40, 70), (30, 40, 60)).save(out)
+
+    monkeypatch.setattr(thumbnail, "extract_frame", fake_extract)
+
+    tmp = "/tmp/claude-0/-home-user-ai/ecbd0f63-45b6-5152-a81f-982afc89d745/scratchpad/fr.png"
+    thumbnail._select_frame("v.mp4", tmp, 0.15, 54.0, min_at_s=3.5)
+    assert grabbed and all(t >= 3.5 for t in grabbed)
+
+    # Unknown duration → the single-grab fallback still respects the floor.
+    grabbed.clear()
+    thumbnail._select_frame("v.mp4", tmp, 0.15, None, min_at_s=3.5)
+    assert grabbed == [3.5]
+
+    # A clip SHORTER than the flash: the floor yields — a frame with the title beats no thumbnail.
+    grabbed.clear()
+    thumbnail._select_frame("v.mp4", tmp, 0.15, 2.0, min_at_s=3.5)
+    assert grabbed and all(t <= 1.5 for t in grabbed)   # capped at duration - 0.5
+
+    # No floor asked for → the historical sampling positions, unchanged.
+    grabbed.clear()
+    thumbnail._select_frame("v.mp4", tmp, 0.15, 54.0)
+    expected = [f * 54.0 for f in thumbnail._FRAME_SAMPLES]
+    assert all(abs(g - e) < 1e-9 for g, e in zip(grabbed, expected)) and len(grabbed) == len(expected)
+
+
+def test_poster_title_uses_the_same_teaser_as_the_flash(tmp_path, monkeypatch):
+    """The thumbnail must show the same words the video opens with — and a 13-word hook shrunk to
+    fit a poster is unreadable at feed size anyway."""
+    from PIL import Image
+
+    from core import thumbnail
+    from core.captions import teaser
+
+    seen: dict = {}
+    real = thumbnail._draw_poster_title
+
+    def spy(draw, title, **k):
+        seen["title"] = title
+        return real(draw, title, **k)
+
+    # _draw_poster_title receives the raw title and teases internally — spy on the wrap instead.
+    monkeypatch.setattr(thumbnail, "_select_frame",
+                        lambda v, f, frac, d, **_kw: Image.new("RGB", (360, 640), (20, 20, 30)).save(f))
+    wrapped: list[str] = []
+    orig_wrap = thumbnail.wrap_text
+
+    def wrap_spy(text, *a, **k):
+        wrapped.append(text)
+        return orig_wrap(text, *a, **k)
+
+    monkeypatch.setattr(thumbnail, "wrap_text", wrap_spy)
+    hook = "vị hoàng đế bỏ ngai vàng vào chiến khu rồi lưu đày xứ người"
+    thumbnail.generate_thumbnail("v.mp4", str(tmp_path / "p.jpg"), hook,
+                                 poster=True, width=360, height=640)
+    drawn = " ".join(wrapped)
+    assert "XỨ NGƯỜI" not in drawn                       # the tail was cut, same rule as the flash
+    assert teaser(hook).upper().split()[0] in drawn      # the opening survives

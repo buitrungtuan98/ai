@@ -1538,9 +1538,12 @@ def _build_campaign_config(
         # optional per-campaign art-style override (blank = the character's own style / channel default).
         "visual_source": "studio" if visual_source == "studio" else "stock",
         "visual_style": visual_style.strip()[:200] or None,
-        # Billboard title (ADR-054): burn the hook title into the video (top, two-tone) AND draw it as
-        # a poster-style thumbnail — the reference-channel look. One toggle drives both. Default off.
-        "title_overlay": "on" if title_overlay == "on" else "off",
+        # Billboard title (ADR-054, reworked in ADR-078): off = nothing drawn · thumb = poster
+        # thumbnail only, the video stays clean · flash = poster thumbnail + the hook flashed over
+        # the first seconds. Legacy "on" (title parked over the whole clip — it ate half the frame)
+        # maps to flash, the behaviour it should have been.
+        "title_overlay": (title_overlay if title_overlay in ("thumb", "flash")
+                          else ("flash" if title_overlay == "on" else "off")),
         # Content style (ADR-056): "story" = normal narrated video (default); "quote" = aesthetic
         # poem-per-video with a per-episode Vibe roll, centered quote text, drawn visuals + scribble
         # cover. `signature` is an optional custom on-screen text mark (channel name), drawn small

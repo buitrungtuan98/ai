@@ -1808,3 +1808,56 @@ same way: confident about what a remote API returns, with a test that encoded th
 of checking it. The structural answer is not more care — it is that a check gating a save must be
 built from responses that cannot fail (`metadata`, universal fields), so there is no error path left
 to mistranslate.
+
+### ADR-078 — The billboard is a 3-second hook flash, and the thumbnail never lands on a titled frame
+
+**Context.** An operator shared a frame of a published 54-second episode with `title_overlay=on`:
+the hook title covered roughly half the screen, doubled into two offset copies, for the entire
+video. Two distinct defects, one root:
+
+1. **The billboard sat over the whole clip — by accident of architecture.** Each scene gets its own
+   ASS file whose clock starts at zero, and `produce()` passed the headline to *every* scene, so
+   every scene re-drew the "opening" title from its own second zero. On top of that the ASS path had
+   no fit logic: 5.2% of frame height per row, unlimited rows, while the AI writes 12–15-word
+   Vietnamese hooks. Thirteen words → six 100px rows → half of 1920, for 54 seconds.
+2. **The thumbnail doubled the title.** The poster thumbnail extracts a frame *from the finished
+   video* — where every frame already carried the burned headline — then drew the same title again
+   with PIL at a slightly different size and wrap. Worse, `_frame_score` selects the candidate
+   richest in edges, and giant outlined text is nothing but edges, so the scorer actively preferred
+   the most text-contaminated frames.
+
+**What the platforms actually reward.** Shorts/Reels feeds autoplay — the custom thumbnail is
+essentially invisible there (it shows in search, channel pages and shares). What ranking measures is
+behaviour: the stay-or-swipe decision in the first ~3 seconds, then retention over the rest. A title
+parked over the footage for the whole clip hurts the second number; no in-video title at all wastes
+the first window, especially for muted viewers. The right shape is the one reference channels use: a
+title that flashes over the opening seconds and gets out of the way.
+
+**Decision.**
+
+1. **`title_overlay` is tri-state: `off` | `thumb` | `flash`.** `thumb` draws the poster thumbnail
+   and keeps the video clean; `flash` adds the hook over the first `HEADLINE_FLASH_S` (3s) with a
+   fade-out. Legacy `"on"`/`True` normalize to `flash` — the behaviour "on" should have been — in
+   ONE place (`_title_mode`), because "off" is a truthy string and raw branching on the stored value
+   is exactly one `if title_overlay` away from drawing titles on every campaign.
+2. **The flash belongs to scene 0 only.** Passing the headline to one scene's ASS is the whole fix
+   for "parked over the entire video".
+3. **The drawn title is a teaser.** `teaser()` cuts at a word boundary near 56 chars; the flash
+   fits itself into ≤3 rows starting at 4% of frame height (mirroring the fit-to-width the PIL
+   poster always had and the ASS path never did). An unfinished hook is a better 3-second curiosity
+   gap than six rows nobody can read in time. The *published* title is never touched.
+4. **Thumbnail frames are sampled after the flash window** (`min_at_s`), so the poster can never be
+   drawn over a frame that already carries a title — the double-draw becomes impossible by
+   construction, not by luck. A clip shorter than the window caps to its end instead: a frame with
+   the title beats no thumbnail.
+
+**Rejected: title only on the thumbnail (the first instinct).** It fixes both defects and was
+seriously considered, but it surrenders the one window the feed actually measures — the first
+seconds, where a written hook works even for muted viewers and the thumbnail is never shown. `thumb`
+exists for operators who want a fully clean video; `flash` is the recommended default and what
+legacy "on" maps to.
+
+**Cost.** Existing "on" campaigns change behaviour mid-flight: their next episodes carry a 3-second
+flash instead of a permanent billboard. That is the point of the change, and the old behaviour is
+deliberately not preserved as an option — a mode whose observed effect is "cover half the video with
+text for its whole length" has no defensible use.

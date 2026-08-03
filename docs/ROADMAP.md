@@ -1589,6 +1589,26 @@ Reported: *"add facebook thấy chớp cái rồi không vô"* — banner
   in Chromium at 390px against a Graph stub returning their verbatim error — the banner now names the
   mistake, leaks none of Graph's complaint about our request, keeps the Page ID, and opens the guide.
 
+## R16 — billboard: a 3-second hook flash, not a half-screen tenant `DONE`
+
+Reported with a frame: the billboard title covered ~half the screen, doubled into two offset
+copies, for all 54 seconds.
+
+- **Doubled**: the poster thumbnail extracts a frame from the finished video — every frame already
+  carried the burned title — then drew the same title again in PIL; and the frame scorer prefers
+  edge-rich frames, i.e. the ones fullest of outlined text. Frames are now sampled AFTER the flash
+  window, so the double-draw is impossible by construction.
+- **Half the screen, all episode**: every scene's ASS starts at its own t=0 and all of them got the
+  headline; plus no row cap at 5.2% height per row against 13-word AI hooks. Now: scene 0 only,
+  3s + fade-out, teaser-cut at a word boundary (~56 chars), fitted into ≤3 rows from 4% height.
+- **`title_overlay` = `off` | `thumb` | `flash`** (legacy "on"/bool → flash, normalized in one
+  place — "off" is a truthy string). `thumb` = poster thumbnail, clean video. `flash` (recommended)
+  = thumbnail + the hook over the opening ~3s — the window Shorts/Reels ranking actually measures,
+  readable even muted; the footage gets the frame back for the part retention is scored on.
+- Verified: 578 tests (7 new), ruff clean, docs guard green; before/after frames rendered at scale
+  with the operator's exact 13-word hook (41% of frame + doubled → 13% for 3s → clean), poster
+  thumbnail produced by the real PIL path.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

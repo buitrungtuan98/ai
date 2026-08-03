@@ -554,23 +554,27 @@ def _mock_render_touchpoints(video_factory, monkeypatch):
 
 
 def test_produce_title_overlay_burns_headline_and_poster(tmp_path, monkeypatch):
-    """title_overlay=on feeds the hook title into build_ass (headline) AND the thumbnail (poster),
-    with the brand tint as the accent — so the in-video billboard and the thumbnail match."""
+    """Flash mode feeds the hook title into build_ass — for SCENE 0 ONLY (ADR-078: every scene's ASS
+    starts at its own t=0, so passing the headline to all of them is exactly how the old billboard
+    stayed parked over the entire video) — AND into the thumbnail (poster), with the brand tint as
+    the accent, sampling frames after the flash window so the poster never lands on a titled frame.
+    Legacy `title_overlay=True` still means flash."""
     from core import video_factory
+    from core.captions import HEADLINE_FLASH_S
 
     _mock_render_touchpoints(video_factory, monkeypatch)
-    cap: dict = {}
+    headlines: list = []
 
     def fake_ass(timings, out, **k):
-        cap["headline"] = k.get("headline")
-        cap["accent"] = k.get("headline_accent_hex")
+        headlines.append(k.get("headline"))
         open(out, "w").write("ass")
         return out
 
     tcap: dict = {}
 
     def fake_thumb(video, out, title, **k):
-        tcap.update(title=title, poster=k.get("poster"), accent=k.get("accent_hex"))
+        tcap.update(title=title, poster=k.get("poster"), accent=k.get("accent_hex"),
+                    min_at_s=k.get("min_at_s"))
         return out
 
     monkeypatch.setattr(video_factory, "build_ass", fake_ass)
@@ -583,8 +587,52 @@ def test_produce_title_overlay_burns_headline_and_poster(tmp_path, monkeypatch):
         gen_image=lambda **kw: (open(kw["out_path"], "w").write("P"), kw["out_path"])[1],
         title_overlay=True, branding=video_factory.Branding(tint_color="0xFF3B30"),
     )
-    assert cap["headline"] == "TA" and cap["accent"] == "0xFF3B30"   # hook title (variant A) + brand accent
+    assert headlines[0] == "TA"                       # hook title (variant A) opens the video…
+    assert headlines[1:] == [None] * (len(headlines) - 1)   # …and NO later scene re-draws it
     assert tcap["title"] == "TA" and tcap["poster"] is True and tcap["accent"] == "0xFF3B30"
+    assert tcap["min_at_s"] > HEADLINE_FLASH_S        # frames sampled after the flash — no double draw
+
+
+def test_produce_thumb_mode_keeps_the_video_clean(tmp_path, monkeypatch):
+    """`thumb`: poster thumbnail, zero in-video headline, and no frame-sampling floor needed."""
+    from core import video_factory
+
+    _mock_render_touchpoints(video_factory, monkeypatch)
+    headlines: list = []
+    tcap: dict = {}
+
+    def fake_ass(timings, out, **k):
+        headlines.append(k.get("headline"))
+        open(out, "w").write("ass")
+        return out
+
+    monkeypatch.setattr(video_factory, "build_ass", fake_ass)
+    monkeypatch.setattr(video_factory, "generate_thumbnail",
+                        lambda video, out, title, **k: (tcap.update(title=title, **k), out)[1])
+
+    cast = [{"id": "h", "name": "Hero", "description": "d", "style": "s", "ref_image": None, "sheet_path": None}]
+    video_factory.produce(
+        script=_studio_script(3), episode_number=1, pexels_api_key="", job_id="thm",
+        output_dir=str(tmp_path / "o"), visual_source="studio", characters=cast, image_api_key="k",
+        gen_image=lambda **kw: (open(kw["out_path"], "w").write("P"), kw["out_path"])[1],
+        title_overlay="thumb", branding=video_factory.Branding(tint_color="0xFF3B30"),
+    )
+    assert headlines == [None] * len(headlines)       # the video is completely clean
+    assert tcap["poster"] is True and tcap["title"] == "TA"
+    assert tcap["min_at_s"] == 0.0                    # nothing burned → nothing to dodge
+
+
+def test_title_mode_normalizes_every_historical_shape():
+    """Strings are truthy — `if title_overlay` with "off" was one branch away from drawing a title
+    on every campaign. All comparisons go through one normalizer."""
+    from core.video_factory import _title_mode
+
+    assert _title_mode(True) == "flash" and _title_mode(False) == "off"
+    assert _title_mode("on") == "flash"               # legacy stored value keeps its (fixed) look
+    assert _title_mode("off") == "off" and _title_mode("thumb") == "thumb"
+    assert _title_mode("flash") == "flash"
+    assert _title_mode(None) == "off" and _title_mode("") == "off"
+    assert _title_mode("banana") == "off"             # unknown → the safe default, never a guess
 
 
 def test_produce_studio_uses_uploaded_ref_image(tmp_path, monkeypatch):
