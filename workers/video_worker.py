@@ -220,6 +220,17 @@ def renders_started_today(db, campaign: Campaign, now: datetime | None = None) -
     ) or 0
 
 
+def enqueue_task(task) -> str:
+    """Route a task to the job that can actually build it (ADR-082): a compilation re-runs the
+    concat, an episode re-runs the render. Every Retry path goes through here — enqueueing
+    render_task for a compilation would try to write a script for it."""
+    from workers.task_queue import enqueue_compile
+
+    if (getattr(task, "video_kind", None) or "episode") == "compilation":
+        return enqueue_compile(task.id)
+    return enqueue_render(task.id)
+
+
 def hydrate_campaign(db, campaign: Campaign, *, buffer_size: int | None = None, enqueue=enqueue_render) -> list[int]:
     """Ensure ONE campaign has up to `buffer_size` upcoming (not-yet-finished) episodes queued.
     Precedence: explicit arg > campaign config `buffer_size` > global default. Idempotent —
@@ -250,6 +261,11 @@ def hydrate_campaign(db, campaign: Campaign, *, buffer_size: int | None = None, 
             )
         ).all()
     )
+    # Compilations use sentinel numbers (9001+) and are EXTRA content — one waiting for review must
+    # not count against the buffer of ordinary upcoming episodes (ADR-082).
+    from core.compilation import COMPILATION_EPISODE_BASE
+
+    active_eps = {e for e in active_eps if e < COMPILATION_EPISODE_BASE}
     next_ep = campaign.current_episode + 1
     while len(active_eps) < size and next_ep <= campaign.total_episodes:
         if day_budget is not None and len(created) >= day_budget:
@@ -473,10 +489,26 @@ def _publish_buffer(db, task: Task, buf: BufferPoolItem, campaign: Campaign,
     buf.status = BufferStatus.consumed
     buf.consumed_at = datetime.utcnow()
     db.commit()
-    _safe_remove(buf.video_path, buf.thumbnail_path)  # strict cleanup after publish
+    if (task.video_kind or "episode") == "compilation":
+        # A compilation is BUILT FROM the library; retaining it would recurse best-ofs into best-ofs.
+        _safe_remove(buf.video_path, buf.thumbnail_path)
+    else:
+        # Retain the published master in the campaign library (ADR-082) — the raw material for
+        # best-of compilations, the long-form format that actually pays. Capped inside; fail-open
+        # to plain deletion. The thumbnail is not needed again either way.
+        from core import compilation
+
+        compilation.retain_master(campaign.id, task.episode_number, buf.video_path)
+        _safe_remove(buf.video_path, buf.thumbnail_path)
 
     task.finished_at = datetime.utcnow()
     _set_status(db, task, TaskStatus.COMPLETED, 100)
+    if (task.video_kind or "episode") == "compilation":
+        # A best-of is EXTRA content: it must not advance the campaign's episode count — the next
+        # ordinary episode would silently be skipped.
+        _notify(user, f"🎬 Best-of compilation for '{campaign.topic_name}' published: "
+                      f"{task.published_url}")
+        return video_id
     events = advance_campaign(db, campaign)
     _notify(user, f"✅ Episode {task.episode_number} of '{campaign.topic_name}' published: {task.published_url}")
     if events.completed:
@@ -569,6 +601,88 @@ def _maybe_trip_circuit_breaker(db, campaign: Campaign, user: User) -> bool:
 
 
 # ── The jobs ─────────────────────────────────────────────────────────────────
+@with_render_lock
+def compile_task(task_id: int) -> None:
+    """Build a best-of compilation from the campaign's library (ADR-082): a stream-copy concat of
+    the top-retention masters — near-zero CPU, zero AI — with chapters and a poster thumbnail. It
+    holds the render lock like any job (cheap or not, one ffmpeg at a time is the law of this box)
+    and ALWAYS parks for review: a ten-minute video that will anchor the channel's long-form shelf
+    gets one human look, in every mode."""
+    from core import compilation, media
+    from core.captions import teaser
+    from core.ffmpeg_runner import run_ffmpeg
+    from core.thumbnail import generate_thumbnail
+    from core.video_factory import build_concat_args
+
+    db = SessionLocal()
+    task = db.get(Task, task_id)
+    if task is None:
+        logger.error("compile_task: no Task %s", task_id)
+        db.close()
+        return
+    campaign = user = None
+    try:
+        campaign = db.get(Campaign, task.campaign_id)
+        user = db.get(User, task.user_id)
+        _set_status(db, task, TaskStatus.RENDERING, 10)
+        top_n = int((task.render_json or {}).get("top_n") or compilation.DEFAULT_TOP_N)
+        picked = compilation.compilable_episodes(db, campaign)[:top_n]
+        if len(picked) < 2:
+            raise RuntimeError(
+                f"only {len(picked)} compilable episode(s) in the library — a compilation needs "
+                "at least 2 (masters are retained from publishes made after this feature shipped)")
+        paths = [compilation.episode_master_path(campaign.id, t.episode_number)
+                 for t in picked]
+        durations = [media.probe_duration(p) for p in paths]
+
+        output_dir = os.path.join(settings.MEDIA_ROOT, "buffer", str(campaign.id))
+        os.makedirs(output_dir, exist_ok=True)
+        master = os.path.join(output_dir, f"compilation_{task.episode_number}.mp4")
+        list_file = master + ".txt"
+        compilation.build_concat_list(paths, list_file)
+        # Stream copy — the segments share the pipeline's codec parameters by construction.
+        run_ffmpeg(build_concat_args(list_file, master, music_path=None, loudnorm=False))
+        os.remove(list_file)
+        _set_status(db, task, TaskStatus.AUDIO_SYNCED, 70)
+
+        metadata = compilation.compilation_metadata(campaign, picked, durations)
+        thumb = os.path.join(output_dir, f"compilation_{task.episode_number}.jpg")
+        generate_thumbnail(master, thumb, teaser(metadata["title"]),
+                           duration=sum(durations), poster=True)
+        cfg = campaign.config_json or {}
+        metadata.setdefault("cta", cfg.get("cta"))
+        metadata.setdefault("privacy", cfg.get("privacy", "public"))
+
+        buf = BufferPoolItem(
+            campaign_id=campaign.id, channel_id=campaign.channel_id,
+            episode_number=task.episode_number, video_path=master, thumbnail_path=thumb,
+            metadata_json=metadata, status=BufferStatus.awaiting_review)
+        db.add(buf)
+        task.render_json = {**(task.render_json or {}),
+                            "duration": sum(durations),
+                            "compiled_from": [t.episode_number for t in picked]}
+        task.synopsis = metadata["title"][:300]
+        task.finished_at = datetime.utcnow()
+        _set_status(db, task, TaskStatus.AWAITING_REVIEW, 90)
+        db.commit()
+        _notify(user, f"🎬 Best-of compilation for '{campaign.topic_name}' is built "
+                      f"({len(picked)} episodes, {round(sum(durations) / 60)} min) and waiting "
+                      "for your review in the Asset Pool.")
+    except Exception as exc:  # noqa: BLE001 — record and continue the queue
+        if campaign is not None and user is not None:
+            _fail_task(db, task, user, campaign, exc, "compile_task")
+        else:
+            db.rollback()
+            task.status = TaskStatus.FAILED
+            task.finished_at = datetime.utcnow()
+            task.error_message = f"compile_task failed: {exc}"
+            db.commit()
+            logger.exception("compile_task failed for task %s", task_id)
+    finally:
+        clear_progress(task_id)
+        db.close()
+
+
 @with_render_lock
 def render_task(task_id: int) -> None:
     """Render one episode into the buffer pool; auto-publish or park for review per campaign."""

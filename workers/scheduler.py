@@ -696,7 +696,7 @@ def autopilot_retry_channel(db, channel) -> int:
         t.auto_retry_count = (t.auto_retry_count or 0) + 1
         db.commit()
         task_queue.clear_progress(t.id)  # drop any ghost % from the interrupted attempt (F1)
-        t.rq_job_id = task_queue.enqueue_render(t.id)
+        t.rq_job_id = video_worker.enqueue_task(t)   # kind-aware: compilations re-concat
         db.commit()
         retried += 1
         _log_action(db, channel, "retried",
@@ -978,6 +978,25 @@ def apply_autopilot_action(db, action, *, auto_start_successor: bool = False,
             new_id = _create_successor(db, campaign, auto_start=auto_start_successor,
                                        review_first=review_first_successor)
             action.params = {**(action.params or {}), "created_campaign_id": new_id}
+        elif action.kind == "compile":
+            # Build a best-of from the library (ADR-082). Applying only CREATES + QUEUES the build;
+            # the result always parks for review — in every mode — so approving this proposal never
+            # publishes anything by itself.
+            from core import compilation
+
+            if campaign is None:
+                raise ValueError("campaign gone")
+            ep = compilation.next_compilation_number(db, campaign.id)
+            t = Task(campaign_id=campaign.id, user_id=campaign.user_id, episode_number=ep,
+                     video_kind="compilation",
+                     render_json={"top_n": int((action.params or {}).get(
+                         "top_n", compilation.DEFAULT_TOP_N))})
+            db.add(t)
+            db.commit()
+            db.refresh(t)
+            t.rq_job_id = task_queue.enqueue_compile(t.id)
+            db.commit()
+            action.params = {**(action.params or {}), "created_task_id": t.id}
         elif action.kind == "slot_change":
             # Golden-hour move (ADR-081): swap ONE posting slot, reversibly — the config keeps its
             # other slots and everything else. The council's rails already enforced HH:MM shape,
@@ -1030,9 +1049,10 @@ def autopilot_autoapply_channel(db, channel) -> dict:
             if apply_autopilot_action(db, a, auto_start_successor=True, review_first_successor=True):
                 successors += 1
                 applied["successor"] += 1
-        elif a.kind in ("extend", "wind_down", "slot_change"):
-            # slot_change is bounded upstream: the council's rails enforce one applied change per
-            # campaign per week, so full-auto cannot thrash the schedule.
+        elif a.kind in ("extend", "wind_down", "slot_change", "compile"):
+            # slot_change is bounded upstream (one applied change per campaign per week, enforced
+            # by the council rails); compile only queues a build that ALWAYS parks for review, so
+            # full-auto applying it publishes nothing by itself.
             if apply_autopilot_action(db, a):
                 applied[a.kind] = applied.get(a.kind, 0) + 1
     return applied

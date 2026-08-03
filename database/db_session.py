@@ -72,6 +72,7 @@ _COLUMN_UPGRADES: dict[str, dict[str, str]] = {
         "retry_count": "INTEGER DEFAULT 0",
         "auto_retry_count": "INTEGER DEFAULT 0",   # autopilot's failure-retry budget (ADR-076)
         "auto_reject_count": "INTEGER DEFAULT 0",  # autopilot's QC-reject re-render budget
+        "video_kind": "VARCHAR(16) DEFAULT 'episode'",  # episode | compilation (ADR-082)
         "published_video_id": "VARCHAR(128)",
         "published_url": "VARCHAR(512)",
         "synopsis": "VARCHAR(300)",

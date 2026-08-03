@@ -2171,7 +2171,7 @@ def rerender_asset(db: DbDep, item=Depends(get_owned_buffer_item), return_to: st
     # script (a plain Retry keeps it and rebuilds the same episode — ADR-069).
     video_worker.drop_script_checkpoint(task)
     db.commit()
-    task.rq_job_id = task_queue.enqueue_render(task.id)
+    task.rq_job_id = video_worker.enqueue_task(task)   # kind-aware: compilations re-concat
     db.commit()
     return _action_redirect(return_to, "rerender", "/assets?flash=rerender")
 
@@ -2854,7 +2854,7 @@ def retry_task(task_id: int, user: CurrentUser, db: DbDep, return_to: str = Form
         return _action_redirect(return_to, "publish", "") if _episode_return(return_to) \
             else {"ok": True, "mode": "publish"}
     db.commit()
-    task.rq_job_id = task_queue.enqueue_render(task.id)
+    task.rq_job_id = video_worker.enqueue_task(task)   # kind-aware: compilations re-concat
     db.commit()
     return _action_redirect(return_to, "rerender", "") if _episode_return(return_to) \
         else {"ok": True, "mode": "render"}

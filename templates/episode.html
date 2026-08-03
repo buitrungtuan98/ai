@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% import "macros.html" as ui %}
-{% block title %}Ep {{ task.episode_number }} · {{ campaign.topic_name if campaign else '' }} · AI Video Factory{% endblock %}
+{% block title %}{% if task.video_kind == 'compilation' %}Best-of{% else %}Ep {{ task.episode_number }}{% endif %} · {{ campaign.topic_name if campaign else '' }} · AI Video Factory{% endblock %}
 {% block crumbs %}{{ ui.breadcrumb([{'label': 'Channels', 'href': '/channels'}, {'label': channel.channel_name, 'href': '/campaigns?channel=' ~ channel.id}, {'label': campaign.topic_name, 'href': '/campaigns/' ~ campaign.id}, {'label': 'Ep ' ~ task.episode_number}]) }}{% endblock %}
 {% block content %}
 {% if channel and campaign %}

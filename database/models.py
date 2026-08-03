@@ -188,6 +188,9 @@ class Task(Base):
     # to improve it, and only the second can loop forever.
     auto_retry_count: Mapped[int] = mapped_column(Integer, default=0)
     auto_reject_count: Mapped[int] = mapped_column(Integer, default=0)
+    # "episode" (default) or "compilation" — a best-of built from the library (ADR-082).
+    # Compilations use sentinel episode numbers (9001+) and never advance the campaign.
+    video_kind: Mapped[str] = mapped_column(String(16), default="episode")
     published_video_id: Mapped[str | None] = mapped_column(String(128))
     published_url: Mapped[str | None] = mapped_column(String(512))
     # Which A/B metadata variant (A/B/C) actually went live — closes the A/B loop: joined with

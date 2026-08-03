@@ -1020,7 +1020,9 @@ def test_rerender_discards_and_requeues(client, monkeypatch, tmp_path):
 
     buf, task, video = _seed_ready_asset(client, tmp_path)
     renders = []
-    monkeypatch.setattr(main.task_queue, "enqueue_render", lambda tid: renders.append(tid) or "j2")
+    # The route requeues through the kind-aware helper (ADR-082), which reads the name bound in
+    # video_worker's module namespace.
+    monkeypatch.setattr(main.video_worker, "enqueue_render", lambda tid: renders.append(tid) or "j2")
     r = client.post(f"/assets/{buf.id}/rerender", follow_redirects=False)
     assert r.status_code == 303 and renders == [task.id]
     assert "flash=rerender" in r.headers["location"]

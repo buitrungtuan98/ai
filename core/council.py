@@ -37,9 +37,8 @@ from database.types import CampaignStatus, TaskStatus
 
 logger = logging.getLogger(__name__)
 
-# The CLOSED action menu. "compile" enters the set with the compilation machinery (ADR-082);
-# keeping the schema aware of it early would let the model propose what nothing can apply.
-ALLOWED_ACTIONS = ("extend", "wind_down", "successor", "tune", "slot_change", "hold")
+# The CLOSED action menu (compile = ADR-082's best-of long-form build).
+ALLOWED_ACTIONS = ("extend", "wind_down", "successor", "tune", "slot_change", "compile", "hold")
 MAX_DECISIONS = 4
 EXTEND_CAP = 1.5                  # an extend may grow a campaign by at most +50%
 SLOT_CHANGE_COOLDOWN_DAYS = 7     # one applied slot change per campaign per week
@@ -213,6 +212,15 @@ def validate_decision(db, decision: CouncilDecision, pack: dict, pack_json: str)
     elif decision.action == "tune":
         if not p or not set(p) <= set(TUNE_KEYS):
             return f"tune params must be a subset of {TUNE_KEYS}"
+    elif decision.action == "compile":
+        from core.compilation import DEFAULT_TOP_N, MIN_EPISODES_TO_COMPILE
+
+        if camp["flops"]["measured_24h"] < MIN_EPISODES_TO_COMPILE:
+            return (f"compile needs ≥{MIN_EPISODES_TO_COMPILE} measured episodes "
+                    f"(has {camp['flops']['measured_24h']})")
+        top_n = p.get("top_n", DEFAULT_TOP_N)
+        if not isinstance(top_n, int) or not 4 <= top_n <= 20:
+            return f"compile top_n out of bounds (asked {top_n!r}, allowed 4-20)"
     elif decision.action == "slot_change":
         if not (_HHMM.match(str(p.get("from", ""))) and _HHMM.match(str(p.get("to", "")))):
             return "slot_change needs from/to as HH:MM"
