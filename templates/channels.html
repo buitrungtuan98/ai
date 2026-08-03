@@ -123,6 +123,23 @@
       {% endif %}
     </div>
     {% endif %}
+    {# ── Monetization scoreboard (ADR-080): distance to being PAID, in the platform's currency ── #}
+    {% set mz = monetize.get(c.id) %}
+    {% if mz %}
+    <details class="disclosure mt-sm">
+      <summary><span class="sum"><span class="sum-l">💰 Monetization</span><span class="sum-v">
+        {% if mz.eligible %}eligible — apply!{% else %}{{ mz.overall_pct }}%{% endif %}</span></span></summary>
+      <div class="disclosure-body">
+        <p class="hint">{{ mz.program }}. The autopilot announces 80% and 100% of each bar on its own.</p>
+        {% for r in mz.rows %}
+        <p class="meta" style="margin:0 0 2px">{{ r.label }} —
+          {% if r.have is not none %}{{ '{:,}'.format(r.have) }} / {{ '{:,}'.format(r.need) }}{% else %}not measured yet{% endif %}</p>
+        {{ ui.progress(r.pct or 0) }}
+        {% endfor %}
+        <p class="hint mt-sm">{{ mz.note }}</p>
+      </div>
+    </details>
+    {% endif %}
     <div class="row-actions">
       <a class="btn ghost sm" href="/campaigns?channel={{ c.id }}">Campaigns →</a>
       <a class="btn ghost sm" href="/assets?channel={{ c.id }}">Review →</a>

@@ -444,6 +444,43 @@ def send_daily_heartbeat(db, now: datetime | None = None) -> int:
     return sent
 
 
+def check_monetization_milestones(db) -> int:
+    """Announce each channel's newly-crossed monetization milestones (80% and 100% of each
+    threshold), once per level per metric (ADR-080). The announced levels live in
+    `autopilot_json["milestones"]`, so restarts and daily re-runs never re-fire them."""
+    from core import monetize
+
+    announced = 0
+    for channel in db.scalars(select(Channel)).all():
+        try:
+            progress = monetize.channel_progress(db, channel)
+        except Exception:  # noqa: BLE001 — a progress hiccup must not stop the daily pass
+            logger.warning("Monetization progress failed for channel %s", channel.id, exc_info=True)
+            continue
+        already = dict((channel.autopilot_json or {}).get("milestones") or {})
+        crossed = monetize.crossed_milestones(progress, already)
+        if not crossed:
+            continue
+        user = db.get(User, channel.user_id)
+        for key, level in crossed:
+            row = next(r for r in progress["rows"] if r["key"] == key)
+            done = level >= 100
+            summary = (f"{'Reached' if done else f'At {level}% of'} the “{row['label']}” threshold "
+                       f"for {progress['program']}: {row['have']:,} of {row['need']:,}."
+                       + (" Apply for the program in the platform's studio!"
+                          if done and progress.get("eligible") else ""))
+            _log_action(db, channel, "milestone", summary)
+            if user is not None and done:  # a crossed threshold is phone-worthy; 80% is inbox-only
+                video_worker._notify(user, f"💰 {channel.channel_name}: {summary}")
+            already[key] = max(int(already.get(key, 0)), level)
+            announced += 1
+        cfg = dict(channel.autopilot_json or {})
+        cfg["milestones"] = already
+        channel.autopilot_json = cfg
+        db.commit()
+    return announced
+
+
 def daily_learning_pass(db, now: datetime | None = None) -> dict:
     """Once-a-day: re-distill playbooks, check daily minimums, and send the operator heartbeat
     digest. Stats collection moved to its own hourly pass (`hourly_stats_pass`) so first-retention
@@ -454,6 +491,7 @@ def daily_learning_pass(db, now: datetime | None = None) -> dict:
             result["distilled"] += 1
     result["min_alerts"] = check_daily_minimums(db, now=now)
     result["heartbeats"] = send_daily_heartbeat(db, now=now)
+    result["milestones"] = check_monetization_milestones(db)
     return result
 
 

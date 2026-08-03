@@ -86,7 +86,7 @@ def fetch_youtube_stats(channel: Channel, video_ids: list[str]) -> dict[str, dic
         ids="channel==MINE",
         startDate="2020-01-01",
         endDate=datetime.utcnow().strftime("%Y-%m-%d"),
-        metrics="views,likes,averageViewedPercentage",
+        metrics="views,likes,averageViewedPercentage,estimatedMinutesWatched",
         dimensions="video",
         filters="video==" + ",".join(_capped(video_ids, MAX_STATS_IDS, "views/likes")),
         maxResults=MAX_STATS_IDS,
@@ -94,7 +94,11 @@ def fetch_youtube_stats(channel: Channel, video_ids: list[str]) -> dict[str, dic
     out: dict[str, dict] = {}
     for row in resp.get("rows", []) or []:
         vid, views, likes, avg_pct = row[0], row[1], row[2], row[3]
-        out[vid] = {"views": int(views), "likes": int(likes), "avg_pct_viewed": round(float(avg_pct), 1)}
+        out[vid] = {"views": int(views), "likes": int(likes),
+                    "avg_pct_viewed": round(float(avg_pct), 1)}
+        # Watched minutes — monetization's real currency (ADR-080); absent on very old API rows.
+        if len(row) > 4 and row[4] is not None:
+            out[vid]["minutes_watched"] = int(row[4])
     return out
 
 
@@ -174,7 +178,8 @@ def fetch_facebook_stats(channel: Channel, video_ids: list[str]) -> dict[str, di
     # ONE batched Graph call instead of one request per video (ADR-073). Fifty round trips every
     # stats pass was fifty chances to be rate-limited and fifty times the latency, for data that
     # arrives in a single response. Graph caps a batch at 50, which is the cap already applied above.
-    batch = [{"method": "GET", "relative_url": f"{vid}/video_insights/total_video_views"}
+    batch = [{"method": "GET",
+              "relative_url": f"{vid}/video_insights/total_video_views,total_video_view_total_time"}
              for vid in ids]
     try:
         resp = requests.post(GRAPH, data={"access_token": token, "batch": _json.dumps(batch)},
@@ -197,8 +202,14 @@ def fetch_facebook_stats(channel: Channel, video_ids: list[str]) -> dict[str, di
             continue
         try:
             rows = (_json.loads(item.get("body") or "{}") or {}).get("data", [])
-            views = rows[0]["values"][0]["value"] if rows else 0
-            out[vid] = {"views": int(views)}
+            entry: dict = {"views": 0}
+            for r in rows:
+                val = (r.get("values") or [{}])[0].get("value", 0)
+                if r.get("name") == "total_video_views":
+                    entry["views"] = int(val)
+                elif r.get("name") == "total_video_view_total_time":
+                    entry["minutes_watched"] = int(val) // 60000   # Graph reports milliseconds
+            out[vid] = entry
         except Exception:  # noqa: BLE001 — an unexpected shape for one video, not for all of them
             logger.warning("FB insights unreadable for video %s", vid)
     return out
@@ -480,6 +491,28 @@ def fetch_youtube_channel_totals(channel: Channel) -> dict | None:
     }
 
 
+def fetch_youtube_monetization_windows(channel: Channel) -> dict:
+    """{watch_minutes_365d, views_90d} — the exact trailing windows the YouTube Partner Program
+    thresholds are written in (4,000 watch-hours/365d; the Shorts route counts views/90d). Two tiny
+    channel-level Analytics queries, once per day per channel, riding the snapshot pass (ADR-080)."""
+    from googleapiclient.discovery import build
+
+    from services.youtube_service import build_credentials
+
+    creds = build_credentials(channel)
+    analytics = build("youtubeAnalytics", "v2", credentials=creds, cache_discovery=False)
+    end = datetime.utcnow().date()
+    out: dict = {}
+    for key, days, metric in (("watch_minutes_365d", 365, "estimatedMinutesWatched"),
+                              ("views_90d", 90, "views")):
+        resp = analytics.reports().query(
+            ids="channel==MINE", startDate=str(end - timedelta(days=days)), endDate=str(end),
+            metrics=metric).execute()
+        rows = resp.get("rows") or []
+        out[key] = int(rows[0][0]) if rows and rows[0] and rows[0][0] is not None else 0
+    return out
+
+
 def fetch_facebook_page_totals(channel: Channel) -> dict | None:
     """{subscribers (followers), views (None), videos (None)} for a Facebook Page, or None.
 
@@ -558,6 +591,11 @@ def collect_channel_snapshots(db, now: datetime | None = None) -> int:
             continue
         if not totals:
             continue
+        if channel.platform == Platform.youtube:
+            try:
+                totals.update(fetch_youtube_monetization_windows(channel))
+            except Exception:  # noqa: BLE001 — the windows are a bonus; the snapshot still lands
+                logger.warning("Monetization windows fetch failed for channel %s", channel.id)
         db.add(ChannelSnapshot(channel_id=channel.id, day=day, **totals))
         try:
             db.commit()

@@ -792,13 +792,19 @@ def test_insights_are_fetched_in_one_batch(monkeypatch, channel):
 
     def fake_post(url, **kw):
         posts.append(kw.get("data") or {})
-        return FakeResp(200, [{"code": 200, "body": json.dumps({"data": [{"values": [{"value": 12}]}]})},
-                              {"code": 200, "body": json.dumps({"data": [{"values": [{"value": 7}]}]})}])
+        return FakeResp(200, [
+            {"code": 200, "body": json.dumps({"data": [
+                {"name": "total_video_views", "values": [{"value": 12}]},
+                {"name": "total_video_view_total_time", "values": [{"value": 300000}]}]})},
+            {"code": 200, "body": json.dumps({"data": [
+                {"name": "total_video_views", "values": [{"value": 7}]}]})}])
 
     monkeypatch.setattr(requests, "post", fake_post)
     monkeypatch.setattr(requests, "get", lambda *a, **k: pytest.fail("should not fetch one by one"))
     out = analytics_service.fetch_facebook_stats(channel, ["v1", "v2"])
-    assert out == {"v1": {"views": 12}, "v2": {"views": 7}}
+    # Views + watched minutes (Graph reports milliseconds — 300,000ms = 5min); a video the API
+    # returns no view-time row for simply lacks the key, it is never invented.
+    assert out == {"v1": {"views": 12, "minutes_watched": 5}, "v2": {"views": 7}}
     assert len(posts) == 1 and "batch" in posts[0]
 
 
@@ -810,7 +816,8 @@ def test_one_unreadable_video_does_not_discard_the_others(monkeypatch, channel):
     channel.encrypted_credentials = json.dumps({"page_id": "P", "page_access_token": "tok"})
     monkeypatch.setattr(requests, "post", lambda *a, **k: FakeResp(200, [
         {"code": 400, "body": json.dumps({"error": {"message": "no access"}})},
-        {"code": 200, "body": json.dumps({"data": [{"values": [{"value": 5}]}]})},
+        {"code": 200, "body": json.dumps({"data": [
+            {"name": "total_video_views", "values": [{"value": 5}]}]})},
     ]))
     assert analytics_service.fetch_facebook_stats(channel, ["bad", "good"]) == {"good": {"views": 5}}
 

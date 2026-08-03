@@ -85,6 +85,10 @@ _COLUMN_UPGRADES: dict[str, dict[str, str]] = {
     "buffer_pool": {
         "publish_at": "DATETIME",  # per-episode publish-time override (ADR-059)
     },
+    "channel_snapshots": {
+        "watch_minutes_365d": "INTEGER",  # YPP's real currency (ADR-080)
+        "views_90d": "INTEGER",
+    },
     "channels": {
         "autopilot_json": "TEXT",
         "profile_json": "TEXT",

@@ -299,6 +299,11 @@ class ChannelSnapshot(Base):
     subscribers: Mapped[int | None] = mapped_column(Integer)   # None where a platform hides it
     views: Mapped[int | None] = mapped_column(Integer)
     videos: Mapped[int | None] = mapped_column(Integer)
+    # Monetization currencies (ADR-080). YouTube pays thresholds in WATCH TIME, not views — the
+    # trailing-365d watched minutes (YPP asks 4,000 hours) and trailing-90d views, straight from the
+    # Analytics API. None on platforms that don't report them (Facebook) — never approximated.
+    watch_minutes_365d: Mapped[int | None] = mapped_column(Integer)
+    views_90d: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

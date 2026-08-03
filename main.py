@@ -42,7 +42,7 @@ from auth.dependencies import (
     get_owned_campaign,
     get_owned_channel,
 )
-from core import autopilot, failure, retention, timezones
+from core import autopilot, failure, monetize, retention, timezones
 from core.config import settings
 from core.tts import QUOTE_VOICES, VOICE_CHOICES
 from core.video_factory import COLOR_GRADE_CHOICES
@@ -782,6 +782,8 @@ def channels_page(request: Request, user: CurrentUser, db: DbDep, status: str = 
          "ap": {c.id: (c.autopilot_json or {}) for c in channels},
          # Growth series per channel (ADR-063): does publishing this much actually move subs/views?
          "growth": {c.id: analytics_service.channel_growth(db, c.id) for c in channels},
+         # Monetization scoreboard (ADR-080): how far from being PAID, in the platform's currency.
+         "monetize": {c.id: monetize.channel_progress(db, c) for c in channels},
          "characters": {c.id: _sanitize_characters(c.characters_json) for c in channels},
          "flash": flash if flash in ("profile", "autopilot", "character", "char_img_ok",
                                      "char_img_fail", "no_google_client", "fb_added",
