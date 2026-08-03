@@ -1901,7 +1901,8 @@ def settings_page(request: Request, user: CurrentUser):
 def save_settings(user: CurrentUser, db: DbDep, language: str = Form(""),
                   video_format: str = Form(""), publish_mode: str = Form(""),
                   posting_slots: str = Form(""), total_episodes: str = Form(""),
-                  ai_daily_budget: str = Form(""), image_timeout_s: str = Form("")):
+                  ai_daily_budget: str = Form(""), image_timeout_s: str = Form(""),
+                  slop_blacklist: str = Form("")):
     """Save the whole preferences form (a blank field clears that default — the form always submits
     every field). Values are whitelisted/validated exactly like the campaign form does."""
 
@@ -1911,6 +1912,10 @@ def save_settings(user: CurrentUser, db: DbDep, language: str = Form(""),
     # budget in one attempt.
     if image_timeout_s.strip().isdigit():
         s["image_timeout_s"] = min(600, max(30, int(image_timeout_s)))
+    # Operator additions to the script-gate cliché list (ADR-079) — one phrase per line, merged with
+    # the defaults at check time (never replaces them). Bounded so the prompt/scan stays cheap.
+    if slop_blacklist.strip():
+        s["slop_blacklist"] = "\n".join(slop_blacklist.splitlines()[:50])[:2000]
     if language in _SETTINGS_LANGS:
         s["language"] = language
     if video_format in ("short", "long"):

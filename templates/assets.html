@@ -63,6 +63,11 @@
     {% if qc %}
     <p class="hint">{% if qc.get('passed') %}🟢 Auto-QC passed{% else %}🔴 Auto-QC FAILED{% endif %}{% if qc.get('score') is not none %} · score {{ qc.get('score') }}/10{% endif %}{% if qc.get('attempts', 1) > 1 %} · {{ qc.get('attempts') }} attempts{% endif %}{% if qc.get('issues') %} · {{ qc.get('issues')|join('; ') }}{% endif %}</p>
     {% endif %}
+    {% if i.metadata_json.get('slop_warnings') %}
+    {# Warn-level findings from the pre-render script gate (ADR-079) — the render went ahead, but
+       the reviewer should see what the gate noticed while deciding. #}
+    <p class="hint">✍️ Script gate: {{ i.metadata_json.get('slop_warnings')|join('; ') }}</p>
+    {% endif %}
 
     {% if i.status.value == 'ready' %}
     <div class="row-actions mt">

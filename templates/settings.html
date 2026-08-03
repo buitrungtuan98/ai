@@ -72,6 +72,17 @@
         server-side, and an interrupted render keeps the scenes it already drew — a Retry resumes
         from them instead of starting over.</p>
     </div>
+
+    <div class="card mt">
+      <h3>Script quality gate</h3>
+      <p class="subtitle">Every new script is checked <b>before</b> rendering: near-repeats of a
+        previous episode and duplicate titles are rejected (one regenerate, then it asks you);
+        generic filler and a rambling hook are flagged into review. Zero AI cost — pure text checks.</p>
+      {% call ui.field('Extra banned phrases (one per line)', hint='Merged with the built-in Vietnamese + English filler list — add the clichés your niche suffers from. Matching ignores case and diacritics.', for_id='set-slop') %}
+      <textarea name="slop_blacklist" id="set-slop" rows="4"
+                placeholder="hãy cùng tìm hiểu&#10;in this video">{{ s.get('slop_blacklist') or '' }}</textarea>
+      {% endcall %}
+    </div>
   </div>
 </div>
 

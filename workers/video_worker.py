@@ -19,7 +19,7 @@ from functools import partial
 
 from sqlalchemy import func, select
 
-from core import video_factory
+from core import slop_gate, video_factory
 from core import vibe as vibe_mod
 from core.ai_engine import VideoScript, generate_image, generate_script
 from core.config import settings
@@ -356,6 +356,29 @@ def apply_approve(db, item) -> None:
     enqueue_publish(item.id)
 
 
+def _recent_fingerprints(db, campaign, before_episode: int) -> list[dict]:
+    """The narration/title fingerprints of this campaign's most recent episodes (ADR-079) — what a
+    new script is judged against. Reads the persisted fingerprint of finished episodes AND the saved
+    script of in-flight ones; episodes from before the fingerprint existed simply contribute
+    nothing, which narrows the check rather than failing it."""
+    rows = db.execute(
+        select(Task.episode_number, Task.render_json)
+        .where(Task.campaign_id == campaign.id, Task.render_json.isnot(None),
+               Task.episode_number < before_episode)
+        .order_by(Task.episode_number.desc()).limit(slop_gate.RECENT_EPISODES)).all()
+    out: list[dict] = []
+    for ep, rj in rows:
+        rj = rj or {}
+        if rj.get("narration"):
+            out.append({"episode": ep, "narration": rj["narration"], "title": rj.get("title", "")})
+        elif isinstance(rj.get("script"), dict):   # in-flight checkpoint — still a real episode
+            sc = rj["script"]
+            out.append({"episode": ep,
+                        "narration": " ".join(s.get("narration", "") for s in sc.get("scenes", [])),
+                        "title": ((sc.get("metadata_variations") or [{}])[0]).get("title", "")})
+    return out
+
+
 def drop_script_checkpoint(task) -> None:
     """Forget a persisted resume script (ADR-069). Called wherever the operator's intent is a
     REROLL — reject, discard & re-render — because those exist precisely to get different content;
@@ -633,35 +656,60 @@ def render_task(task_id: int) -> None:
                 logger.info("Task %s: resuming with the script from the interrupted attempt", task.id)
             except Exception:  # noqa: BLE001 — an unreadable checkpoint just regenerates
                 logger.warning("Task %s: persisted script did not validate — regenerating", task.id)
+        slop_warnings: list[str] = []
         if script is None:
-            script = generate_script(
-                topic=campaign.topic_name,
-                language=cfg.get("language", "en"),
-                total_episodes=campaign.total_episodes,
-                episode=task.episode_number,
-                api_key=gemini_key,
-                content_style=content_style,
-                vibe=vibe,
-                custom_system_prompt=cfg.get("system_prompt"),
-                persona=cfg.get("persona"),
-                style_examples=cfg.get("style_examples"),
-                # Per-campaign on/off: the text stays saved, but only applied when its flag is on
-                # (default on for pre-flag campaigns — unchanged behaviour).
-                catchphrase_open=(cfg.get("catchphrase_open") if cfg.get("catchphrase_open_on", True) else None),
-                catchphrase_close=(cfg.get("catchphrase_close") if cfg.get("catchphrase_close_on", True) else None),
-                continuity=cfg.get("continuity", "none"),
-                previous_synopses=previous,
-                playbook=learning.get("playbook"),
-                best_examples=learning.get("best_examples"),
-                avoid=learning.get("reject_reasons"),
-                self_critique=cfg.get("self_critique", "on") != "off",
-                duration_min_s=cfg.get("duration_min_s"),
-                duration_max_s=cfg.get("duration_max_s"),
-                rate_pct=rate_pct,
-                script_depth=cfg.get("script_depth", "standard"),
-                video_format=cfg.get("video_format", "short"),
-                model=gemini_model,
-            )
+            # The pre-render quality gate (ADR-079). A blocked script regenerates ONCE with the
+            # gate's issues as explicit avoid-notes; a second block fails the task honestly — a
+            # script the gate rejects twice needs the operator (or a different topic), not a render.
+            recent = _recent_fingerprints(db, campaign, task.episode_number)
+            cliches = slop_gate.merged_cliches((user.settings_json or {}).get("slop_blacklist"))
+            avoid_notes = list(learning.get("reject_reasons") or []) + \
+                list((learning.get("flop_notes") or []))
+            gate = None
+            for _gen_attempt in (1, 2):
+                script = generate_script(
+                    topic=campaign.topic_name,
+                    language=cfg.get("language", "en"),
+                    total_episodes=campaign.total_episodes,
+                    episode=task.episode_number,
+                    api_key=gemini_key,
+                    content_style=content_style,
+                    vibe=vibe,
+                    custom_system_prompt=cfg.get("system_prompt"),
+                    persona=cfg.get("persona"),
+                    style_examples=cfg.get("style_examples"),
+                    # Per-campaign on/off: the text stays saved, but only applied when its flag is on
+                    # (default on for pre-flag campaigns — unchanged behaviour).
+                    catchphrase_open=(cfg.get("catchphrase_open") if cfg.get("catchphrase_open_on", True) else None),
+                    catchphrase_close=(cfg.get("catchphrase_close") if cfg.get("catchphrase_close_on", True) else None),
+                    continuity=cfg.get("continuity", "none"),
+                    previous_synopses=previous,
+                    playbook=learning.get("playbook"),
+                    best_examples=learning.get("best_examples"),
+                    avoid=avoid_notes or None,
+                    self_critique=cfg.get("self_critique", "on") != "off",
+                    duration_min_s=cfg.get("duration_min_s"),
+                    duration_max_s=cfg.get("duration_max_s"),
+                    rate_pct=rate_pct,
+                    script_depth=cfg.get("script_depth", "standard"),
+                    video_format=cfg.get("video_format", "short"),
+                    model=gemini_model,
+                )
+                fp = slop_gate.script_fingerprint(script)
+                gate = slop_gate.check_script(fp["narration"], fp["title"], recent=recent,
+                                              cliches=cliches, content_style=content_style)
+                if not gate.blocked:
+                    break
+                logger.info("Task %s: script blocked by the quality gate (%s) — regenerating once",
+                            task.id, "; ".join(gate.issues))
+                avoid_notes = avoid_notes + [f"your previous draft was rejected: {i}"
+                                             for i in gate.issues]
+            if gate is not None and gate.blocked:
+                # Deliberately NOT persisted as a checkpoint: a Retry must write a fresh script,
+                # not faithfully resume the one the gate just refused twice.
+                raise RuntimeError("Script failed the quality gate twice: "
+                                   + "; ".join(gate.issues))
+            slop_warnings = gate.issues if gate is not None else []
             # Persist the script the moment it exists (ADR-069): if the render dies mid-way, the
             # retry rebuilds THIS episode instead of paying for a new script — and only a matching
             # script lets the checkpointed stills be reused. The success path overwrites render_json
@@ -762,12 +810,19 @@ def render_task(task_id: int) -> None:
         # finished_at−started_at, which for slot-scheduled episodes wrongly counts the wait-for-slot.
         render_seconds = (int((datetime.utcnow() - task.started_at).total_seconds())
                           if task.started_at else None)
+        # This write deliberately CONSUMES the resume checkpoint (the "script" key). The gate
+        # fingerprint survives it: future episodes compare their narration/title against these
+        # (ADR-079) — without it, every completed episode is invisible to the slop gate.
         task.render_json = {"scenes": result.scene_map, "duration": result.duration,
-                            "render_seconds": render_seconds}
+                            "render_seconds": render_seconds, **slop_gate.script_fingerprint(script)}
         _set_status(db, task, TaskStatus.AUDIO_SYNCED, 88)
 
         # Carry distribution settings into the stored metadata so the publish step (now or after
         # review) has everything it needs.
+        if slop_warnings:
+            # Warn-level gate findings ride into review (ADR-079): the render went ahead, but the
+            # reviewer — human or autopilot hint — sees what the gate noticed, on the card.
+            result.metadata["slop_warnings"] = slop_warnings[:6]
         result.metadata.setdefault("cta", cfg.get("cta"))
         result.metadata.setdefault("privacy", cfg.get("privacy", "public"))
         # Carry the language so the upload can declare it (defaultAudioLanguage / defaultLanguage) —
