@@ -15,6 +15,10 @@
 {% call ui.banner() %}🗑 <b>Rejected.</b> The render was deleted{% if flash_reason %} and the AI was told to avoid: “{{ flash_reason }}”{% endif %}.{% endcall %}
 {% elif flash == 'missing' %}
 {% call ui.banner('danger') %}⚠️ <b>The video file is no longer on disk</b>, so it can't be published. Use <b>Re-render</b> below to produce it again.{% endcall %}
+{% elif flash == 'review' %}
+{% call ui.banner('success') %}👁 <b>This episode is already rendered</b> — nothing to retry. Review it below and Approve &amp; publish when it looks right.{% endcall %}
+{% elif flash == 'published' %}
+{% call ui.banner('success') %}✅ <b>This episode had already published</b> — the retry was skipped so it isn't posted twice. Its status is corrected below.{% endcall %}
 {% endif %}
 
 {% call ui.page_head(ep_label ~ ' · ' ~ (campaign.topic_name if campaign else ''), (task.synopsis or '')) %}
@@ -23,11 +27,24 @@
 
 {# ── Lifecycle timeline — where this episode is in its journey ── #}
 <div class="card">
-  <div class="card-head"><h3>Lifecycle</h3>{{ ui.pill(task.status.value, task.status.value.replace('_',' ')|title) }}</div>
+  <div class="card-head"><h3>Lifecycle</h3>{{ ui.pill(task.status.value, status_to_stage.get(task.status.value, task.status.value.replace('_',' ')|title)|title) }}</div>
   {% if failed %}
   {# A failure names its likely cause and what to do about it, not just the exception text — retrying
      is the wrong move for a spent quota, a rejected key or a full disk (ADR-068). #}
   <div class="loop-note mt-sm" style="border-color:var(--st-failed-bd);background:var(--st-failed-bg)">
+    {% if render_survived %}
+    {# The render finished — only a later step (status bookkeeping, upload) failed (R22). Without
+       this branch the page showed "the render was abandoned … retry" above a finished QC-passed
+       video whose actions were Approve/Publish — the incident's exact contradiction. #}
+    ⛔ <b>A later step failed after this render finished.</b>
+    The video below is complete and playable — no re-render is needed.
+    {% if buffer.status.value == 'awaiting_review' %}Review it and use <b>Approve &amp; publish</b>; that retries only the publish step.{% else %}Use <b>Publish now</b> to retry only the upload.{% endif %}
+    <b>Re-render / Reject</b> below still discard it if the video itself is wrong.
+    {% if task.error_message %}
+    <details class="mt-sm"><summary class="hint">What the failed step reported</summary>
+      <p class="meta mono-wrap">{{ task.error_message }}</p></details>
+    {% endif %}
+    {% else %}
     ⛔ <b>Failed{% if diagnosis %} — {{ diagnosis.cause }}{% endif %}.</b>
     {% if diagnosis %}{{ diagnosis.fix }}{% else %}{{ task.error_message or 'This episode failed to render, and it recorded no reason. The worker log has the detail.' }}{% endif %}
     {% if diagnosis and diagnosis.action %}<a href="{{ diagnosis.href }}">{{ diagnosis.action }} →</a>{% endif %}
@@ -35,6 +52,14 @@
     <details class="mt-sm"><summary class="hint">What the render reported</summary>
       <p class="meta mono-wrap">{{ task.error_message }}</p></details>
     {% endif %}
+    {% endif %}
+    {% if will_auto_publish %}
+    <p class="mt-sm">📅 <b>Heads up:</b> this rendered video is still queued for the campaign's next posting slot — it publishes on its own unless you discard it.</p>
+    {% endif %}
+  </div>
+  {% elif cancelled %}
+  <div class="loop-note mt-sm">
+    ⏸ <b>Cancelled.</b> {{ task.error_message or 'Cancelled by the operator. Use Retry below to queue it again.' }}
   </div>
   {% else %}
   {% set complete = task.status.value == 'COMPLETED' %}
@@ -50,7 +75,11 @@
     {% if task.ab_variant %}Variant {{ task.ab_variant }} · {% endif %}
     {% if task.retry_count %}{{ task.retry_count }} retr{{ 'y' if task.retry_count == 1 else 'ies' }} · {% endif %}
     {% if task.started_at %}started {{ task.started_at.strftime('%Y-%m-%d %H:%M') }} UTC{% endif %}
-    {% if task.finished_at %} · finished {{ task.finished_at.strftime('%H:%M') }} UTC{% endif %}
+    {# Full date on both ends (R22): render-day-1 + publish-fail-day-2 used to read
+       "started 08-01 13:02 · finished 09:14" — apparently finishing before it started. #}
+    {% if task.finished_at %} · finished {{ task.finished_at.strftime('%Y-%m-%d %H:%M') }} UTC{% endif %}
+    {% set rsec = (task.render_json or {}).get('render_seconds') %}
+    {% if rsec %} · render took {{ (rsec // 60)|int }}m{% endif %}
   </p>
   {# ── Decision journey (ADR-084): every judgment the machine made about this render, in order —
        gate, judge, QC per attempt — so "why did this park/publish?" is answerable from this page. #}
@@ -104,6 +133,9 @@
       {% endif %}
 
       {# ── Stage-aware actions (post to the shared asset/task routes, return here) ── #}
+      {% if buffer and cancelled and buffer.status.value in ('awaiting_review', 'ready') %}
+      <p class="hint mt">⏸ This episode was cancelled; the render below still exists.</p>
+      {% endif %}
       {% if buffer and buffer.status.value == 'awaiting_review' %}
       <div class="row-actions mt">
         <form method="post" action="/assets/{{ buffer.id }}/approve">
@@ -133,7 +165,9 @@
           <input type="hidden" name="return_to" value="/episodes/{{ task.id }}">
           <button class="btn danger sm" type="submit">🗑 Discard &amp; re-render</button></form>
       </div>
-      {% elif failed %}
+      {% elif failed or cancelled %}
+      {# CANCELLED is retryable by design (ADR-064) — every other surface says "Use Retry", so the
+         one page that can carry the button must actually render it (R22). #}
       <form method="post" action="/api/tasks/{{ task.id }}/retry" class="mt">
         <input type="hidden" name="return_to" value="/episodes/{{ task.id }}">
         <button class="btn sm" type="submit">↻ Retry</button>

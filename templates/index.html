@@ -254,8 +254,19 @@
         window.ui.busyButton(btn, "↻ Retrying…", function () {
           return fetch("/api/tasks/" + id + "/retry", { method: "POST" })
             .then(function (r) { if (!r.ok) throw new Error(); return r.json(); })
-            .then(function () {
-              window.ui.toast("Retry queued.", "success");
+            .then(function (d) {
+              // Say what the server actually did (R22): "Retry queued." over a publish told the
+              // operator a render was re-queued while an upload was already on its way.
+              if (d.mode === "review") {
+                window.ui.toast("The video is already rendered — it's waiting for your review.", "success");
+                if (d.href) { window.location.href = d.href; return; }
+              } else if (d.mode === "publish") {
+                window.ui.toast("Upload retry queued — the rendered video publishes to the channel (no re-render).", "success");
+              } else if (d.mode === "published") {
+                window.ui.toast("Already published — status corrected, nothing re-posted.", "success");
+              } else {
+                window.ui.toast("Re-render queued.", "success");
+              }
               var li = f.closest("li"); if (li) li.remove();
               if (!document.querySelectorAll("#triage-list li").length) {
                 var tc = document.getElementById("triage-card"), ac = document.getElementById("allclear-card");

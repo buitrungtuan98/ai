@@ -38,11 +38,23 @@ def _die(code: int = 1) -> None:
 
 def fail_stalled_task(db, task_id: int, stalled_seconds: float) -> bool:
     """Mark a wedged render FAILED so it is retryable the moment the worker comes back. Returns
-    False when the row is gone or already finished (nothing to do)."""
+    False when the row is gone, already finished, or its work turns out to be done (nothing to do).
+
+    PUBLISHING is deliberately NOT failable here (R22): publish jobs carry no live progress entry
+    (their kill authority is their own RQ job timeout), and calling a killed upload "Render
+    stalled … Use Retry to render again" told the operator to re-render a finished video."""
     task = db.get(Task, task_id)
     if task is None or task.status not in (
-        TaskStatus.AI_GENERATION, TaskStatus.RENDERING, TaskStatus.AUDIO_SYNCED, TaskStatus.PUBLISHING
+        TaskStatus.AI_GENERATION, TaskStatus.RENDERING, TaskStatus.AUDIO_SYNCED
     ):
+        return False
+    # The render may have finished and committed its evidence (buffer row / publish id) before the
+    # wedge — a crash between that commit and the status commit is a real window (R22). Failing it
+    # would put a Failed banner over a finished video; repair the status instead.
+    from workers.reconcile import reconcile_task_outcome
+
+    if reconcile_task_outcome(db, task) is not None:
+        db.commit()
         return False
     minutes = int(stalled_seconds // 60)
     task.status = TaskStatus.FAILED
@@ -87,7 +99,7 @@ def check_once(db=None, *, exit_fn=_die) -> str | None:
         # immediately instead of waiting out the lock TTL.
         task_queue.clear_progress(task_id)
         try:
-            task_queue.conn.delete(task_queue.LOCK_KEY)
+            task_queue.probe_conn.delete(task_queue.LOCK_KEY)  # bounded — never hang the recovery
         except Exception:  # noqa: BLE001
             logger.debug("could not release the render lock", exc_info=True)
         exit_fn(1)

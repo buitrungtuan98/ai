@@ -239,6 +239,11 @@ class BufferPoolItem(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # When this item became publishable (`ready`) — stamped at creation for auto-publish renders and
+    # at approval for reviewed ones. The expiry sweep ages ready items from THIS, not created_at:
+    # days spent awaiting review used to count against the 72h budget, so approving an old-enough
+    # episode handed it straight to the expirer (R22). Nullable: pre-R22 rows fall back to created_at.
+    ready_at: Mapped[datetime | None] = mapped_column(DateTime)
     # Operator override for THIS episode's publish time (naive UTC, like every timestamp here).
     # Set from the Operations page to dodge another channel's peak hour without moving the whole
     # campaign's slots; when set it replaces the slot schedule for this item only (ADR-059).

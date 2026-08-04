@@ -167,8 +167,8 @@ def test_completed_upload_is_adopted(session, user, monkeypatch):
 
 
 # ── X3: the autopilot retries the step that failed, not the whole render ─────
-def test_autopilot_retries_the_upload_when_the_video_already_exists(session, user, channel,
-                                                                    monkeypatch, tmp_path):
+def test_autopilot_retries_the_upload_when_the_approved_video_exists(session, user, channel,
+                                                                     monkeypatch, tmp_path):
     from database.models import BufferPoolItem, Task
     from database.types import BufferStatus, TaskStatus
     from workers import scheduler, task_queue
@@ -180,19 +180,56 @@ def test_autopilot_retries_the_upload_when_the_video_already_exists(session, use
              finished_at=datetime.utcnow(),
              error_message="Facebook upload failed: connection timed out")
     session.add(t)
+    # `ready` = approved: only an approved file may be re-published without a human (R22).
     session.add(BufferPoolItem(campaign_id=cam.id, channel_id=channel.id, episode_number=1,
-                               video_path=str(video), status=BufferStatus.awaiting_review,
+                               video_path=str(video), status=BufferStatus.ready,
                                metadata_json={"title": "T"}))
     session.commit()
 
     publishes, renders = [], []
-    monkeypatch.setattr(task_queue, "enqueue_publish", lambda bid: publishes.append(bid))
+    monkeypatch.setattr(task_queue, "enqueue_publish", lambda bid: publishes.append(bid) or "pj")
     from workers import video_worker
 
     monkeypatch.setattr(video_worker, "enqueue_task", lambda t: renders.append(t.id) or "job")
     assert scheduler.autopilot_retry_channel(session, channel) == 1
     assert publishes and not renders                      # publish only — no wasted re-render
     assert video.exists()                                  # the good file was never touched
+    session.refresh(t)
+    assert t.status == TaskStatus.SCHEDULED               # not PENDING_QUEUE: it is not a render job
+
+
+def test_autopilot_never_publishes_an_unreviewed_video(session, user, channel,
+                                                       monkeypatch, tmp_path):
+    """The compounding R22 incident bug: a crash-marked-FAILED task with its finished video still
+    parked `awaiting_review` used to take the publish fast-path — uploading a video that failed QC
+    or that a review-first campaign explicitly gates, with zero sign-off. The honest repair is to
+    put the episode back in the review queue and touch nothing."""
+    from database.models import BufferPoolItem, Task
+    from database.types import BufferStatus, TaskStatus
+    from workers import scheduler, task_queue, video_worker
+
+    cam = _mk_campaign(session, user, channel)
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"x")
+    t = Task(campaign_id=cam.id, user_id=user.id, episode_number=1, status=TaskStatus.FAILED,
+             finished_at=datetime.utcnow(),
+             error_message="The worker restarted while this episode was in flight (operator "
+                           "restart, redeploy or a crash), so the render was abandoned.")
+    session.add(t)
+    session.add(BufferPoolItem(campaign_id=cam.id, channel_id=channel.id, episode_number=1,
+                               video_path=str(video), status=BufferStatus.awaiting_review,
+                               metadata_json={"title": "T", "qc": {"score": 3, "passed": False}}))
+    session.commit()
+
+    publishes, renders = [], []
+    monkeypatch.setattr(task_queue, "enqueue_publish", lambda bid: publishes.append(bid) or "pj")
+    monkeypatch.setattr(video_worker, "enqueue_task", lambda t: renders.append(t.id) or "job")
+    scheduler.autopilot_retry_channel(session, channel)
+    assert not publishes and not renders                  # nothing uploaded, nothing re-rendered
+    session.refresh(t)
+    assert t.status == TaskStatus.AWAITING_REVIEW         # restored to the review queue
+    assert t.error_message is None
+    assert video.exists()
 
 
 def test_autopilot_still_rerenders_when_no_file_survives(session, user, channel, monkeypatch):

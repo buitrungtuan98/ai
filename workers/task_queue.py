@@ -33,13 +33,21 @@ RESTART_KEY = "worker:restart-requested"  # operator-requested clean worker exit
 # redis-py connects lazily; importing this module does not require a live server (tests inject
 # a fake connection via `set_connection`).
 conn: redis.Redis = redis.from_url(settings.REDIS_URL)
+# The watchdog's own bounded connection (R22). The main connection deliberately has NO socket
+# timeout (RQ's dequeue BLPOP holds it open for minutes) — but that means a wedged-not-crashed
+# Redis blocks forever, and the watchdog reading through the same pool would hang alongside the
+# worker it exists to recover. Probe reads go through this one instead, so they raise instead
+# of hanging and the stall check stays alive no matter what.
+probe_conn: redis.Redis = redis.from_url(settings.REDIS_URL, socket_timeout=10,
+                                         socket_connect_timeout=5)
 render_queue = Queue(QUEUE_NAME, connection=conn)
 
 
 def set_connection(new_conn: redis.Redis) -> None:
     """Swap the Redis connection (used by tests with fakeredis)."""
-    global conn, render_queue
+    global conn, probe_conn, render_queue
     conn = new_conn
+    probe_conn = new_conn
     render_queue = Queue(QUEUE_NAME, connection=conn)
 
 
@@ -156,10 +164,10 @@ def stalled_render(now: float | None = None) -> tuple[int, float] | None:
     Fail-open by construction: a progress entry written before this build carries no change-stamp
     and is skipped rather than treated as stalled (a mid-deploy render is never killed)."""
     try:
-        live = conn.hgetall(_PROGRESS_KEY)
+        live = probe_conn.hgetall(_PROGRESS_KEY)
         if not live:
             return None
-        stamps = conn.hgetall(_PROGRESS_TS_KEY)
+        stamps = probe_conn.hgetall(_PROGRESS_TS_KEY)
         now = time.time() if now is None else now
         limit, worst = stall_limit_seconds(), None
         for field in live:
@@ -229,6 +237,16 @@ def queued_jobs() -> list[dict]:
                     "arg": job.args[0] if job.args else None,
                     "enqueued_at": job.enqueued_at})
     return out
+
+
+def queued_publish_buffer_ids() -> set[int]:
+    """Buffer ids with a publish job waiting in the queue. The expiry sweep and the stranded-publish
+    reconciler both need "is an upload already on its way?" — answered here so neither invents its
+    own queue scan. Fails open to the empty set (a broken queue read must not break housekeeping)."""
+    try:
+        return {j["arg"] for j in queued_jobs() if j["kind"] == "publish" and j["arg"] is not None}
+    except Exception:  # noqa: BLE001
+        return set()
 
 
 def move_job_to_front(job_id: str) -> bool:
@@ -316,7 +334,7 @@ def request_worker_restart(ttl_seconds: int = 300) -> None:
 
 def restart_requested() -> bool:
     try:
-        return conn.get(RESTART_KEY) is not None
+        return probe_conn.get(RESTART_KEY) is not None
     except Exception:  # noqa: BLE001 — never let the watchdog raise
         return False
 

@@ -19,7 +19,7 @@ from functools import partial
 
 from sqlalchemy import func, select
 
-from core import slop_gate, video_factory
+from core import failure, slop_gate, video_factory
 from core import vibe as vibe_mod
 from core.ai_engine import VideoScript, generate_image, generate_script
 from core.config import settings
@@ -80,6 +80,14 @@ def _set_status(db, task: Task, status: TaskStatus, pct: float) -> None:
     task.progress_pct = int(pct)
     db.commit()
     set_progress(task.id, pct)
+
+
+def _append_journey(task: Task, step: str, note: str) -> None:
+    """Add one entry to the episode's decision journey (ADR-084). Reassigns the JSON column — an
+    in-place mutation would not persist. Caller commits."""
+    rj = dict(task.render_json or {})
+    rj["journey"] = ((rj.get("journey") or []) + [{"step": step, "note": note[:200]}])[-12:]
+    task.render_json = rj
 
 
 def _cast_with_ref_urls(characters) -> list[dict] | None:
@@ -169,15 +177,24 @@ def advance_campaign(db, campaign: Campaign) -> AdvanceEvents:
     and the next Pending campaign for the same user is auto-activated.
     """
     events = AdvanceEvents()
-    campaign.current_episode += 1
+    # Clamp at the total (R22): a manual Retry of a dead episode on an already-completed campaign
+    # publishes late, and without the clamp each one drifted current_episode past total_episodes
+    # and re-entered the completion branch — re-notifying "Finished!" and activating one MORE
+    # pending campaign per retry.
+    advanced = campaign.current_episode + 1
+    campaign.current_episode = min(advanced, campaign.total_episodes) \
+        if campaign.total_episodes else advanced
     # current_episode counts episodes published (starts at 0). The campaign is done once that count
     # REACHES total_episodes — `>` never fires (only N episodes ever publish, so it stops at N == N)
     # and the campaign would sit "active" at N/N forever, never completing or activating the next.
     if campaign.current_episode >= campaign.total_episodes:
+        already_completed = campaign.status == CampaignStatus.completed
         campaign.status = CampaignStatus.completed
         db.commit()
-        events.completed = True
-        nxt = db.scalar(
+        events.completed = not already_completed
+        # Activate the next pending campaign only on the TRANSITION into completed — a late
+        # publish on a finished campaign must not start yet another queued-up future campaign.
+        nxt = None if already_completed else db.scalar(
             select(Campaign)
             .where(Campaign.user_id == campaign.user_id, Campaign.status == CampaignStatus.pending)
             .order_by(Campaign.id)
@@ -355,6 +372,16 @@ def _safe_remove(*paths: str) -> None:
 
 
 # ── Shared review actions (used by the manual Review page AND the autopilot reviewer) ──
+class ReviewConflict(RuntimeError):
+    """Approving now would act on stale or missing evidence — the caller must surface it, not
+    approve anyway (a silent approve of a vanished file or of an episode mid-re-render published
+    the wrong thing or nothing, R22)."""
+
+
+_WORKING_TASK_STATUSES = (TaskStatus.PENDING_QUEUE, TaskStatus.AI_GENERATION,
+                          TaskStatus.AUDIO_SYNCED, TaskStatus.RENDERING, TaskStatus.PUBLISHING)
+
+
 def apply_approve(db, item) -> None:
     """Approve a review render: it leaves the review queue immediately and its publish job is queued.
     DRY: the /assets approve route and `core.autopilot`'s reviewer both go through here.
@@ -364,13 +391,33 @@ def apply_approve(db, item) -> None:
     `awaiting_review` until the upload finished made one episode read as "approved" and "still waiting
     for review" at the same time, and invited a second approve click. The Task moves to SCHEDULED, not
     PENDING_QUEUE: it is rendered and waiting to go out, and calling it "queued" both mislabelled the
-    stage and inflated the render-queue count with something that was never a render job."""
-    item.status = BufferStatus.ready
+    stage and inflated the render-queue count with something that was never a render job.
+
+    Raises ReviewConflict instead of approving blind (R22): a vanished file cannot publish, and an
+    episode whose task is mid-render/publish is being changed under this row's feet — the finishing
+    job would delete the row this approve just queued."""
+    if not (item.video_path and os.path.exists(item.video_path)):
+        raise ReviewConflict("The video file is no longer on disk — re-render it instead.")
     task = db.scalar(select(Task).where(
         Task.campaign_id == item.campaign_id, Task.episode_number == item.episode_number))
+    if task is not None and task.status in _WORKING_TASK_STATUSES:
+        raise ReviewConflict("A render or publish for this episode is already in flight — "
+                             "let it finish first.")
+    now = datetime.utcnow()
+    item.status = BufferStatus.ready
+    item.ready_at = now  # the expiry sweep ages a reviewed item from its approval, not its render
+    # Durable publish intent (R22): the enqueue below can be lost (crash/redeploy between commit and
+    # enqueue, Redis flush) — this marker lets the hourly reconciler re-issue the job instead of the
+    # approved episode silently aging out in SCHEDULED.
+    item.metadata_json = {**(item.metadata_json or {}), "publish_requested_at": now.isoformat()}
     if task is not None:
+        if task.status == TaskStatus.FAILED:
+            # This approve IS the retry of the failed step — count it, which also arms the
+            # platform-side duplicate check on the re-upload.
+            task.retry_count += 1
         task.status = TaskStatus.SCHEDULED  # the publish job drives it to PUBLISHING → COMPLETED
         task.error_message = None
+        _append_journey(task, "Review", "approved — publish queued")
     db.commit()
     enqueue_publish(item.id)
 
@@ -449,8 +496,12 @@ def apply_reject(db, item, reason: str = "", *, rerender: bool = False,
         Task.campaign_id == item.campaign_id, Task.episode_number == item.episode_number))
     if task is not None:
         task.status = TaskStatus.FAILED
-        task.error_message = ("Rejected in review: " + reason) if reason else \
-            "Rejected in review. Use Retry to re-render."
+        # The "(auto-review)" tag is structural, not free text (R22): the autopilot's
+        # their-decision-stands checks used to substring-match the reason, so a HUMAN writing
+        # "auto-review missed this" read as the bot's own reject and was silently re-rendered.
+        who = " (auto-review)" if automatic else ""
+        task.error_message = (f"Rejected in review{who}: {reason}") if reason else \
+            f"Rejected in review{who}. Use Retry to re-render."
         drop_script_checkpoint(task)  # judged bad — the re-render must write a FRESH script
     # The operator's/AI's reason becomes a permanent avoid-note (Loop 1 learning signal) — but only
     # for ORDINARY episodes. A compilation's rejection ("wrong episode order", "too long") is about
@@ -484,6 +535,20 @@ class ChannelExpired(RuntimeError):
     failure of the episode, and must not consume a retry or read as a broken render."""
 
 
+def _notify_channel_expired(channel: Channel, user: User, exc: Exception) -> None:
+    """Tell the operator their episodes are waiting on a fresh token — ONCE per channel per day
+    (R22). Silence here left approved episodes parked with no visible reason; per-episode alerts
+    would spam every slot tick. Best-effort: a Redis hiccup drops the dedupe, never the publish."""
+    try:
+        from workers.task_queue import conn as _conn
+
+        if not _conn.set(f"notify:channel-expired:{channel.id}", "1", nx=True, ex=86400):
+            return
+    except Exception:  # noqa: BLE001 — dedupe is a nicety
+        pass
+    _notify(user, f"🔑 “{channel.channel_name}” cannot publish: {exc}")
+
+
 # ── Publish step (shared by auto mode and review-approval) ───────────────────
 def _publish_buffer(db, task: Task, buf: BufferPoolItem, campaign: Campaign,
                     channel: Channel, user: User) -> str:
@@ -499,8 +564,20 @@ def _publish_buffer(db, task: Task, buf: BufferPoolItem, campaign: Campaign,
             "at the next slot.")
 
     _set_status(db, task, TaskStatus.PUBLISHING, 92)
+    # Publish jobs carry NO live progress entry (R22): the stall watchdog's limit (render
+    # job_timeout + grace) sits BELOW the publish job's own RQ timeout, so a legal >55-minute
+    # upload read as a wedged render and was os._exit-killed mid-transfer — the exact failure the
+    # generous publish timeout exists to avoid. The upload's kill authority is its RQ timeout.
+    clear_progress(task.id)
     fmt = (campaign.config_json or {}).get("video_format", "short")
     meta = {**(buf.metadata_json or {}), "video_format": fmt}
+
+    # Persist evidence of THIS attempt before any bytes go up (R22): the slot tick, catch-up and
+    # Publish-now never increment retry_count, so a re-publish after a mid-upload kill used to run
+    # with the platform duplicate check disarmed and could post the episode twice.
+    prior_attempts = int((buf.metadata_json or {}).get("publish_attempts") or 0)
+    buf.metadata_json = {**(buf.metadata_json or {}), "publish_attempts": prior_attempts + 1}
+    db.commit()
 
     def remember_pending(vid: str) -> None:
         """Persist the reserved video id BEFORE the bytes go up, so a retry after a timeout can ask
@@ -511,22 +588,33 @@ def _publish_buffer(db, task: Task, buf: BufferPoolItem, campaign: Campaign,
     video_id = _publish(channel, buf.video_path, meta, user,
                         pending_video_id=(buf.metadata_json or {}).get("pending_video_id"),
                         on_pending=remember_pending,
-                        retrying=bool(task.retry_count))
+                        retrying=bool(task.retry_count) or prior_attempts > 0)
 
+    # Publish success is ONE commit (R22): published ids, the consumed buffer and the COMPLETED
+    # status land together. They used to span three commits with file I/O in between, so a kill in
+    # the window left "published on the platform, FAILED in the DB" — which the retry paths then
+    # re-rendered and re-published as a duplicate.
+    now = datetime.utcnow()
     task.published_video_id = video_id
     task.published_url = published_url_for(channel.platform, video_id, fmt)
-    if channel.platform == Platform.youtube:
-        # Series playlist (ADR-080): binge navigation + session-time signal + watch-hours toward
-        # the money threshold. Fail-open inside — the publish above already succeeded.
-        from services.youtube_service import add_to_series_playlist
-
-        add_to_series_playlist(channel, campaign, db, video_id)
     # Close the A/B loop: record WHICH metadata variant went live, so the Performance page can
     # compare real retention per variant instead of rotating variants blindly forever.
     task.ab_variant = (buf.metadata_json or {}).get("variant")
     buf.status = BufferStatus.consumed
-    buf.consumed_at = datetime.utcnow()
+    buf.consumed_at = now
+    task.finished_at = now
+    task.status = TaskStatus.COMPLETED
+    task.progress_pct = 100
+    _append_journey(task, "Publish attempt", f"published — {video_id}")
     db.commit()
+    set_progress(task.id, 100)
+    if channel.platform == Platform.youtube:
+        # Series playlist (ADR-080): binge navigation + session-time signal + watch-hours toward
+        # the money threshold. Fail-open inside — the publish above already succeeded (and is now
+        # durably recorded, so a crash here can no longer erase it).
+        from services.youtube_service import add_to_series_playlist
+
+        add_to_series_playlist(channel, campaign, db, video_id)
     if (task.video_kind or "episode") == "compilation":
         # A compilation is BUILT FROM the library; retaining it would recurse best-ofs into best-ofs.
         _safe_remove(buf.video_path, buf.thumbnail_path)
@@ -539,8 +627,6 @@ def _publish_buffer(db, task: Task, buf: BufferPoolItem, campaign: Campaign,
         compilation.retain_master(campaign.id, task.episode_number, buf.video_path)
         _safe_remove(buf.video_path, buf.thumbnail_path)
 
-    task.finished_at = datetime.utcnow()
-    _set_status(db, task, TaskStatus.COMPLETED, 100)
     if (task.video_kind or "episode") == "compilation":
         # A best-of is EXTRA content: it must not advance the campaign's episode count — the next
         # ordinary episode would silently be skipped.
@@ -562,19 +648,33 @@ def _mark_channel_expired(db, campaign: Campaign, exc: Exception) -> bool:
     Nothing used to set `ChannelStatus.expired`, so the Channels page kept showing "● Active" for a
     channel that could no longer publish anything, and its "Expired token" pill and filter chip were
     decoration. Marking it here is what makes those honest — and what stops the operator debugging
-    episode after episode when the real fix is one new token."""
+    episode after episode when the real fix is one new token.
+
+    Platform-aware (R22): the escape hatch was Facebook-only, so a revoked YouTube refresh token
+    (e.g. an OAuth app left in Testing revokes weekly) failed every publish on every campaign with
+    a misdiagnosed banner while the Channels page said Active — the operator looped on Approve
+    against a dead credential and the autopilot burned its retries the same way."""
+    if campaign is None:
+        return False
     from services.facebook_service import FacebookAuthError
 
-    if not isinstance(exc, FacebookAuthError) or campaign is None:
+    auth_shaped = isinstance(exc, FacebookAuthError)
+    if not auth_shaped:
+        low = str(exc).lower()
+        auth_shaped = "invalid_grant" in low or "reconnect the account" in low
+    if not auth_shaped:
         return False
     channel = db.get(Channel, campaign.channel_id)
     if channel is None or channel.status == ChannelStatus.expired:
         return False
-    # Verify before condemning (ADR-083): one cheap /me re-check, exactly what the operator does by
-    # hand when they re-paste the same token "and it works". Only a DEFINITE rejection retires the
-    # channel — a rate-limited or unreachable Graph is "not now", never "not this token". An operator
-    # reported living this loop: healthy token, hourly false expiries, same token re-pasted daily.
-    from services.facebook_service import token_definitely_dead
+    # Verify before condemning (ADR-083): one cheap probe, exactly what the operator does by hand
+    # when they re-paste the same token "and it works". Only a DEFINITE rejection retires the
+    # channel — a rate-limited or unreachable provider is "not now", never "not this token". An
+    # operator reported living this loop: healthy token, hourly false expiries, re-pasted daily.
+    if channel.platform == Platform.youtube:
+        from services.youtube_service import token_definitely_dead
+    else:
+        from services.facebook_service import token_definitely_dead
 
     if not token_definitely_dead(channel):
         logger.warning("Channel %s hit an auth-class error but its token re-verified — NOT marking "
@@ -593,9 +693,17 @@ def _fail_task(db, task: Task, user: User, campaign: Campaign, exc: Exception, j
     task.status = TaskStatus.FAILED
     task.finished_at = datetime.utcnow()
     # Scrubbed before storing: this string is rendered on the episode page and in the alert bell, and
-    # a Graph traceback carries `access_token=…` in the request URL (ADR-072).
+    # a Graph traceback carries `access_token=…` in the request URL (ADR-072). The actual exception
+    # leads and the traceback follows (R22) — the first line the operator reads is the error, and
+    # `core.failure` classifies the exception summary rather than the frames' file paths.
+    summary = scrub(f"{type(exc).__name__}: {exc}")[:1200]
+    if job == "publish_task":
+        summary = ("Publish failed — the rendered video is safe in the buffer; fix the cause "
+                   "below, then Retry re-uploads it without a re-render.\n" + summary)
     trace = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-    task.error_message = scrub(trace)[-4000:]
+    task.error_message = (summary + "\n\n" + scrub(trace)[-(4000 - len(summary) - 2):])
+    _append_journey(task, "Publish attempt" if job == "publish_task" else "Render",
+                    f"failed — {scrub(str(exc))[:150]}")
     db.commit()
     logger.exception("%s for task %s failed", job, task.id)
     expired = _mark_channel_expired(db, campaign, exc)
@@ -612,18 +720,28 @@ CONSECUTIVE_FAILURES_TO_PAUSE = 3
 def consecutive_failures(db, campaign: Campaign) -> int:
     """Length of the campaign's CURRENT failure streak: finished tasks newest-first, counting
     FAILED until the first non-failed outcome (a publish, a parked review, a scheduled render —
-    any of them proves the pipeline works and resets the streak)."""
-    statuses = db.scalars(
-        select(Task.status)
+    any of them proves the pipeline works and resets the streak).
+
+    Infrastructure failures (worker stall/restart, killed upload, expired buffer) and review
+    rejections are TRANSPARENT — skipped, neither counted nor streak-breaking (R22). A wedged box
+    is not evidence the campaign's config is broken (the contract the watchdog always claimed),
+    and skipping rather than resetting means a genuine systemic fault interleaved with a worker
+    restart still trips the breaker."""
+    rows = db.execute(
+        select(Task.status, Task.error_message)
         .where(Task.campaign_id == campaign.id, Task.finished_at.isnot(None))
         .order_by(Task.finished_at.desc(), Task.id.desc())
-        .limit(CONSECUTIVE_FAILURES_TO_PAUSE)
+        .limit(CONSECUTIVE_FAILURES_TO_PAUSE * 4)  # skipped rows need lookback beyond the cap
     ).all()
     streak = 0
-    for status in statuses:
+    for status, message in rows:
         if status != TaskStatus.FAILED:
             break
+        if failure.is_infrastructure(message) or failure.is_reject(message):
+            continue
         streak += 1
+        if streak >= CONSECUTIVE_FAILURES_TO_PAUSE:
+            break
     return streak
 
 
@@ -712,6 +830,13 @@ def compile_task(task_id: int) -> None:
         logger.error("compile_task: no Task %s", task_id)
         db.close()
         return
+    # Same idempotency rule as render_task (R22): a duplicate/orphaned job never re-builds a
+    # compilation that already finished or was cancelled.
+    if task.status in (TaskStatus.COMPLETED, TaskStatus.CANCELLED) or _job_is_stale(task):
+        logger.info("compile_task: task %s already handled (status=%s) or job superseded — skipping",
+                    task_id, task.status)
+        db.close()
+        return
     campaign = user = None
     try:
         campaign = db.get(Campaign, task.campaign_id)
@@ -783,6 +908,20 @@ def compile_task(task_id: int) -> None:
         db.close()
 
 
+def _job_is_stale(task: Task) -> bool:
+    """Is the currently-executing RQ job an orphan for this task? The task row's `rq_job_id` always
+    points at the most recently enqueued (authoritative) job; a reaped-then-retried episode can
+    leave an older job in the queue, and letting it run re-rendered (and in auto mode re-published)
+    an episode that had already finished (R22). Fail-open: outside a job context, run."""
+    try:
+        from rq import get_current_job
+
+        job = get_current_job()
+    except Exception:  # noqa: BLE001 — direct calls (tests) have no job context
+        return False
+    return job is not None and bool(task.rq_job_id) and job.id != task.rq_job_id
+
+
 @with_render_lock
 def render_task(task_id: int) -> None:
     """Render one episode into the buffer pool; auto-publish or park for review per campaign."""
@@ -790,6 +929,14 @@ def render_task(task_id: int) -> None:
     task = db.get(Task, task_id)
     if task is None:
         logger.error("render_task: no Task %s", task_id)
+        db.close()
+        return
+    # Idempotency (R22), mirroring publish_task's guard: a duplicate/orphaned job must not re-render
+    # an episode that already finished — that deleted the live buffer row, published a second copy
+    # in auto mode, and advanced the campaign twice.
+    if task.status in (TaskStatus.COMPLETED, TaskStatus.CANCELLED) or _job_is_stale(task):
+        logger.info("render_task: task %s already handled (status=%s) or job superseded — skipping",
+                    task_id, task.status)
         db.close()
         return
 
@@ -915,6 +1062,10 @@ def render_task(task_id: int) -> None:
                     video_format=cfg.get("video_format", "short"),
                     model=gemini_model,
                 )
+                # Heartbeat between AI steps (R22): the whole script phase used to sit at a frozen
+                # 5%, so a merely-slow provider read as a wedged worker to the stall watchdog. The
+                # value must actually move — set_progress only re-stamps on change.
+                set_progress(task_id, 5 + _gen_attempt)
                 fp = slop_gate.script_fingerprint(script)
                 gate = slop_gate.check_script(fp["narration"], fp["title"], recent=recent,
                                               cliches=cliches, content_style=content_style)
@@ -927,6 +1078,7 @@ def render_task(task_id: int) -> None:
                     # one scale, one discipline. Fail-open: a judge outage is "no verdict", never
                     # a stalled factory (the deterministic gate has already run).
                     verdict = _judge_script_safe(user, channel, cfg, fp, gemini_key, gemini_model)
+                    set_progress(task_id, 5 + _gen_attempt + 0.5)  # judge done — still alive
                     if verdict is None:
                         journey.append({"step": "Script judge", "note": "no verdict (off or unavailable)"})
                         break
@@ -1123,6 +1275,7 @@ def render_task(task_id: int) -> None:
         # "the check approved", which meant a video the judge failed once could publish unseen
         # because the judge was unavailable for the re-check.
         parked_for_review = not auto_publish or qc_failed or qc_no_verdict_park
+        now = datetime.utcnow()
         buf = BufferPoolItem(
             campaign_id=campaign.id,
             channel_id=channel.id,
@@ -1131,34 +1284,51 @@ def render_task(task_id: int) -> None:
             thumbnail_path=result.thumbnail_path,
             metadata_json=result.metadata,
             status=BufferStatus.awaiting_review if parked_for_review else BufferStatus.ready,
+            ready_at=None if parked_for_review else now,
         )
         db.add(buf)
+        # The task's terminal state rides the SAME commit as the buffer row (R22). Committing the
+        # buffer first left a window — QC verdict written, video on disk, status still working —
+        # where a crash/watchdog kill produced the incident screen: a FAILED banner over a
+        # finished, QC-passed video with an Approve button.
+        if parked_for_review:
+            task.finished_at = now
+            task.status = TaskStatus.AWAITING_REVIEW
+            task.progress_pct = 90
+        elif slot_scheduled:
+            # Pre-rendered and parked; the scheduler publishes it at the next posting slot.
+            task.finished_at = now
+            task.status = TaskStatus.SCHEDULED
+            task.progress_pct = 90
         db.commit()
         db.refresh(buf)
+        if parked_for_review or slot_scheduled:
+            set_progress(task.id, 90)
 
         if qc_failed:
-            task.finished_at = datetime.utcnow()
-            _set_status(db, task, TaskStatus.AWAITING_REVIEW, 90)
             issues = "; ".join((qc_report or {}).get("issues") or []) or "low quality score"
             _notify(user, f"🔍 Episode {task.episode_number} of '{campaign.topic_name}' failed "
                           f"Auto-QC twice ({issues}). It is parked in the Asset Pool for your review.")
         elif qc_no_verdict_park:
-            task.finished_at = datetime.utcnow()
-            _set_status(db, task, TaskStatus.AWAITING_REVIEW, 90)
             _notify(user, f"⚪ Episode {task.episode_number} of '{campaign.topic_name}' rendered, "
                           f"but Auto-QC could not run ({qc_report.get('unavailable_reason')}). "
                           "It is parked in the Asset Pool — review it, or hit “Run QC now”.")
         elif not auto_publish:
-            task.finished_at = datetime.utcnow()
-            _set_status(db, task, TaskStatus.AWAITING_REVIEW, 90)
             _notify(user, f"🎬 Episode {task.episode_number} of '{campaign.topic_name}' is rendered "
                           "and waiting for your review in the Asset Pool.")
-        elif slot_scheduled:
-            # Pre-rendered and parked; the scheduler publishes it at the next posting slot.
-            task.finished_at = datetime.utcnow()
-            _set_status(db, task, TaskStatus.SCHEDULED, 90)
-        else:
-            _publish_buffer(db, task, buf, campaign, channel, user)
+        elif not slot_scheduled:
+            try:
+                _publish_buffer(db, task, buf, campaign, channel, user)
+            except ChannelExpired as exc:
+                # The render is DONE and committed as `ready` above — a dead channel credential
+                # parks the episode, it does not fail it (ADR-073). Before R22 this fell through
+                # to _fail_task, read as a worker stall, and burned autopilot retries re-uploading
+                # against the same dead token.
+                logger.warning("render_task: %s", exc)
+                db.rollback()
+                task.finished_at = datetime.utcnow()
+                _set_status(db, task, TaskStatus.SCHEDULED, 90)
+                _notify_channel_expired(channel, user, exc)
 
         # Keep the render pipeline fed — but isolated: a hydration hiccup (a race inserting the next
         # episode, a transient enqueue error) must NOT flip this just-completed episode to FAILED.
@@ -1191,10 +1361,12 @@ def publish_task(buffer_item_id: int) -> None:
         db.close()
         return
     # Idempotency: a slot tick re-enqueue or a double-clicked Approve can queue this buffer twice.
-    # Only ready/awaiting_review items are publishable — anything else was already handled; bail so
-    # we never upload the same episode twice or resurrect a consumed row against a deleted file.
-    if buf.status not in (BufferStatus.ready, BufferStatus.awaiting_review):
-        logger.info("publish_task: buffer %s already handled (status=%s) — skipping",
+    # Only `ready` items are publishable (R22): approval — apply_approve flipping the row to ready —
+    # is the ONE gate onto the platform. Accepting awaiting_review here let recovery/retry paths
+    # upload videos that failed QC or that a review-first campaign had parked for a human; anything
+    # else was already handled, so bail rather than upload twice or resurrect a consumed row.
+    if buf.status != BufferStatus.ready:
+        logger.info("publish_task: buffer %s not publishable (status=%s) — skipping",
                     buffer_item_id, buf.status)
         db.close()
         return
@@ -1215,13 +1387,17 @@ def publish_task(buffer_item_id: int) -> None:
         # Not a failure of this episode: the channel's credential is what is broken. Leaving the task
         # untouched keeps the rendered video in the buffer, so it publishes at the next slot once the
         # token is replaced — instead of burning a retry and reading as a broken render (ADR-073).
+        # Said out loud (R22): a silent return here left approved episodes reading "Scheduled" with
+        # no visible reason until the expiry sweep destroyed them.
         logger.warning("publish_task: %s", exc)
         db.rollback()
+        _notify_channel_expired(channel, user, exc)
     except Exception as exc:  # noqa: BLE001
         _fail_task(db, task, user, campaign, exc, "publish_task")  # rolls back first
-        # Keep the file + buffer row so the operator can retry the upload without re-rendering.
-        buf.status = BufferStatus.awaiting_review
-        db.commit()
+        # The buffer stays `ready` (R22): it was approved, and a failed upload does not un-approve
+        # it. Parking it back to awaiting_review erased the approval, re-listed the episode as
+        # "waiting for review", and invited the approve→fail→approve loop of the incident; `ready`
+        # keeps every honest retry path (Retry button, autopilot, next slot) able to re-upload.
     finally:
         clear_progress(task.id)
         db.close()
