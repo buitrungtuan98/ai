@@ -112,7 +112,12 @@ def evidence_pack(db, channel) -> dict:
     cls = autopilot.classify_campaigns(db, campaigns)
     packs = []
     for c in campaigns:
-        tasks = db.scalars(select(Task).where(Task.campaign_id == c.id)).all()
+        # Ordinary episodes only (ADR-085): compilations must not enter the flop counts, the
+        # golden-hour table or the A/B rows — the council would be reasoning about Shorts strategy
+        # from a long-form video's numbers.
+        from core.compilation import ordinary_episodes
+
+        tasks = ordinary_episodes(db.scalars(select(Task).where(Task.campaign_id == c.id)).all())
         done = [t for t in tasks if t.status == TaskStatus.COMPLETED]
         # QC verdicts live on the buffer rows (consumed rows persist after publish).
         qc_scores = [((b.metadata_json or {}).get("qc") or {}).get("score")

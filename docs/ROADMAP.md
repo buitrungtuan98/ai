@@ -1695,6 +1695,26 @@ no log of its reasoning or decisions" (ADR-084).
   failed-then-absent always parks, requalify in place, review page shows truth, episode page
   replays the journey), ruff clean, docs guard green.
 
+## R20 — the audit sweep: every finding from the full-code read, fixed `WIP`
+
+**Batch X — correctness bugs (ADR-085) `DONE`:**
+- Compilations out of every learning statistic: flop median/verdicts, consecutive-flop streak
+  (sentinel numbers sorted NEWEST and could mask the breaker forever), retention baselines,
+  council golden-hour/A-B tables, daily minimums, slot guards, playbook distillation — one
+  `ordinary_episodes` definition in `core/compilation.py`.
+- Facebook retry adopts an upload only when the bytes actually landed (`uploading_phase ==
+  complete` / `video_status == ready`) — a reserved-id-with-no-bytes re-uploads instead of
+  marking an empty draft "published".
+- Autopilot retry mirrors the manual Retry: video still on disk → re-queue the PUBLISH only,
+  never a 30-60 min re-render that deletes the good file.
+- `apply_reject(rerender=True)` routes through the kind router (a rejected compilation
+  re-concats, it is never scripted).
+- Quota-class failures self-heal: retryable once the US-Pacific quota day rolls over
+  (`failure.quota_reset_since`), still inside the autopilot retry cap.
+- ONE budget-reserve guard (`usage.reserve_reached`) replacing four drifted copies — two had
+  no `GEMINI_DAILY_BUDGET` fallback (script judge, council ran unprotected on env-only budgets).
+- Verified: 646 tests (14 new), ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

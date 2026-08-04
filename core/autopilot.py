@@ -75,13 +75,18 @@ def classify_campaigns(db, campaigns) -> dict[int, dict]:
     (a channel needs ≥ MIN_MEASURED measured episodes before its baseline is trusted)."""
     if not campaigns:
         return {}
+    from core.compilation import COMPILATION_EPISODE_BASE
+
     channel_ids = {c.channel_id for c in campaigns}
     per_campaign: dict[int, list[float]] = {}
     per_channel: dict[int, list[float]] = {}
     for camp_id, chan_id, stats in db.execute(
             select(Task.campaign_id, Campaign.channel_id, Task.stats_json)
             .join(Campaign, Task.campaign_id == Campaign.id)
-            .where(Campaign.channel_id.in_(channel_ids))).all():
+            # Ordinary episodes only (ADR-085): an 11-minute compilation's retention % is
+            # systematically lower than a Short's — one in the baseline mislabels every campaign.
+            .where(Campaign.channel_id.in_(channel_ids),
+                   Task.episode_number < COMPILATION_EPISODE_BASE)).all():
         r = _retention(stats)
         if r is None:
             continue
@@ -178,6 +183,12 @@ def propose_actions(campaign, tasks, verdict: dict) -> list[dict]:
     stops NEW episodes — nothing is ever deleted). Returns [{kind, summary, evidence, params}]."""
     if campaign.status.value != "active":
         return []
+    # Ordinary episodes only (ADR-085). Sentinel numbers sort NEWEST, so an unfiltered compilation
+    # sat permanently at the head of `_trailing_low` and the flop streak: one judged "fine" masked
+    # the breaker forever; one judged "flop" inflated the streak with a video that isn't a Short.
+    from core.compilation import ordinary_episodes
+
+    tasks = ordinary_episodes(tasks)
     total = campaign.total_episodes or 0
     prog = (campaign.current_episode / total) if total else 0.0
     label, baseline, ret = verdict["label"], verdict.get("baseline"), verdict.get("retention")
@@ -272,11 +283,14 @@ def audience_summary(tasks, profile: dict | None) -> dict | None:
 
 
 def channel_baseline(db, channel_id: int) -> float | None:
-    """Average retention across ALL measured episodes of one channel — the bar its campaigns are
-    judged against. None until there are ≥ MIN_MEASURED measured episodes."""
+    """Average retention across a channel's measured ORDINARY episodes — the bar its campaigns are
+    judged against (compilations excluded, ADR-085). None until ≥ MIN_MEASURED measured episodes."""
+    from core.compilation import COMPILATION_EPISODE_BASE
+
     rets = [r for r in (
         _retention(s) for s in db.scalars(
             select(Task.stats_json).join(Campaign, Task.campaign_id == Campaign.id)
-            .where(Campaign.channel_id == channel_id)).all())
+            .where(Campaign.channel_id == channel_id,
+                   Task.episode_number < COMPILATION_EPISODE_BASE)).all())
         if r is not None]
     return round(sum(rets) / len(rets), 1) if len(rets) >= MIN_MEASURED else None

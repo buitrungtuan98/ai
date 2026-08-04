@@ -2039,3 +2039,41 @@ invisibly, which is indistinguishable from not making them.
 inside the render burns worker time and can't manufacture quota. Parking converts an API outage
 into a human glance, and "Run QC now" gives the cheap retry *after* the quota window resets,
 without re-rendering anything.
+
+### ADR-085 — The audit sweep: one honest population, verify bytes, retry the right step
+
+**Context.** A full-code audit found a cluster of correctness bugs that shared one root: features
+added correctly in isolation leaking into each other's assumptions.
+
+1. **Compilations poisoned every per-campaign statistic.** A best-of is a Task like any other —
+   COMPLETED, published, measured — so it entered the flop median, the flop verdicts (writing
+   autopsy notes about a COMPILATION into the scriptwriter's avoid-list, the exact leak ADR-082
+   closed for reject reasons), the retention baselines (long-form retention % is systematically
+   lower than a Short's), the council's golden-hour table, the daily-minimum count and the
+   one-per-slot guard. Worst: sentinel numbers (9001+) sort NEWEST, so one compilation at the head
+   of `_consecutive_flops`/`_trailing_low` could mask the flop breaker forever.
+2. **A Facebook retry adopted uploads that never happened.** The Reel `start` phase reserves the
+   video id BEFORE any byte goes up; `find_existing_upload` checked only that the id existed, so a
+   retry after a dead transfer marked the episode published — pointing at an empty draft.
+3. **The autopilot re-rendered what it only needed to re-upload.** A transient publish failure
+   leaves the finished video in the buffer; the manual Retry button re-queues just the publish,
+   but `autopilot_retry_channel` re-rendered 30-60 minutes of CPU and then deleted the good file.
+4. **`apply_reject(rerender=True)` bypassed the kind router**, so a rejected compilation would
+   have been handed to `render_task` to write a script for.
+5. **Quota failures never self-healed.** `is_transient` correctly says a spent quota can't be
+   retried NOW — but Google's free tier resets at midnight US-Pacific and nothing ever re-queued
+   those episodes, leaving the operator a manual Retry per quota-failed render.
+6. **The 80% budget reserve existed as four hand-rolled copies**, two of which forgot the
+   app-wide `GEMINI_DAILY_BUDGET` fallback — no reserve protection on exactly the passes that run
+   unattended (script judge, council).
+
+**Decision.** (1) One population definition: `compilation.is_ordinary`/`ordinary_episodes`,
+applied at the DEFINITION of each statistic (flop median, flop judging, classification baselines,
+council pack, daily minimums, slot guards, playbook distillation) — not at call sites. Monetization
+keeps compilation minutes on purpose: real watch-time on the Page counts toward the real threshold.
+(2) Adoption requires `uploading_phase.status == "complete"` or `video_status == "ready"` — a
+reserved id whose bytes never landed re-uploads. (3) The autopilot retry mirrors the manual one:
+video still on disk → re-queue the PUBLISH. (4) The reject re-render goes through `enqueue_task`.
+(5) `failure.quota_reset_since` — quota-class failures become retryable once a Pacific midnight has
+passed, still inside the autopilot's retry cap. (6) `usage.reserve_reached(user)` is THE guard,
+with the user-setting-else-env-fallback rule in one place.

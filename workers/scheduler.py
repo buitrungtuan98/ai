@@ -136,12 +136,17 @@ def disk_usage_pct(path: str) -> float:
 
 
 def _recently_published(db, campaign_id: int, window_minutes: int) -> bool:
-    """True if this campaign already published within the window — the one-per-slot guard, so an
-    hourly tick landing twice inside one slot's tolerance can't double-post."""
+    """True if this campaign already published an ORDINARY episode within the window — the
+    one-per-slot guard, so an hourly tick landing twice inside one slot's tolerance can't
+    double-post. Compilations are extra content outside the slot schedule (ADR-085): approving
+    one must not eat the slot the next regular episode was waiting for."""
+    from core.compilation import COMPILATION_EPISODE_BASE
+
     cutoff = datetime.utcnow() - timedelta(minutes=window_minutes)
     latest = db.scalar(
         select(Task.finished_at)
-        .where(Task.campaign_id == campaign_id, Task.status == TaskStatus.COMPLETED)
+        .where(Task.campaign_id == campaign_id, Task.status == TaskStatus.COMPLETED,
+               Task.episode_number < COMPILATION_EPISODE_BASE)
         .order_by(Task.finished_at.desc())
         .limit(1)
     )
@@ -323,7 +328,12 @@ def maybe_distill_campaign(db, campaign: Campaign, now: datetime | None = None) 
     ).all()
     # Only MEASURED episodes count — early views (near-real-time, no retention yet) carry stats_json
     # but no `avg_pct_viewed`, and must not trip the learning threshold or dilute the summary (T4).
-    rows = [r for r in rows if (r.stats_json or {}).get("avg_pct_viewed") is not None]
+    # Ordinary episodes only (ADR-085): a compilation's retention would teach the playbook lessons
+    # about a format the scriptwriter never writes.
+    from core.compilation import ordinary_episodes
+
+    rows = [r for r in ordinary_episodes(rows)
+            if (r.stats_json or {}).get("avg_pct_viewed") is not None]
     if len(rows) < DISTILL_MIN_EPISODES:
         return False
     user = db.get(User, campaign.user_id)
@@ -378,10 +388,14 @@ def check_daily_minimums(db, now: datetime | None = None) -> int:
         min_per_day = (campaign.config_json or {}).get("min_per_day")
         if not min_per_day:
             continue
+        from core.compilation import COMPILATION_EPISODE_BASE
+
         published = db.scalar(
             select(func.count()).select_from(Task).where(
                 Task.campaign_id == campaign.id,
                 Task.status == TaskStatus.COMPLETED,
+                # A compilation must not paper over a day the campaign's REGULAR cadence failed.
+                Task.episode_number < COMPILATION_EPISODE_BASE,
                 Task.finished_at >= cutoff,
             )
         ) or 0
@@ -687,8 +701,12 @@ def autopilot_retry_channel(db, channel) -> int:
         # rejections, silently spent the self-healing budget R7 exists to provide.
         if (t.auto_retry_count or 0) >= AUTOPILOT_MAX_RETRIES:
             continue
-        if not failure.is_transient(msg):
-            continue  # a retry can't mint a key, refill a quota, or unblock deterministic content
+        # A retry can't mint a key or unblock deterministic content — but a spent QUOTA is the one
+        # non-transient failure that heals by pure waiting (it resets at midnight US-Pacific), and
+        # nothing else ever re-queued those: every quota-failed episode was a manual Retry the
+        # operator owed the machine (ADR-085).
+        if not failure.is_transient(msg) and not failure.quota_reset_since(msg, t.finished_at):
+            continue
         t.status = TaskStatus.PENDING_QUEUE
         t.error_message = None
         t.progress_pct = 0
@@ -696,6 +714,25 @@ def autopilot_retry_channel(db, channel) -> int:
         t.auto_retry_count = (t.auto_retry_count or 0) + 1
         db.commit()
         task_queue.clear_progress(t.id)  # drop any ghost % from the interrupted attempt (F1)
+        # Retry the step that actually failed (ADR-085). When the rendered file still exists (a
+        # transient UPLOAD failure parked it back to review), only the publish is re-queued — the
+        # manual Retry button has always been this smart, while the autopilot re-rendered 30-60
+        # minutes of CPU it already owned and then deleted the good file it was replacing.
+        buf = db.scalar(select(BufferPoolItem).where(
+            BufferPoolItem.campaign_id == t.campaign_id,
+            BufferPoolItem.episode_number == t.episode_number,
+            BufferPoolItem.status.in_([BufferStatus.ready, BufferStatus.awaiting_review])))
+        if buf is not None and buf.video_path and os.path.exists(buf.video_path):
+            task_queue.enqueue_publish(buf.id)
+            retried += 1
+            _log_action(db, channel, "retried",
+                        f"Retried the UPLOAD of Ep {t.episode_number} — the video is already "
+                        f"rendered, only the publish failed (attempt "
+                        f"{t.auto_retry_count}/{AUTOPILOT_MAX_RETRIES}).",
+                        campaign_id=t.campaign_id,
+                        evidence={"episode": t.episode_number, "attempt": t.auto_retry_count,
+                                  "mode": "publish"})
+            continue
         t.rq_job_id = video_worker.enqueue_task(t)   # kind-aware: compilations re-concat
         db.commit()
         retried += 1
@@ -715,10 +752,15 @@ def _published_today(db, campaign_id: int, now_local: datetime, tz_name: str | N
         tz = ZoneInfo(tz_name or settings.TIMEZONE)
     except Exception:  # noqa: BLE001
         tz = _tz.utc
+    from core.compilation import COMPILATION_EPISODE_BASE
+
     day = now_local.date()
     n = 0
+    # Ordinary episodes only (ADR-085): a published compilation must not count as "today's slot
+    # was filled" — the catch-up pass would then skip the regular episode the slot was for.
     for ft in db.scalars(select(Task.finished_at).where(
             Task.campaign_id == campaign_id, Task.status == TaskStatus.COMPLETED,
+            Task.episode_number < COMPILATION_EPISODE_BASE,
             Task.finished_at.is_not(None))).all():
         if ft.replace(tzinfo=_tz.utc).astimezone(tz).date() == day:
             n += 1
@@ -851,15 +893,13 @@ def _design_successor(db, parent):
     proven formula (its playbook + the channel profile). Returns a CampaignProposal or None (no
     key / over the daily budget / AI error) — the caller then falls back to a plain clone."""
     from core import ai_engine
-    from core.usage import ai_calls_today
+    from core.usage import reserve_reached
 
     user = db.get(User, parent.user_id)
     key = (user.gemini_api_key if user else None) or settings.GEMINI_API_KEY
     if not key:
         return None
-    budget = ((user.settings_json or {}).get("ai_daily_budget") if user else None) \
-        or settings.GEMINI_DAILY_BUDGET
-    if budget and ai_calls_today() >= budget * 0.8:
+    if reserve_reached(user):
         return None  # budget reserve — a successor design never eats the quota rendering needs
     channel = db.get(Channel, parent.channel_id)
     pcfg = parent.config_json or {}
@@ -921,7 +961,7 @@ def autopilot_council_channel(db, user, channel) -> dict:
     starved for strategy), and once per UTC day per channel — the pack-hash cache inside makes even
     that call free when nothing changed. Returns the council summary dict (zeros when skipped)."""
     from core import council
-    from core.usage import ai_calls_today
+    from core.usage import reserve_reached
 
     zeros = {"filed": 0, "refused": 0, "held": 0, "skipped_unchanged": False}
     gemini_key = None
@@ -932,8 +972,7 @@ def autopilot_council_channel(db, user, channel) -> dict:
     state = (channel.autopilot_json or {}).get("council") or {}
     if str(state.get("at", ""))[:10] == datetime.utcnow().strftime("%Y-%m-%d"):
         return zeros    # already judged today
-    budget = int((user.settings_json or {}).get("ai_daily_budget") or 0) if user else 0
-    if budget and ai_calls_today() >= budget * 0.8:
+    if reserve_reached(user):
         return zeros    # strategy never outbids rendering for the daily AI budget
     model = (user.gemini_model if user else None) or settings.GEMINI_MODEL
     result = council.run_council(db, channel, api_key=gemini_key, model=model)
@@ -1072,7 +1111,7 @@ def autopilot_strategist_channel(db, user, channel, respect_cadence: bool = True
     confirmed, even in full-auto). Guarded three ways: weekly cadence (Redis NX), a Gemini key, and
     the daily-budget reserve (skips above 80% so rendering is never starved). Returns 0 or 1."""
     from core import autopilot
-    from core.usage import ai_calls_today
+    from core.usage import reserve_reached
 
     if respect_cadence:
         try:
@@ -1083,8 +1122,7 @@ def autopilot_strategist_channel(db, user, channel, respect_cadence: bool = True
     key = user.gemini_api_key or settings.GEMINI_API_KEY
     if not key:
         return 0
-    budget = (user.settings_json or {}).get("ai_daily_budget") or settings.GEMINI_DAILY_BUDGET
-    if budget and ai_calls_today() >= budget * 0.8:
+    if reserve_reached(user):
         return 0  # budget reserve — strategy never eats the quota rendering needs
     campaigns = db.scalars(select(Campaign).where(
         Campaign.channel_id == channel.id, Campaign.status == CampaignStatus.active)).all()

@@ -329,11 +329,15 @@ def _publish_hour(task, campaign) -> int | None:
 
 
 def judge_flops(db, campaign) -> int:
-    """Judge every not-yet-judged episode of a campaign against its own median first-day views
-    (ADR-079). Below MIN_MEASURED_24H measured episodes this is silent — "not enough data" must
-    never be dressed up as a verdict. Idempotent per episode. Returns new flops recorded."""
-    tasks = db.scalars(select(Task).where(Task.campaign_id == campaign.id,
-                                          Task.stats_json.isnot(None))).all()
+    """Judge every not-yet-judged ORDINARY episode of a campaign against its own median first-day
+    views (ADR-079). Below MIN_MEASURED_24H measured episodes this is silent — "not enough data"
+    must never be dressed up as a verdict. Compilations are never judged (ADR-085): a "flop"
+    verdict on one would write an autopsy note that steers the SCRIPTWRITER — the exact leak
+    ADR-082 closed for reject reasons. Idempotent per episode. Returns new flops recorded."""
+    from core.compilation import ordinary_episodes
+
+    tasks = ordinary_episodes(db.scalars(select(Task).where(
+        Task.campaign_id == campaign.id, Task.stats_json.isnot(None))).all())
     median = flop.campaign_median_24h(tasks)
     if median is None:
         return 0

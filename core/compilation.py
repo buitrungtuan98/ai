@@ -32,6 +32,23 @@ DEFAULT_TOP_N = 12              # 12 × ~55s ≈ 11 minutes — comfortably past
 COMPILATION_EPISODE_BASE = 9000  # sentinel numbering: keeps unique(campaign, episode) untouched
 
 
+def is_ordinary(task) -> bool:
+    """True for a regular episode; False for sentinel-numbered EXTRA content (compilations).
+
+    One population definition for every per-campaign statistic (ADR-085). A compilation is a Task
+    like any other — COMPLETED, published, measured — so without this filter it leaked into the flop
+    median, the retention baselines, the golden-hour table and the consecutive-flop streak, where a
+    long-form video's numbers (systematically different from Shorts) poisoned every verdict. Worse:
+    sentinel numbers sort NEWEST, so one compilation at the head of a streak could permanently mask
+    or inflate the flop breaker."""
+    return (task.episode_number or 0) < COMPILATION_EPISODE_BASE
+
+
+def ordinary_episodes(tasks) -> list:
+    """Filter a task list down to regular episodes — the population all learning stats are about."""
+    return [t for t in tasks if is_ordinary(t)]
+
+
 def library_dir(campaign_id: int) -> str:
     return os.path.join(settings.MEDIA_ROOT, "library", str(campaign_id))
 

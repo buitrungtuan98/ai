@@ -380,10 +380,9 @@ def _judge_script_safe(user, channel, cfg, fp: dict, api_key: str, model: str):
     if cfg.get("script_judge", "on") == "off":
         return None
     try:
-        from core.usage import ai_calls_today
+        from core.usage import reserve_reached
 
-        budget = int((user.settings_json or {}).get("ai_daily_budget") or 0)
-        if budget and ai_calls_today() >= budget * 0.8:
+        if reserve_reached(user):
             logger.info("Script judge skipped — AI budget reserve reached")
             return None
         from core.ai_engine import judge_script
@@ -471,7 +470,9 @@ def apply_reject(db, item, reason: str = "", *, rerender: bool = False,
             task.auto_reject_count = (task.auto_reject_count or 0) + 1
         clear_progress(task.id)  # no ghost % carries into the re-queued render (F1)
         db.commit()
-        task.rq_job_id = enqueue_render(task.id)
+        # Kind-aware on purpose (ADR-085): "every Retry path goes through enqueue_task" — this one
+        # didn't, so a rejected compilation would have been handed to render_task to SCRIPT it.
+        task.rq_job_id = enqueue_task(task)
         db.commit()
 
 
