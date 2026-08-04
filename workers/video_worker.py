@@ -19,7 +19,7 @@ from functools import partial
 
 from sqlalchemy import func, select
 
-from core import video_factory
+from core import slop_gate, video_factory
 from core import vibe as vibe_mod
 from core.ai_engine import VideoScript, generate_image, generate_script
 from core.config import settings
@@ -220,6 +220,17 @@ def renders_started_today(db, campaign: Campaign, now: datetime | None = None) -
     ) or 0
 
 
+def enqueue_task(task) -> str:
+    """Route a task to the job that can actually build it (ADR-082): a compilation re-runs the
+    concat, an episode re-runs the render. Every Retry path goes through here — enqueueing
+    render_task for a compilation would try to write a script for it."""
+    from workers.task_queue import enqueue_compile
+
+    if (getattr(task, "video_kind", None) or "episode") == "compilation":
+        return enqueue_compile(task.id)
+    return enqueue_render(task.id)
+
+
 def hydrate_campaign(db, campaign: Campaign, *, buffer_size: int | None = None, enqueue=enqueue_render) -> list[int]:
     """Ensure ONE campaign has up to `buffer_size` upcoming (not-yet-finished) episodes queued.
     Precedence: explicit arg > campaign config `buffer_size` > global default. Idempotent —
@@ -250,6 +261,11 @@ def hydrate_campaign(db, campaign: Campaign, *, buffer_size: int | None = None, 
             )
         ).all()
     )
+    # Compilations use sentinel numbers (9001+) and are EXTRA content — one waiting for review must
+    # not count against the buffer of ordinary upcoming episodes (ADR-082).
+    from core.compilation import COMPILATION_EPISODE_BASE
+
+    active_eps = {e for e in active_eps if e < COMPILATION_EPISODE_BASE}
     next_ep = campaign.current_episode + 1
     while len(active_eps) < size and next_ep <= campaign.total_episodes:
         if day_budget is not None and len(created) >= day_budget:
@@ -356,6 +372,52 @@ def apply_approve(db, item) -> None:
     enqueue_publish(item.id)
 
 
+def _judge_script_safe(user, channel, cfg, fp: dict, api_key: str, model: str):
+    """Run the AI script judge (ADR-079, C2) when it is allowed to run: campaign toggle on
+    (default), and the daily AI budget below its 80% reserve — a strategy call never outbids
+    rendering. Returns a ScriptVerdict or None ('no verdict'); NEVER raises — the deterministic
+    gate has already run, and a judge outage must not stop the factory."""
+    if cfg.get("script_judge", "on") == "off":
+        return None
+    try:
+        from core.usage import ai_calls_today
+
+        budget = int((user.settings_json or {}).get("ai_daily_budget") or 0)
+        if budget and ai_calls_today() >= budget * 0.8:
+            logger.info("Script judge skipped — AI budget reserve reached")
+            return None
+        from core.ai_engine import judge_script
+
+        return judge_script(fp["narration"], fp["title"], api_key=api_key,
+                            language=cfg.get("language", "en"), model=model)
+    except Exception:  # noqa: BLE001 — no verdict beats no factory
+        logger.warning("Script judge unavailable — proceeding without a verdict", exc_info=True)
+        return None
+
+
+def _recent_fingerprints(db, campaign, before_episode: int) -> list[dict]:
+    """The narration/title fingerprints of this campaign's most recent episodes (ADR-079) — what a
+    new script is judged against. Reads the persisted fingerprint of finished episodes AND the saved
+    script of in-flight ones; episodes from before the fingerprint existed simply contribute
+    nothing, which narrows the check rather than failing it."""
+    rows = db.execute(
+        select(Task.episode_number, Task.render_json)
+        .where(Task.campaign_id == campaign.id, Task.render_json.isnot(None),
+               Task.episode_number < before_episode)
+        .order_by(Task.episode_number.desc()).limit(slop_gate.RECENT_EPISODES)).all()
+    out: list[dict] = []
+    for ep, rj in rows:
+        rj = rj or {}
+        if rj.get("narration"):
+            out.append({"episode": ep, "narration": rj["narration"], "title": rj.get("title", "")})
+        elif isinstance(rj.get("script"), dict):   # in-flight checkpoint — still a real episode
+            sc = rj["script"]
+            out.append({"episode": ep,
+                        "narration": " ".join(s.get("narration", "") for s in sc.get("scenes", [])),
+                        "title": ((sc.get("metadata_variations") or [{}])[0]).get("title", "")})
+    return out
+
+
 def drop_script_checkpoint(task) -> None:
     """Forget a persisted resume script (ADR-069). Called wherever the operator's intent is a
     REROLL — reject, discard & re-render — because those exist precisely to get different content;
@@ -388,7 +450,11 @@ def apply_reject(db, item, reason: str = "", *, rerender: bool = False,
         task.error_message = ("Rejected in review: " + reason) if reason else \
             "Rejected in review. Use Retry to re-render."
         drop_script_checkpoint(task)  # judged bad — the re-render must write a FRESH script
-    if reason:  # the operator's/AI's reason becomes a permanent avoid-note (Loop 1 learning signal)
+    # The operator's/AI's reason becomes a permanent avoid-note (Loop 1 learning signal) — but only
+    # for ORDINARY episodes. A compilation's rejection ("wrong episode order", "too long") is about
+    # editing, not writing; feeding it to the scriptwriter would steer every future SCRIPT away
+    # from a complaint that was never about scripts (ADR-082).
+    if reason and (task is None or (task.video_kind or "episode") != "compilation"):
         campaign = db.get(Campaign, item.campaign_id)
         if campaign is not None:
             learning = dict(campaign.learning_json or {})
@@ -444,16 +510,38 @@ def _publish_buffer(db, task: Task, buf: BufferPoolItem, campaign: Campaign,
 
     task.published_video_id = video_id
     task.published_url = published_url_for(channel.platform, video_id, fmt)
+    if channel.platform == Platform.youtube:
+        # Series playlist (ADR-080): binge navigation + session-time signal + watch-hours toward
+        # the money threshold. Fail-open inside — the publish above already succeeded.
+        from services.youtube_service import add_to_series_playlist
+
+        add_to_series_playlist(channel, campaign, db, video_id)
     # Close the A/B loop: record WHICH metadata variant went live, so the Performance page can
     # compare real retention per variant instead of rotating variants blindly forever.
     task.ab_variant = (buf.metadata_json or {}).get("variant")
     buf.status = BufferStatus.consumed
     buf.consumed_at = datetime.utcnow()
     db.commit()
-    _safe_remove(buf.video_path, buf.thumbnail_path)  # strict cleanup after publish
+    if (task.video_kind or "episode") == "compilation":
+        # A compilation is BUILT FROM the library; retaining it would recurse best-ofs into best-ofs.
+        _safe_remove(buf.video_path, buf.thumbnail_path)
+    else:
+        # Retain the published master in the campaign library (ADR-082) — the raw material for
+        # best-of compilations, the long-form format that actually pays. Capped inside; fail-open
+        # to plain deletion. The thumbnail is not needed again either way.
+        from core import compilation
+
+        compilation.retain_master(campaign.id, task.episode_number, buf.video_path)
+        _safe_remove(buf.video_path, buf.thumbnail_path)
 
     task.finished_at = datetime.utcnow()
     _set_status(db, task, TaskStatus.COMPLETED, 100)
+    if (task.video_kind or "episode") == "compilation":
+        # A best-of is EXTRA content: it must not advance the campaign's episode count — the next
+        # ordinary episode would silently be skipped.
+        _notify(user, f"🎬 Best-of compilation for '{campaign.topic_name}' published: "
+                      f"{task.published_url}")
+        return video_id
     events = advance_campaign(db, campaign)
     _notify(user, f"✅ Episode {task.episode_number} of '{campaign.topic_name}' published: {task.published_url}")
     if events.completed:
@@ -547,6 +635,88 @@ def _maybe_trip_circuit_breaker(db, campaign: Campaign, user: User) -> bool:
 
 # ── The jobs ─────────────────────────────────────────────────────────────────
 @with_render_lock
+def compile_task(task_id: int) -> None:
+    """Build a best-of compilation from the campaign's library (ADR-082): a stream-copy concat of
+    the top-retention masters — near-zero CPU, zero AI — with chapters and a poster thumbnail. It
+    holds the render lock like any job (cheap or not, one ffmpeg at a time is the law of this box)
+    and ALWAYS parks for review: a ten-minute video that will anchor the channel's long-form shelf
+    gets one human look, in every mode."""
+    from core import compilation, media
+    from core.captions import teaser
+    from core.ffmpeg_runner import run_ffmpeg
+    from core.thumbnail import generate_thumbnail
+    from core.video_factory import build_concat_args
+
+    db = SessionLocal()
+    task = db.get(Task, task_id)
+    if task is None:
+        logger.error("compile_task: no Task %s", task_id)
+        db.close()
+        return
+    campaign = user = None
+    try:
+        campaign = db.get(Campaign, task.campaign_id)
+        user = db.get(User, task.user_id)
+        _set_status(db, task, TaskStatus.RENDERING, 10)
+        top_n = int((task.render_json or {}).get("top_n") or compilation.DEFAULT_TOP_N)
+        picked = compilation.compilable_episodes(db, campaign)[:top_n]
+        if len(picked) < 2:
+            raise RuntimeError(
+                f"only {len(picked)} compilable episode(s) in the library — a compilation needs "
+                "at least 2 (masters are retained from publishes made after this feature shipped)")
+        paths = [compilation.episode_master_path(campaign.id, t.episode_number)
+                 for t in picked]
+        durations = [media.probe_duration(p) for p in paths]
+
+        output_dir = os.path.join(settings.MEDIA_ROOT, "buffer", str(campaign.id))
+        os.makedirs(output_dir, exist_ok=True)
+        master = os.path.join(output_dir, f"compilation_{task.episode_number}.mp4")
+        list_file = master + ".txt"
+        compilation.build_concat_list(paths, list_file)
+        # Stream copy — the segments share the pipeline's codec parameters by construction.
+        run_ffmpeg(build_concat_args(list_file, master, music_path=None, loudnorm=False))
+        os.remove(list_file)
+        _set_status(db, task, TaskStatus.AUDIO_SYNCED, 70)
+
+        metadata = compilation.compilation_metadata(campaign, picked, durations)
+        thumb = os.path.join(output_dir, f"compilation_{task.episode_number}.jpg")
+        generate_thumbnail(master, thumb, teaser(metadata["title"]),
+                           duration=sum(durations), poster=True)
+        cfg = campaign.config_json or {}
+        metadata.setdefault("cta", cfg.get("cta"))
+        metadata.setdefault("privacy", cfg.get("privacy", "public"))
+
+        buf = BufferPoolItem(
+            campaign_id=campaign.id, channel_id=campaign.channel_id,
+            episode_number=task.episode_number, video_path=master, thumbnail_path=thumb,
+            metadata_json=metadata, status=BufferStatus.awaiting_review)
+        db.add(buf)
+        task.render_json = {**(task.render_json or {}),
+                            "duration": sum(durations),
+                            "compiled_from": [t.episode_number for t in picked]}
+        task.synopsis = metadata["title"][:300]
+        task.finished_at = datetime.utcnow()
+        _set_status(db, task, TaskStatus.AWAITING_REVIEW, 90)
+        db.commit()
+        _notify(user, f"🎬 Best-of compilation for '{campaign.topic_name}' is built "
+                      f"({len(picked)} episodes, {round(sum(durations) / 60)} min) and waiting "
+                      "for your review in the Asset Pool.")
+    except Exception as exc:  # noqa: BLE001 — record and continue the queue
+        if campaign is not None and user is not None:
+            _fail_task(db, task, user, campaign, exc, "compile_task")
+        else:
+            db.rollback()
+            task.status = TaskStatus.FAILED
+            task.finished_at = datetime.utcnow()
+            task.error_message = f"compile_task failed: {exc}"
+            db.commit()
+            logger.exception("compile_task failed for task %s", task_id)
+    finally:
+        clear_progress(task_id)
+        db.close()
+
+
+@with_render_lock
 def render_task(task_id: int) -> None:
     """Render one episode into the buffer pool; auto-publish or park for review per campaign."""
     db = SessionLocal()
@@ -633,35 +803,73 @@ def render_task(task_id: int) -> None:
                 logger.info("Task %s: resuming with the script from the interrupted attempt", task.id)
             except Exception:  # noqa: BLE001 — an unreadable checkpoint just regenerates
                 logger.warning("Task %s: persisted script did not validate — regenerating", task.id)
+        slop_warnings: list[str] = []
         if script is None:
-            script = generate_script(
-                topic=campaign.topic_name,
-                language=cfg.get("language", "en"),
-                total_episodes=campaign.total_episodes,
-                episode=task.episode_number,
-                api_key=gemini_key,
-                content_style=content_style,
-                vibe=vibe,
-                custom_system_prompt=cfg.get("system_prompt"),
-                persona=cfg.get("persona"),
-                style_examples=cfg.get("style_examples"),
-                # Per-campaign on/off: the text stays saved, but only applied when its flag is on
-                # (default on for pre-flag campaigns — unchanged behaviour).
-                catchphrase_open=(cfg.get("catchphrase_open") if cfg.get("catchphrase_open_on", True) else None),
-                catchphrase_close=(cfg.get("catchphrase_close") if cfg.get("catchphrase_close_on", True) else None),
-                continuity=cfg.get("continuity", "none"),
-                previous_synopses=previous,
-                playbook=learning.get("playbook"),
-                best_examples=learning.get("best_examples"),
-                avoid=learning.get("reject_reasons"),
-                self_critique=cfg.get("self_critique", "on") != "off",
-                duration_min_s=cfg.get("duration_min_s"),
-                duration_max_s=cfg.get("duration_max_s"),
-                rate_pct=rate_pct,
-                script_depth=cfg.get("script_depth", "standard"),
-                video_format=cfg.get("video_format", "short"),
-                model=gemini_model,
-            )
+            # The pre-render quality gate (ADR-079). A blocked script regenerates ONCE with the
+            # gate's issues as explicit avoid-notes; a second block fails the task honestly — a
+            # script the gate rejects twice needs the operator (or a different topic), not a render.
+            recent = _recent_fingerprints(db, campaign, task.episode_number)
+            cliches = slop_gate.merged_cliches((user.settings_json or {}).get("slop_blacklist"))
+            avoid_notes = list(learning.get("reject_reasons") or []) + \
+                list((learning.get("flop_notes") or []))
+            gate = None
+            for _gen_attempt in (1, 2):
+                script = generate_script(
+                    topic=campaign.topic_name,
+                    language=cfg.get("language", "en"),
+                    total_episodes=campaign.total_episodes,
+                    episode=task.episode_number,
+                    api_key=gemini_key,
+                    content_style=content_style,
+                    vibe=vibe,
+                    custom_system_prompt=cfg.get("system_prompt"),
+                    persona=cfg.get("persona"),
+                    style_examples=cfg.get("style_examples"),
+                    # Per-campaign on/off: the text stays saved, but only applied when its flag is on
+                    # (default on for pre-flag campaigns — unchanged behaviour).
+                    catchphrase_open=(cfg.get("catchphrase_open") if cfg.get("catchphrase_open_on", True) else None),
+                    catchphrase_close=(cfg.get("catchphrase_close") if cfg.get("catchphrase_close_on", True) else None),
+                    continuity=cfg.get("continuity", "none"),
+                    previous_synopses=previous,
+                    playbook=learning.get("playbook"),
+                    best_examples=learning.get("best_examples"),
+                    avoid=avoid_notes or None,
+                    self_critique=cfg.get("self_critique", "on") != "off",
+                    duration_min_s=cfg.get("duration_min_s"),
+                    duration_max_s=cfg.get("duration_max_s"),
+                    rate_pct=rate_pct,
+                    script_depth=cfg.get("script_depth", "standard"),
+                    video_format=cfg.get("video_format", "short"),
+                    model=gemini_model,
+                )
+                fp = slop_gate.script_fingerprint(script)
+                gate = slop_gate.check_script(fp["narration"], fp["title"], recent=recent,
+                                              cliches=cliches, content_style=content_style)
+                if not gate.blocked:
+                    # C2 (ADR-079): the AI judge shares the ONE regenerate budget with the
+                    # deterministic gate and the channel's reject threshold with the vision QC —
+                    # one scale, one discipline. Fail-open: a judge outage is "no verdict", never
+                    # a stalled factory (the deterministic gate has already run).
+                    verdict = _judge_script_safe(user, channel, cfg, fp, gemini_key, gemini_model)
+                    if verdict is None:
+                        break
+                    from core import autopilot as _ap
+
+                    _approve_min, reject_max = _ap.review_thresholds(channel)
+                    if verdict.score > reject_max:
+                        break
+                    gate = slop_gate.GateReport(
+                        "block", [f"script judge scored it {verdict.score}/10"] + verdict.issues)
+                logger.info("Task %s: script blocked by the quality gate (%s) — regenerating once",
+                            task.id, "; ".join(gate.issues))
+                avoid_notes = avoid_notes + [f"your previous draft was rejected: {i}"
+                                             for i in gate.issues]
+            if gate is not None and gate.blocked:
+                # Deliberately NOT persisted as a checkpoint: a Retry must write a fresh script,
+                # not faithfully resume the one the gate just refused twice.
+                raise RuntimeError("Script failed the quality gate twice: "
+                                   + "; ".join(gate.issues))
+            slop_warnings = gate.issues if gate is not None else []
             # Persist the script the moment it exists (ADR-069): if the render dies mid-way, the
             # retry rebuilds THIS episode instead of paying for a new script — and only a matching
             # script lets the checkpointed stills be reused. The success path overwrites render_json
@@ -728,7 +936,9 @@ def render_task(task_id: int) -> None:
                 # pixel-for-pixel and re-judged it — a whole episode of image calls for the same
                 # verdict. Attempt 1 stays salt-free so a resume reuses its checkpointed stills.
                 image_seed_salt=attempt - 1,
-                title_overlay=cfg.get("title_overlay") == "on",
+                # Raw config value — produce() normalizes every historical shape (bool / "on" /
+                # off|thumb|flash) in ONE place, so stored legacy campaigns need no migration.
+                title_overlay=cfg.get("title_overlay", "off"),
                 content_style=content_style,
                 signature=cfg.get("signature"),
                 vet_batch=vet_batch,
@@ -760,12 +970,19 @@ def render_task(task_id: int) -> None:
         # finished_at−started_at, which for slot-scheduled episodes wrongly counts the wait-for-slot.
         render_seconds = (int((datetime.utcnow() - task.started_at).total_seconds())
                           if task.started_at else None)
+        # This write deliberately CONSUMES the resume checkpoint (the "script" key). The gate
+        # fingerprint survives it: future episodes compare their narration/title against these
+        # (ADR-079) — without it, every completed episode is invisible to the slop gate.
         task.render_json = {"scenes": result.scene_map, "duration": result.duration,
-                            "render_seconds": render_seconds}
+                            "render_seconds": render_seconds, **slop_gate.script_fingerprint(script)}
         _set_status(db, task, TaskStatus.AUDIO_SYNCED, 88)
 
         # Carry distribution settings into the stored metadata so the publish step (now or after
         # review) has everything it needs.
+        if slop_warnings:
+            # Warn-level gate findings ride into review (ADR-079): the render went ahead, but the
+            # reviewer — human or autopilot hint — sees what the gate noticed, on the card.
+            result.metadata["slop_warnings"] = slop_warnings[:6]
         result.metadata.setdefault("cta", cfg.get("cta"))
         result.metadata.setdefault("privacy", cfg.get("privacy", "public"))
         # Carry the language so the upload can declare it (defaultAudioLanguage / defaultLanguage) —

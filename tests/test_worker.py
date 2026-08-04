@@ -4,13 +4,27 @@ from __future__ import annotations
 import pytest
 
 
+_script_seq = 0
+
+
 def _script():
+    """A fake script whose narration varies per call — like the real model with avoid-notes. The
+    slop gate (ADR-079) correctly BLOCKS a campaign whose every episode is word-for-word identical,
+    so a static fake would now be pinning the wrong world. Titles carry the sequence too — the
+    gate's duplicate-title check is as real as its narration check."""
     from core.ai_engine import VideoScript
 
+    global _script_seq
+    _script_seq += 1
+    k = _script_seq
     return VideoScript(
         language="en", topic="Robots", synopsis="Robots learn to dream",
-        scenes=[{"index": i, "narration": "n", "pexels_keywords": ["k"]} for i in range(3)],
-        metadata_variations=[{"variant": v, "title": f"T{v}", "description": "d", "tags": ["a", "b", "c"]} for v in "ABC"],
+        scenes=[{"index": i,
+                 "narration": f"Episode fact {k}-{i}: robot number {k * 10 + i} learned "
+                              f"something new about task {i} today.",
+                 "pexels_keywords": ["k"]} for i in range(3)],
+        metadata_variations=[{"variant": v, "title": f"T{v}-{k}",
+                              "description": "d", "tags": ["a", "b", "c"]} for v in "ABC"],
     )
 
 
@@ -401,7 +415,8 @@ def test_synopsis_falls_back_to_title(session, user, channel, monkeypatch):
 
     video_worker.render_task(t.id)
     session.refresh(t)
-    assert t.synopsis == "TA"  # variant-A title stored as the fallback memory
+    # The variant-A title is stored as the fallback memory (the fake's titles vary per call).
+    assert t.synopsis == script.metadata_variations[0].title
 
 
 def test_auto_music_flows_into_render(session, user, channel, monkeypatch, tmp_path):

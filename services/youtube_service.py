@@ -111,6 +111,46 @@ def upload_video(channel: Channel, video_path: str, metadata: dict, user: User |
     return video_id
 
 
+def add_to_series_playlist(channel: Channel, campaign, db, video_id: str) -> None:
+    """Keep every upload of a campaign in one series playlist (ADR-080): binge navigation for
+    viewers, session-time signal for ranking, and every extra minute counts toward the watch-hours
+    threshold. The playlist id is created once and cached on the campaign config; a stale id (the
+    operator deleted the playlist) recreates it once. Fail-open end to end — a playlist mishap must
+    never fail a publish that already succeeded."""
+    from googleapiclient.discovery import build
+
+    try:
+        creds = build_credentials(channel)
+        youtube = build("youtube", "v3", credentials=creds, cache_discovery=False)
+        cfg = dict(campaign.config_json or {})
+        playlist_id = cfg.get("yt_playlist_id")
+        for attempt in (1, 2):
+            if not playlist_id:
+                created = youtube.playlists().insert(part="snippet,status", body={
+                    "snippet": {"title": campaign.topic_name[:150],
+                                "description": "All episodes of this series."},
+                    "status": {"privacyStatus": "public"},
+                }).execute()
+                playlist_id = created["id"]
+                cfg["yt_playlist_id"] = playlist_id
+                campaign.config_json = cfg
+                db.commit()
+            try:
+                youtube.playlistItems().insert(part="snippet", body={
+                    "snippet": {"playlistId": playlist_id,
+                                "resourceId": {"kind": "youtube#video", "videoId": video_id}},
+                }).execute()
+                return
+            except Exception:  # noqa: BLE001 — a dead cached id gets ONE recreate, then give up
+                if attempt == 2:
+                    raise
+                logger.info("Cached playlist %s rejected — recreating once", playlist_id)
+                playlist_id = None
+    except Exception:  # noqa: BLE001
+        logger.warning("Playlist add failed for video %s (publish already succeeded)", video_id,
+                       exc_info=True)
+
+
 def _post_comment(youtube, video_id: str, text: str) -> None:
     try:
         youtube.commentThreads().insert(

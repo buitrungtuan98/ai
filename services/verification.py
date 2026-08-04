@@ -148,6 +148,49 @@ class PageCheck:
     picture: str | None = None
 
 
+# Graph's own words when a token points at something that is not a Page and we ask for a Page-only
+# field: "(#100) Tried accessing nonexisting field (category) on node type (User)". The node type in
+# those brackets is the most direct answer available to "what did I actually paste?".
+_NONEXISTENT_FIELD = "nonexisting field"
+_NODE_TYPE = re.compile(r"on node type \(([A-Za-z]+)\)")
+# metadata.type / the bracketed node type → what to tell the operator they pasted.
+_NODE_ADVICE = {
+    "user": ("That is a personal User token, not a Page Access Token.",
+             "In the Graph API Explorer, switch the token dropdown to your Page before generating it."),
+    "application": ("That is an App token, not a Page Access Token.",
+                    "An app token cannot post as a Page. Generate a Page Access Token for the Page "
+                    "itself — see the steps below."),
+}
+
+
+def _graph_message(resp) -> str:
+    """The `error.message` Graph put in the body, or "" — never raises on a non-JSON body."""
+    try:
+        return ((resp.json() or {}).get("error") or {}).get("message") or ""
+    except ValueError:
+        return ""
+
+
+def _wrong_node_kind(message: str) -> str | None:
+    """`""`/node name if this error means "the token does not point at a Page"; None otherwise.
+
+    Returns a string (possibly empty, when Graph did not name the node) so the caller can tell
+    "definitely not a Page, kind unknown" apart from "not this kind of error at all"."""
+    if _NONEXISTENT_FIELD not in (message or "").lower():
+        return None
+    m = _NODE_TYPE.search(message)
+    return m.group(1) if m else ""
+
+
+def _not_a_page(node: str, name: str = "") -> PageCheck:
+    """One refusal message for "this token is not for a Page", whichever way we found out."""
+    head, how = _NODE_ADVICE.get(node.lower(), (
+        f"That token belongs to a {node or 'different kind of object'}, not to a Facebook Page.",
+        "Generate a permanent Page Access Token for the Page itself — see the steps below."))
+    who = f" It belongs to “{name}”." if name else ""
+    return PageCheck(False, f"{head}{who} {how}")
+
+
 def check_facebook_page(page_id: str, token: str) -> PageCheck:
     """Is this really a Page Access Token for this Page? THREE-state on purpose (ADR-068/072):
     `True` verified · `False` definitely rejected · `None` could not tell.
@@ -159,8 +202,16 @@ def check_facebook_page(page_id: str, token: str) -> PageCheck:
     It asks `/me` rather than `/{page_id}`, because that is the only question worth asking. Reading a
     Page's public name proves nothing — a short-lived USER token (what people copy out of the Graph
     Explorer, and the single most common mistake) reads it happily, so the channel saved as verified
-    and died hours later at publish time. With a PAGE token `/me` IS the Page; with a user token it is
-    a person, and only a Page carries `category`. That one field separates them.
+    and died hours later at publish time. With a PAGE token `/me` IS the Page.
+
+    HOW we tell a Page from a person changed (ADR-077). The original idea — ask for `category`, which
+    only a Page has — was right about Graph's data model and wrong about its API: Graph does not
+    answer a User node with `category: null`, it REFUSES THE WHOLE REQUEST with "(#100) Tried
+    accessing nonexisting field (category) on node type (User)". So the carefully-worded "that is a
+    personal User token" branch was unreachable, and an operator who made exactly the mistake this
+    function exists to catch got Graph's raw complaint about a field they never asked for. Now the
+    request only names fields every node type has and adds `metadata=1`, Graph's own introspection,
+    which reports the node type as data instead of as an error.
     """
     from services.facebook_service import GRAPH, scrub
 
@@ -180,18 +231,30 @@ def check_facebook_page(page_id: str, token: str) -> PageCheck:
     try:
         import requests
 
+        # Only fields that exist on EVERY node type, so the request itself can never be the thing
+        # that fails; `metadata=1` is what actually identifies what the token points at.
         resp = requests.get(
             f"{GRAPH}/me",
-            params={"fields": "id,name,category,picture.type(large)", "access_token": token},
+            params={"fields": "id,name,picture.type(large)", "metadata": 1, "access_token": token},
             timeout=TIMEOUT)
         if resp.status_code == 200:
             data = resp.json() or {}
             got_id, name = str(data.get("id") or ""), data.get("name") or ""
-            if not data.get("category"):
-                who = f" It belongs to “{name}”." if name else ""
-                return PageCheck(False, "That is a personal User token, not a Page Access Token."
-                                        f"{who} In the Graph API Explorer, switch the token dropdown "
-                                        "to your Page before generating it.")
+            node = str((data.get("metadata") or {}).get("type") or "").lower()
+            if node and node != "page":
+                return _not_a_page(node, name)
+            if not node:
+                # Introspection did not answer. Rather than trust an unidentified token — the whole
+                # point of this function — ask the one Page-only question directly, where a #100 IS
+                # the answer instead of an accident.
+                probe = requests.get(f"{GRAPH}/me", params={"fields": "category",
+                                                            "access_token": token}, timeout=TIMEOUT)
+                if probe.status_code != 200:
+                    kind = _wrong_node_kind(_graph_message(probe))
+                    if kind is not None:
+                        return _not_a_page(kind, name)
+                    return PageCheck(None, "Could not confirm this is a Page token — saved without "
+                                           "checking.")
             # A numeric id the operator typed must match; a username/URL is resolved by Graph instead.
             if wanted.isdigit() and got_id and wanted != got_id:
                 return PageCheck(False, f"This token belongs to the Page “{name}” (id {got_id}), "
@@ -201,11 +264,12 @@ def check_facebook_page(page_id: str, token: str) -> PageCheck:
                              page_id=got_id or wanted, name=name or None, picture=pic)
         # Graph answers a bad token with 400/401/403 and an explanation of its own.
         if resp.status_code in (400, 401, 403, 404):
-            detail = ""
-            try:
-                detail = ((resp.json() or {}).get("error") or {}).get("message") or ""
-            except ValueError:
-                pass
+            detail = _graph_message(resp)
+            # A field-does-not-exist complaint is never news the operator can use — it is about OUR
+            # request, not their token. Translate it into what it actually means (ADR-077).
+            kind = _wrong_node_kind(detail)
+            if kind is not None:
+                return _not_a_page(kind)
             return PageCheck(False, scrub(detail, token)
                              or f"Facebook rejected these details (HTTP {resp.status_code}).")
         return PageCheck(None, f"Facebook answered HTTP {resp.status_code} — could not verify now.")

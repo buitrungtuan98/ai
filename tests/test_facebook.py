@@ -50,7 +50,11 @@ class FakeResp:
 
 
 def _page(**over):
+    # `metadata.type` is what identifies the node now (ADR-077) — `category` is still what a real
+    # Page carries, but asking for it up front is what broke: Graph refuses the whole request for a
+    # node that has no such field, rather than answering without it.
     data = {"id": "1234567890", "name": "Mẹo Bếp Nhà Mình", "category": "Food & Beverage",
+            "metadata": {"type": "page"},
             "picture": {"data": {"url": "https://scontent.example/pic.jpg"}}}
     data.update(over)
     return data
@@ -69,14 +73,15 @@ def _graph_error(message, code=None, etype=None, status=400):
 def test_a_user_token_is_refused_however_readable_the_page_is(monkeypatch, real_check):
     """THE bug: the old check read `/{page_id}?fields=id,name`, which a short-lived USER token — the
     one the Graph Explorer hands you by default — reads perfectly. The channel saved as verified and
-    died hours later at publish time."""
+    died hours later at publish time.
+
+    `metadata.type` is the identification now; this fake is what Graph really sends for a person."""
     import requests
 
     from services import verification
 
-    # A user token's /me is a person: it has no `category`. That single field separates them.
-    monkeypatch.setattr(requests, "get",
-                        lambda *a, **k: FakeResp(200, {"id": "777", "name": "Trung Tuấn"}))
+    monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResp(
+        200, {"id": "777", "name": "Trung Tuấn", "metadata": {"type": "user"}}))
     check = verification.check_facebook_page("1234567890", "user-token")
     assert check.ok is False
     assert "not a Page Access Token" in check.detail
@@ -118,12 +123,16 @@ def test_the_check_asks_me_not_the_public_page(monkeypatch, real_check):
     def spy(url, **kw):
         seen["url"] = url
         seen["fields"] = (kw.get("params") or {}).get("fields", "")
+        seen["metadata"] = (kw.get("params") or {}).get("metadata")
         return FakeResp(200, _page())
 
     monkeypatch.setattr(requests, "get", spy)
     verification.check_facebook_page("1234567890", "t")
     assert seen["url"].endswith("/me")
-    assert "category" in seen["fields"]          # the field that identifies a Page
+    # NOT `category` (ADR-077): naming a Page-only field makes Graph refuse the whole request for a
+    # non-Page token, which is how the operator ended up reading about a field they never asked for.
+    assert "category" not in seen["fields"]
+    assert seen["metadata"] == 1                 # introspection answers the question as DATA
 
 
 def test_graphs_own_rejection_reaches_the_operator_without_the_token(monkeypatch, real_check):
@@ -783,13 +792,19 @@ def test_insights_are_fetched_in_one_batch(monkeypatch, channel):
 
     def fake_post(url, **kw):
         posts.append(kw.get("data") or {})
-        return FakeResp(200, [{"code": 200, "body": json.dumps({"data": [{"values": [{"value": 12}]}]})},
-                              {"code": 200, "body": json.dumps({"data": [{"values": [{"value": 7}]}]})}])
+        return FakeResp(200, [
+            {"code": 200, "body": json.dumps({"data": [
+                {"name": "total_video_views", "values": [{"value": 12}]},
+                {"name": "total_video_view_total_time", "values": [{"value": 300000}]}]})},
+            {"code": 200, "body": json.dumps({"data": [
+                {"name": "total_video_views", "values": [{"value": 7}]}]})}])
 
     monkeypatch.setattr(requests, "post", fake_post)
     monkeypatch.setattr(requests, "get", lambda *a, **k: pytest.fail("should not fetch one by one"))
     out = analytics_service.fetch_facebook_stats(channel, ["v1", "v2"])
-    assert out == {"v1": {"views": 12}, "v2": {"views": 7}}
+    # Views + watched minutes (Graph reports milliseconds — 300,000ms = 5min); a video the API
+    # returns no view-time row for simply lacks the key, it is never invented.
+    assert out == {"v1": {"views": 12, "minutes_watched": 5}, "v2": {"views": 7}}
     assert len(posts) == 1 and "batch" in posts[0]
 
 
@@ -801,7 +816,8 @@ def test_one_unreadable_video_does_not_discard_the_others(monkeypatch, channel):
     channel.encrypted_credentials = json.dumps({"page_id": "P", "page_access_token": "tok"})
     monkeypatch.setattr(requests, "post", lambda *a, **k: FakeResp(200, [
         {"code": 400, "body": json.dumps({"error": {"message": "no access"}})},
-        {"code": 200, "body": json.dumps({"data": [{"values": [{"value": 5}]}]})},
+        {"code": 200, "body": json.dumps({"data": [
+            {"name": "total_video_views", "values": [{"value": 5}]}]})},
     ]))
     assert analytics_service.fetch_facebook_stats(channel, ["bad", "good"]) == {"good": {"views": 5}}
 
@@ -1003,3 +1019,130 @@ def test_secret_boxes_are_rendered_by_one_macro(client):
                  if 'type="password"' in p.read_text(encoding="utf-8")
                  and p.name not in {"macros.html", "login.html"}]   # login IS a login: it may save
     assert not offenders, f"hand-written secret input(s) — use ui.secret(): {offenders}"
+
+
+# ── ADR-077 — the refusal must name the mistake, not our own request ──────────────────────────
+# Reported live: "add facebook thấy chớp cái rồi không vô" with the banner
+#   ⚠ Not connected. (#100) Tried accessing nonexisting field (category)
+# The verdict was right — that WAS a User token — but the explanation was about a field the operator
+# never typed. The cause was ours: `check_facebook_page` asked `/me?fields=…,category,…` because only
+# a Page has `category`, which is true of Graph's data model and false of its API. Graph does not
+# answer a User node with `category: null`; it refuses the entire request with #100. So the branch
+# that says "that is a personal User token" could never run, and the fallback dumped Graph's
+# complaint straight onto the page.
+
+USER_100 = ("(#100) Tried accessing nonexisting field (category) on node type (User)")
+
+
+def test_the_reported_error_now_names_the_actual_mistake(monkeypatch, real_check):
+    import requests
+
+    from services import verification
+
+    monkeypatch.setattr(requests, "get",
+                        lambda *a, **k: _graph_error(USER_100, code=100, etype="OAuthException"))
+    check = verification.check_facebook_page("1175508495653784", "EAA" + "x" * 200)
+    assert check.ok is False
+    assert "personal User token" in check.detail          # the message written for exactly this
+    assert "Graph API Explorer" in check.detail           # …and how to fix it
+    # None of Graph's complaint about OUR request survives into the operator's banner.
+    assert "nonexisting" not in check.detail and "#100" not in check.detail
+    assert "category" not in check.detail
+
+
+def test_an_app_token_is_named_too(monkeypatch, real_check):
+    """Same shape, different node: an app token cannot post as a Page either."""
+    import requests
+
+    from services import verification
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResp(
+        200, {"id": "42", "name": "My App", "metadata": {"type": "application"}}))
+    check = verification.check_facebook_page("1234567890", "app-token")
+    assert check.ok is False
+    assert "App token" in check.detail and "My App" in check.detail
+
+
+def test_an_unnamed_node_type_is_still_refused_clearly(monkeypatch, real_check):
+    """Graph does not always put the node type in the message; refusing is still correct."""
+    import requests
+
+    from services import verification
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _graph_error(
+        "(#100) Tried accessing nonexisting field (category)", code=100))
+    check = verification.check_facebook_page("1", "t")
+    assert check.ok is False
+    assert "not to a Facebook Page" in check.detail
+    assert "nonexisting" not in check.detail
+
+
+def test_if_introspection_goes_quiet_the_page_only_question_is_asked_directly(monkeypatch,
+                                                                             real_check):
+    """Belt and braces: `metadata` is documented and stable, but if a future API version drops it we
+    must not start trusting unidentified tokens — that is the whole job of this function."""
+    import requests
+
+    from services import verification
+
+    calls = []
+
+    def responder(url, **kw):
+        fields = (kw.get("params") or {}).get("fields", "")
+        calls.append(fields)
+        if fields == "category":                       # the direct probe
+            return _graph_error(USER_100, code=100)
+        return FakeResp(200, {"id": "777", "name": "Trung Tuấn"})   # no metadata in the reply
+
+    monkeypatch.setattr(requests, "get", responder)
+    check = verification.check_facebook_page("1234567890", "user-token")
+    assert calls == ["id,name,picture.type(large)", "category"]
+    assert check.ok is False and "personal User token" in check.detail
+
+
+def test_a_page_verifies_through_the_fallback_probe_too(monkeypatch, real_check):
+    import requests
+
+    from services import verification
+
+    def responder(url, **kw):
+        if (kw.get("params") or {}).get("fields") == "category":
+            return FakeResp(200, {"category": "Food & Beverage"})
+        return FakeResp(200, _page(metadata=None))     # introspection absent
+    monkeypatch.setattr(requests, "get", responder)
+    check = verification.check_facebook_page("1234567890", "page-token")
+    assert check.ok is True and check.page_id == "1234567890"
+
+
+def test_an_unidentifiable_token_is_could_not_tell_never_verified(monkeypatch, real_check):
+    """No metadata AND the probe fails for an unrelated reason: saving unverified is honest;
+    claiming "verified" would be the lie this function exists to remove."""
+    import requests
+
+    from services import verification
+
+    def responder(url, **kw):
+        if (kw.get("params") or {}).get("fields") == "category":
+            return FakeResp(500, {})
+        return FakeResp(200, {"id": "1", "name": "?"})
+    monkeypatch.setattr(requests, "get", responder)
+    assert verification.check_facebook_page("1", "t").ok is None
+
+
+def test_the_banner_does_not_put_our_words_in_facebooks_mouth(client):
+    """The reason is sometimes Graph's sentence and sometimes our translation of it. Saying
+    "Facebook said" over our own diagnosis is a small lie, and this check exists to remove those."""
+    page = client.get("/channels?flash=fb_rejected"
+                      "&flash_reason=That+is+a+personal+User+token%2C+not+a+Page+Access+Token.").text
+    assert "That is a personal User token" in page
+    assert "Facebook said" not in page
+    assert "Why:" in page
+
+
+def test_a_refusal_opens_the_token_guide_it_points_at(client):
+    """The refusal tells the operator to switch a dropdown in the Graph Explorer; the steps for that
+    sat collapsed, so following the advice needed one more hunt at the worst moment."""
+    page = client.get("/channels?flash=fb_rejected&flash_reason=x").text
+    guide = page.split("How do I get a permanent Page Access Token", 1)[0]
+    # The <details> immediately wrapping the guide summary carries `open`.
+    assert guide.rstrip().endswith("<summary>") or "open" in guide.rsplit("<details", 1)[-1]

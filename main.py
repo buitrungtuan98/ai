@@ -42,7 +42,7 @@ from auth.dependencies import (
     get_owned_campaign,
     get_owned_channel,
 )
-from core import autopilot, failure, retention, timezones
+from core import autopilot, failure, monetize, retention, timezones
 from core.config import settings
 from core.tts import QUOTE_VOICES, VOICE_CHOICES
 from core.video_factory import COLOR_GRADE_CHOICES
@@ -782,6 +782,8 @@ def channels_page(request: Request, user: CurrentUser, db: DbDep, status: str = 
          "ap": {c.id: (c.autopilot_json or {}) for c in channels},
          # Growth series per channel (ADR-063): does publishing this much actually move subs/views?
          "growth": {c.id: analytics_service.channel_growth(db, c.id) for c in channels},
+         # Monetization scoreboard (ADR-080): how far from being PAID, in the platform's currency.
+         "monetize": {c.id: monetize.channel_progress(db, c) for c in channels},
          "characters": {c.id: _sanitize_characters(c.characters_json) for c in channels},
          "flash": flash if flash in ("profile", "autopilot", "character", "char_img_ok",
                                      "char_img_fail", "no_google_client", "fb_added",
@@ -1538,9 +1540,12 @@ def _build_campaign_config(
         # optional per-campaign art-style override (blank = the character's own style / channel default).
         "visual_source": "studio" if visual_source == "studio" else "stock",
         "visual_style": visual_style.strip()[:200] or None,
-        # Billboard title (ADR-054): burn the hook title into the video (top, two-tone) AND draw it as
-        # a poster-style thumbnail — the reference-channel look. One toggle drives both. Default off.
-        "title_overlay": "on" if title_overlay == "on" else "off",
+        # Billboard title (ADR-054, reworked in ADR-078): off = nothing drawn · thumb = poster
+        # thumbnail only, the video stays clean · flash = poster thumbnail + the hook flashed over
+        # the first seconds. Legacy "on" (title parked over the whole clip — it ate half the frame)
+        # maps to flash, the behaviour it should have been.
+        "title_overlay": (title_overlay if title_overlay in ("thumb", "flash")
+                          else ("flash" if title_overlay == "on" else "off")),
         # Content style (ADR-056): "story" = normal narrated video (default); "quote" = aesthetic
         # poem-per-video with a per-episode Vibe roll, centered quote text, drawn visuals + scribble
         # cover. `signature` is an optional custom on-screen text mark (channel name), drawn small
@@ -1898,7 +1903,8 @@ def settings_page(request: Request, user: CurrentUser):
 def save_settings(user: CurrentUser, db: DbDep, language: str = Form(""),
                   video_format: str = Form(""), publish_mode: str = Form(""),
                   posting_slots: str = Form(""), total_episodes: str = Form(""),
-                  ai_daily_budget: str = Form(""), image_timeout_s: str = Form("")):
+                  ai_daily_budget: str = Form(""), image_timeout_s: str = Form(""),
+                  slop_blacklist: str = Form("")):
     """Save the whole preferences form (a blank field clears that default — the form always submits
     every field). Values are whitelisted/validated exactly like the campaign form does."""
 
@@ -1908,6 +1914,10 @@ def save_settings(user: CurrentUser, db: DbDep, language: str = Form(""),
     # budget in one attempt.
     if image_timeout_s.strip().isdigit():
         s["image_timeout_s"] = min(600, max(30, int(image_timeout_s)))
+    # Operator additions to the script-gate cliché list (ADR-079) — one phrase per line, merged with
+    # the defaults at check time (never replaces them). Bounded so the prompt/scan stays cheap.
+    if slop_blacklist.strip():
+        s["slop_blacklist"] = "\n".join(slop_blacklist.splitlines()[:50])[:2000]
     if language in _SETTINGS_LANGS:
         s["language"] = language
     if video_format in ("short", "long"):
@@ -2161,7 +2171,7 @@ def rerender_asset(db: DbDep, item=Depends(get_owned_buffer_item), return_to: st
     # script (a plain Retry keeps it and rebuilds the same episode — ADR-069).
     video_worker.drop_script_checkpoint(task)
     db.commit()
-    task.rq_job_id = task_queue.enqueue_render(task.id)
+    task.rq_job_id = video_worker.enqueue_task(task)   # kind-aware: compilations re-concat
     db.commit()
     return _action_redirect(return_to, "rerender", "/assets?flash=rerender")
 
@@ -2844,7 +2854,7 @@ def retry_task(task_id: int, user: CurrentUser, db: DbDep, return_to: str = Form
         return _action_redirect(return_to, "publish", "") if _episode_return(return_to) \
             else {"ok": True, "mode": "publish"}
     db.commit()
-    task.rq_job_id = task_queue.enqueue_render(task.id)
+    task.rq_job_id = video_worker.enqueue_task(task)   # kind-aware: compilations re-concat
     db.commit()
     return _action_redirect(return_to, "rerender", "") if _episode_return(return_to) \
         else {"ok": True, "mode": "render"}
@@ -3226,6 +3236,26 @@ def _work_alerts(db, user) -> list[dict]:
         out.append(_alert("red", f"task-failed:{task.id}", f"Ep {task.episode_number} failed — {reason}",
                           channel=chan, campaign=camp, href=f"/episodes/{task.id}", action="Open",
                           at=task.finished_at or task.updated_at))
+    # Early flops (ADR-079): named within the first day, while the verdict can still change what
+    # renders next — retention says the same thing two days later. Amber: published fine, landed badly.
+    from datetime import timedelta as _td
+
+    recent_cut = datetime.utcnow() - _td(days=3)
+    for task in db.scalars(
+            select(Task).where(Task.user_id == user.id, Task.status == TaskStatus.COMPLETED,
+                               Task.finished_at >= recent_cut)
+            .order_by(Task.finished_at.desc())).all():
+        s = task.stats_json or {}
+        if not s.get("flop"):
+            continue
+        campaign = campaigns.get(task.campaign_id)
+        chan, camp = names(campaign)
+        out.append(_alert("amber", f"task-flop:{task.id}",
+                          f"Ep {task.episode_number} is flopping — {s.get('views_24h', 0)} first-day "
+                          "views vs this campaign's usual. The autopsy note already steers the next "
+                          "scripts; open the episode to judge it yourself.",
+                          channel=chan, campaign=camp, href=f"/episodes/{task.id}", action="Open",
+                          at=task.finished_at))
     for campaign in campaigns.values():
         if campaign.status == CampaignStatus.failed:
             chan, camp = names(campaign)

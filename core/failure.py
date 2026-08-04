@@ -18,6 +18,23 @@ from __future__ import annotations
 # existence, a spent quota is fixed by the reset (the scheduler already waits for it), and a safety
 # block is deterministic for the same script — only a reject/re-render (new script) clears it.
 PATTERNS: tuple[tuple[tuple[str, ...], str, str, str, str, bool], ...] = (
+    # Pre-render quality gate (ADR-079). NOT transient: the autopilot's retry regenerates against
+    # the same recent episodes with the same avoid-notes, so it would spend AI calls to fail the
+    # same way — this one needs a human to adjust the topic, the blacklist, or judge the draft.
+    # A compilation with too few library masters heals by PUBLISHING more episodes, not by
+    # retrying the concat — the same result would come back every time (ADR-082).
+    (("compilable episode",),
+     "Not enough episodes in the library to build a compilation yet",
+     "Masters are retained into the library as episodes publish (only from after this feature "
+     "shipped). Let the campaign publish a few more episodes, then approve a new compile proposal "
+     "— retrying now would just count the same library again.",
+     "/campaigns", "Open campaigns", False),
+    (("failed the quality gate",),
+     "The script was judged too repetitive or generic to be worth rendering",
+     "Two drafts in a row failed the pre-render quality gate (details in the raw error) — the "
+     "campaign may be running out of fresh angles on this topic. Adjust the topic or persona, "
+     "trim the blacklist in Settings, or Retry for a fresh attempt when you disagree.",
+     "/settings", "Review settings", False),
     # Facebook's own OAuth wording, ahead of the generic key class because the FIX IS SOMEWHERE ELSE:
     # an API key lives on /credentials, a Page token lives on the channel. These phrases only ever
     # come from Graph. Before this, a dead Page token classified as a generic failure and the

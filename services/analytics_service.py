@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import select
 
-from core import retention
+from core import flop, retention
 from database.models import Campaign, Channel, Task
 from database.types import Platform, TaskStatus
 
@@ -86,7 +86,7 @@ def fetch_youtube_stats(channel: Channel, video_ids: list[str]) -> dict[str, dic
         ids="channel==MINE",
         startDate="2020-01-01",
         endDate=datetime.utcnow().strftime("%Y-%m-%d"),
-        metrics="views,likes,averageViewedPercentage",
+        metrics="views,likes,averageViewedPercentage,estimatedMinutesWatched",
         dimensions="video",
         filters="video==" + ",".join(_capped(video_ids, MAX_STATS_IDS, "views/likes")),
         maxResults=MAX_STATS_IDS,
@@ -94,7 +94,11 @@ def fetch_youtube_stats(channel: Channel, video_ids: list[str]) -> dict[str, dic
     out: dict[str, dict] = {}
     for row in resp.get("rows", []) or []:
         vid, views, likes, avg_pct = row[0], row[1], row[2], row[3]
-        out[vid] = {"views": int(views), "likes": int(likes), "avg_pct_viewed": round(float(avg_pct), 1)}
+        out[vid] = {"views": int(views), "likes": int(likes),
+                    "avg_pct_viewed": round(float(avg_pct), 1)}
+        # Watched minutes — monetization's real currency (ADR-080); absent on very old API rows.
+        if len(row) > 4 and row[4] is not None:
+            out[vid]["minutes_watched"] = int(row[4])
     return out
 
 
@@ -174,7 +178,8 @@ def fetch_facebook_stats(channel: Channel, video_ids: list[str]) -> dict[str, di
     # ONE batched Graph call instead of one request per video (ADR-073). Fifty round trips every
     # stats pass was fifty chances to be rate-limited and fifty times the latency, for data that
     # arrives in a single response. Graph caps a batch at 50, which is the cap already applied above.
-    batch = [{"method": "GET", "relative_url": f"{vid}/video_insights/total_video_views"}
+    batch = [{"method": "GET",
+              "relative_url": f"{vid}/video_insights/total_video_views,total_video_view_total_time"}
              for vid in ids]
     try:
         resp = requests.post(GRAPH, data={"access_token": token, "batch": _json.dumps(batch)},
@@ -197,8 +202,14 @@ def fetch_facebook_stats(channel: Channel, video_ids: list[str]) -> dict[str, di
             continue
         try:
             rows = (_json.loads(item.get("body") or "{}") or {}).get("data", [])
-            views = rows[0]["values"][0]["value"] if rows else 0
-            out[vid] = {"views": int(views)}
+            entry: dict = {"views": 0}
+            for r in rows:
+                val = (r.get("values") or [{}])[0].get("value", 0)
+                if r.get("name") == "total_video_views":
+                    entry["views"] = int(val)
+                elif r.get("name") == "total_video_view_total_time":
+                    entry["minutes_watched"] = int(val) // 60000   # Graph reports milliseconds
+            out[vid] = entry
         except Exception:  # noqa: BLE001 — an unexpected shape for one video, not for all of them
             logger.warning("FB insights unreadable for video %s", vid)
     return out
@@ -281,12 +292,62 @@ def collect_early_stats(db, now: datetime | None = None) -> int:
             merged = {**(t.stats_json or {}), **stats[t.published_video_id],
                       "early_fetched_at": now.isoformat()}
             merged["early"] = merged.get("avg_pct_viewed") is None
+            # First-day snapshot (ADR-079): stamped ONCE on the first hourly refresh past 24h of
+            # age, so every episode's number means the same thing — "views at ~day one", the value
+            # flop judgments compare. Episodes are re-fetched hourly until 48h, so the 24-48h window
+            # guarantees the stamp lands.
+            if (merged.get("views_24h") is None and t.finished_at
+                    and (now - t.finished_at) >= timedelta(hours=flop.SNAPSHOT_AGE_H)):
+                merged["views_24h"] = int(merged.get("views") or 0)
             t.stats_json = merged
             updated += 1
     if updated:
         db.commit()
         logger.info("collect_early_stats updated %d young episode(s)", updated)
+        # Judge flops for every campaign that just gained a first-day snapshot — while the verdict
+        # can still change what renders next, not two days later with retention.
+        for campaign_id in {t.campaign_id for t in due}:
+            campaign = campaigns.get(campaign_id)
+            if campaign is not None:
+                judge_flops(db, campaign)
     return updated
+
+
+def _publish_hour(task, campaign) -> int | None:
+    """The local hour this episode went out, on the campaign's clock — evidence for the autopsy."""
+    if not task.finished_at:
+        return None
+    from zoneinfo import ZoneInfo
+
+    from core.config import settings as _settings
+
+    tz_name = (campaign.config_json or {}).get("timezone") or _settings.TIMEZONE
+    try:
+        return task.finished_at.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo(tz_name)).hour
+    except Exception:  # noqa: BLE001 — a bad zone loses one evidence field, not the autopsy
+        return task.finished_at.hour
+
+
+def judge_flops(db, campaign) -> int:
+    """Judge every not-yet-judged episode of a campaign against its own median first-day views
+    (ADR-079). Below MIN_MEASURED_24H measured episodes this is silent — "not enough data" must
+    never be dressed up as a verdict. Idempotent per episode. Returns new flops recorded."""
+    tasks = db.scalars(select(Task).where(Task.campaign_id == campaign.id,
+                                          Task.stats_json.isnot(None))).all()
+    median = flop.campaign_median_24h(tasks)
+    if median is None:
+        return 0
+    recorded = 0
+    for t in tasks:
+        verdict = flop.is_flop((t.stats_json or {}).get("views_24h"), median)
+        if verdict is None or (t.stats_json or {}).get("flop") is not None:
+            continue
+        if verdict:
+            if flop.record_flop(db, t, campaign, median=median, tz_hour=_publish_hour(t, campaign)):
+                recorded += 1
+        else:
+            flop.mark_fine(db, t)
+    return recorded
 
 
 def collect_stats(db, now: datetime | None = None) -> int:
@@ -380,6 +441,20 @@ def collect_stats(db, now: datetime | None = None) -> int:
                     summary = retention.summarize_drop(curve, scenes)
                     if summary:
                         entry["drop_summary"] = summary
+                        # Late autopsy (ADR-079): the early-views verdict said "flopped", the curve
+                        # now says WHERE. If the opening scene lost them, the flop note gets its
+                        # cause — written once, into the same avoid-notes the next script reads.
+                        if entry.get("flop") and not entry.get("hook_autopsy"):
+                            note = flop.late_autopsy_hook_note(t, summary)
+                            if note:
+                                campaign = campaigns.get(t.campaign_id)
+                                if campaign is not None:
+                                    learning = dict(campaign.learning_json or {})
+                                    notes = (learning.get("flop_notes")
+                                             or [])[-(flop.MAX_FLOP_NOTES - 1):]
+                                    learning["flop_notes"] = notes + [note]
+                                    campaign.learning_json = learning
+                                    entry["hook_autopsy"] = True
             t.stats_json = entry
             updated += 1
     if updated:
@@ -414,6 +489,28 @@ def fetch_youtube_channel_totals(channel: Channel) -> dict | None:
         "views": int(stats.get("viewCount", 0)),
         "videos": int(stats.get("videoCount", 0)),
     }
+
+
+def fetch_youtube_monetization_windows(channel: Channel) -> dict:
+    """{watch_minutes_365d, views_90d} — the exact trailing windows the YouTube Partner Program
+    thresholds are written in (4,000 watch-hours/365d; the Shorts route counts views/90d). Two tiny
+    channel-level Analytics queries, once per day per channel, riding the snapshot pass (ADR-080)."""
+    from googleapiclient.discovery import build
+
+    from services.youtube_service import build_credentials
+
+    creds = build_credentials(channel)
+    analytics = build("youtubeAnalytics", "v2", credentials=creds, cache_discovery=False)
+    end = datetime.utcnow().date()
+    out: dict = {}
+    for key, days, metric in (("watch_minutes_365d", 365, "estimatedMinutesWatched"),
+                              ("views_90d", 90, "views")):
+        resp = analytics.reports().query(
+            ids="channel==MINE", startDate=str(end - timedelta(days=days)), endDate=str(end),
+            metrics=metric).execute()
+        rows = resp.get("rows") or []
+        out[key] = int(rows[0][0]) if rows and rows[0] and rows[0][0] is not None else 0
+    return out
 
 
 def fetch_facebook_page_totals(channel: Channel) -> dict | None:
@@ -494,6 +591,11 @@ def collect_channel_snapshots(db, now: datetime | None = None) -> int:
             continue
         if not totals:
             continue
+        if channel.platform == Platform.youtube:
+            try:
+                totals.update(fetch_youtube_monetization_windows(channel))
+            except Exception:  # noqa: BLE001 — the windows are a bonus; the snapshot still lands
+                logger.warning("Monetization windows fetch failed for channel %s", channel.id)
         db.add(ChannelSnapshot(channel_id=channel.id, day=day, **totals))
         try:
             db.commit()

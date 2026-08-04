@@ -133,6 +133,29 @@ def split_two_tone(text: str) -> tuple[str, str]:
     return (" ".join(words[:cut]), " ".join(words[cut:]))
 
 
+# ── Billboard hook flash (ADR-078) ───────────────────────────────────────────
+# How long the in-video billboard stays on screen. Three seconds is the window both platforms'
+# ranking actually measures (swipe-away happens in the first ~3s); after it the frame must be clean
+# — a title parked over the footage for the whole clip is what killed retention.
+HEADLINE_FLASH_S = 3.0
+# The DRAWN title is a teaser, not the published title. The AI writes 12-15-word Vietnamese hooks;
+# at billboard size those wrap to five or six rows and eat half of a 1920px frame. Cut at a word
+# boundary: an unfinished hook ("VỊ HOÀNG ĐẾ BỎ NGAI VÀNG VÀO CHIẾN KHU…") is a better 3-second
+# curiosity gap than six rows nobody can read in time.
+TEASER_MAX_CHARS = 56
+HEADLINE_MAX_ROWS = 3
+
+
+def teaser(text: str, max_chars: int = TEASER_MAX_CHARS) -> str:
+    """Shorten a drawn title to `max_chars` at a word boundary, with an ellipsis. The published
+    platform title is never touched — this is only for text burned into pixels."""
+    text = " ".join((text or "").split())
+    if len(text) <= max_chars:
+        return text
+    cut = text.rfind(" ", 1, max_chars + 1)
+    return text[: cut if cut > 0 else max_chars].rstrip(" ,.;:!?…-—") + "…"
+
+
 def _ass_inline_accent(headline_accent_hex: str | None) -> str:
     """The inline ASS primary-colour override (`\\c&HBBGGRR&`) for the accent tone-line — the campaign
     brand colour when set, else the default warm yellow."""
@@ -140,26 +163,43 @@ def _ass_inline_accent(headline_accent_hex: str | None) -> str:
     return r"\c&H" + accent_ass[4:] + "&"  # strip the '&H00' alpha prefix → \c&HBBGGRR&
 
 
+def _headline_rows(headline: str, hpx: int, usable: int) -> tuple[list[str], list[str]]:
+    """Wrap the two tone-lines of a billboard headline at `hpx`. Returns (white rows, accent rows)."""
+    line1, line2 = split_two_tone(headline.upper())
+    rows1 = wrap_text(_ass_escape(line1), hpx, usable)
+    rows2 = wrap_text(_ass_escape(line2), hpx, usable) if line2 else []
+    return rows1, rows2
+
+
 def _headline_style_and_event(
     headline: str, *, width: int, height: int, font_name: str,
     accent_hex: str | None, end_s: float,
 ) -> tuple[str, str]:
-    """Build the top-anchored billboard title: a bold UPPERCASE two-tone headline that sits at the top
-    of the frame for the whole clip (reference-channel 'poster' look). Returns (style_line, event_line).
-    Line 1 is white; line 2 is the accent colour. Each tone-line wraps to the usable width."""
-    hpx = max(46, round(height * 0.052))
+    """Build the top-anchored billboard title as a HOOK FLASH (ADR-078): a bold UPPERCASE two-tone
+    headline over the first `HEADLINE_FLASH_S` seconds, fading out — not parked for the whole clip.
+    Returns (style_line, event_line). Line 1 is white; line 2 is the accent colour.
+
+    Sized to be glanceable, not monumental: it starts at ~4% of frame height (the old 5.2% with no
+    row cap let a 13-word hook wrap to six 100px rows — half the frame, for the whole video) and
+    shrinks until the teaser fits `HEADLINE_MAX_ROWS` rows, mirroring the thumbnail's fit-to-width
+    behaviour that the ASS path never had."""
+    headline = teaser(headline)
     usable = width - 2 * MARGIN_PX
     top_margin = round(height * 0.035)
-    line1, line2 = split_two_tone(headline.upper())
-    rows1 = wrap_text(_ass_escape(line1), hpx, usable)
+    hpx, min_px = max(40, round(height * 0.040)), max(30, round(height * 0.026))
+    rows1, rows2 = _headline_rows(headline, hpx, usable)
+    while len(rows1) + len(rows2) > HEADLINE_MAX_ROWS and hpx - 4 >= min_px:
+        hpx -= 4
+        rows1, rows2 = _headline_rows(headline, hpx, usable)
     text = "\\N".join(rows1)
-    if line2:
-        rows2 = wrap_text(_ass_escape(line2), hpx, usable)
+    if rows2:
         text += "\\N{" + _ass_inline_accent(accent_hex) + "}" + "\\N".join(rows2)
     # Alignment 8 = top-centre; heavy outline + shadow so the title reads over any footage/drawing.
     style = (f"Style: Headline,{font_name},{hpx},&H00FFFFFF,&H00000000,&H80000000,"
              f"1,0,1,6,3,8,{MARGIN_PX},{MARGIN_PX},{top_margin},1")
-    event = f"Dialogue: 0,{_ass_time(0)},{_ass_time(end_s)},Headline,,0,0,0,,{text}"
+    # Quick fade in, gentle fade out — the frame is fully clean after the flash window.
+    event = (f"Dialogue: 0,{_ass_time(0)},{_ass_time(min(HEADLINE_FLASH_S, end_s))},Headline,,0,0,0,,"
+             r"{\fad(150,400)}" + text)
     return style, event
 
 
@@ -200,9 +240,9 @@ def build_ass(
     caption theme (classic / highlight / boxed / neon). `width`/`height` set PlayRes so captions
     position correctly for any output geometry (default vertical 1080×1920).
 
-    When `headline` is given, a bold two-tone UPPERCASE billboard title is anchored to the TOP of the
-    frame for the whole clip (word captions still live in the lower third — no collision), matching
-    the reference-channel poster look. `style="quote"` (ADR-056) shows the whole line ONCE, centered
+    When `headline` is given, a bold two-tone UPPERCASE billboard title flashes at the TOP of the
+    frame for the first `HEADLINE_FLASH_S` seconds and fades out (ADR-078) — word captions still
+    live in the lower third, no collision. `style="quote"` (ADR-056) shows the whole line ONCE, centered
     mid-screen in soft italic with a gentle fade — the aesthetic quote look, not karaoke. `signature`
     draws a small italic mark (the channel name) lower-centre on every frame."""
     if style == "line":

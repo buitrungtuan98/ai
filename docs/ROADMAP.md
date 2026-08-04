@@ -1565,6 +1565,92 @@ field's "too short" branch went with them: `minlength` already says it, in the b
 - Verified: 564 tests (18 new), ruff clean, docs guard green; the reject loop, the cadence lockout and
   the stats data-loss each reproduced first, then pinned; new UI states checked in Chromium at 390px.
 
+## R15 — the refusal must name the mistake, not our own request `DONE`
+
+Reported: *"add facebook thấy chớp cái rồi không vô"* — banner
+`⚠ Not connected. (#100) Tried accessing nonexisting field (category)`.
+
+- **The verdict was right and the explanation was ours.** That was a User token — the mistake ADR-072
+  exists to catch — but `check_facebook_page` asked `/me?fields=…,category,…` because only a Page has
+  `category`. True of Graph's data model, false of its API: Graph refuses the WHOLE request for a node
+  without that field, so the "that is a personal User token" branch was **unreachable** and the
+  operator read a complaint about a field they never typed.
+- **The test hid it.** It faked `200` with no `category` — my assumption rather than Graph's behaviour
+  — and passed for months over dead code. Rewritten to the real response shape.
+- **Identification now uses `metadata=1`**, Graph's own introspection, with only universally-valid
+  fields — the request cannot be the thing that fails. A `#100` that still arrives is translated into
+  what it means, reading the node type out of Graph's text (`on node type (User)`). A direct probe is
+  the fallback, and an unidentifiable token is "saved without checking", never "verified".
+- **`Why:` replaces `Facebook said:`** — the reason is sometimes Graph's words and sometimes ours, and
+  attributing ours to Facebook is a small lie on the one surface that must not tell them.
+- **A refusal opens the token guide it points at**, instead of telling the operator to follow steps
+  that are still collapsed.
+- Verified: 572 tests (8 new), ruff clean, docs guard green; the operator's exact submission replayed
+  in Chromium at 390px against a Graph stub returning their verbatim error — the banner now names the
+  mistake, leaks none of Graph's complaint about our request, keeps the Page ID, and opens the guide.
+
+## R16 — billboard: a 3-second hook flash, not a half-screen tenant `DONE`
+
+Reported with a frame: the billboard title covered ~half the screen, doubled into two offset
+copies, for all 54 seconds.
+
+- **Doubled**: the poster thumbnail extracts a frame from the finished video — every frame already
+  carried the burned title — then drew the same title again in PIL; and the frame scorer prefers
+  edge-rich frames, i.e. the ones fullest of outlined text. Frames are now sampled AFTER the flash
+  window, so the double-draw is impossible by construction.
+- **Half the screen, all episode**: every scene's ASS starts at its own t=0 and all of them got the
+  headline; plus no row cap at 5.2% height per row against 13-word AI hooks. Now: scene 0 only,
+  3s + fade-out, teaser-cut at a word boundary (~56 chars), fitted into ≤3 rows from 4% height.
+- **`title_overlay` = `off` | `thumb` | `flash`** (legacy "on"/bool → flash, normalized in one
+  place — "off" is a truthy string). `thumb` = poster thumbnail, clean video. `flash` (recommended)
+  = thumbnail + the hook over the opening ~3s — the window Shorts/Reels ranking actually measures,
+  readable even muted; the footage gets the frame back for the part retention is scored on.
+- Verified: 578 tests (7 new), ruff clean, docs guard green; before/after frames rendered at scale
+  with the operator's exact 13-word hook (41% of frame + doubled → 13% for 3s → clean), poster
+  thumbnail produced by the real PIL path.
+
+## R17 — the money machine: autopilot with a brain, anti-flop, anti-slop `DONE`
+
+Approved in full ("Duyệt làm hết tất cả"): automate M1-M4 under the autopilot, add anti-flop and
+anti-AI-slop layers, and give the autopilot a Gemini decision layer — data-driven, with a reason on
+every decision — behind hard rails. Shipped as six commits, each test-green:
+
+- **C1 — script quality gate** (ADR-079): deterministic, pre-render, 0 AI — self-repetition
+  (3-gram), duplicate titles, cliché filler (operator-extendable in Settings), rambling hooks.
+  Block → one regenerate with the issues as avoid-notes → honest non-transient failure.
+- **B1+B2 — early-flop detection + autopsy** (ADR-079): `views_24h` stamped once at 24h, flop =
+  <30% of the campaign's own median (≥5 measured, silence below), autopsy note self-feeds the next
+  scripts; the retention curve later upgrades it when scene 1 is to blame.
+- **A1 — measure the money** (ADR-080): watched minutes collected on both platforms, YPP windows on
+  the daily snapshot, an honest per-channel scoreboard on Channels, milestones announced once per
+  level (phone only at 100%).
+- **D1-D3 — the strategy council** (ADR-081): code computes → Gemini interprets (1 call/channel/day,
+  closed action menu, reasons in the channel's language) → rails validate (bounds, live campaign,
+  and the anti-hallucination rule: numbers ≥10 must exist in the pack). Proposals ride the existing
+  inbox/auto-apply. Review/retry/catch-up stay 100% deterministic.
+- **A2 — best-of compilations** (ADR-082): masters retained at publish (capped library), stream-copy
+  concat of top-retention episodes with chapters, sentinel numbering, review-always, kind-aware
+  retries. The long-form format that actually pays, built from work already done.
+- **A3 — golden-hour slot changes**: the council proposes from the measured hour table; applied
+  reversibly (one slot swapped), one change per campaign per week, full-auto allowed within that.
+- **B3 — the flop breaker**: 3 straight first-day flops → a wind-down proposal days before
+  retention could say the same. Proposes; never auto-stops.
+- **C2 — AI script judge**: same /10 scale and reject threshold as vision QC, shares the single
+  regenerate budget with the gate, fail-open, skipped above the 80% AI-budget reserve.
+- **D4 — manager report**: the council's verdict delivered as a daily manager's note (log always,
+  phone only when something was filed) — no extra AI call.
+- **A4 — series playlists**: every YouTube upload joins its campaign's playlist (created once,
+  cached, fail-open) — session time + watch-hours toward the threshold.
+- Self-audit hardening after the batch: a compilation is labeled “Best-of” everywhere (not
+  “Ep 9001”), rejecting one never writes a script avoid-note (an editing complaint must not steer
+  the scriptwriter), a thin-library compile failure is non-transient (it heals by publishing more,
+  not by retrying the concat), and a slot-change TARGET must be measured — ±1h of an hour with real
+  first-day numbers that beat the hour being abandoned, so “move to 03:00” can never pass on format
+  alone.
+- Verified: 621 tests (35 new across the batch), ruff clean, docs guard green; every loop capped
+  (one regenerate, one slot change/week, one council run/day, milestone once per level); every
+  autopilot behaviour simulated in tests including AI-garbage verdicts and judge outages.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

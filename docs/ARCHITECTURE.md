@@ -1756,3 +1756,212 @@ one that works; the `data-*` attributes stay as cheap insurance, labelled as suc
 **Rejected: make auto-rejects trip the circuit breaker.** It would pause the whole campaign over a QC
 opinion, which is a much heavier action than the evidence supports. Escalating one episode is
 proportionate; the operator can still stop the campaign themselves.
+
+### ADR-077 — Identify a Page with Graph's introspection, not by asking for a field that errors
+
+**Context.** An operator reported: *"add facebook thấy chớp cái rồi không vô"*, with the banner
+
+> ⚠ Not connected. (#100) Tried accessing nonexisting field (category)
+
+The verdict was correct — that really was a User token, the exact mistake ADR-072 was built to catch
+— but the explanation was about a field the operator never typed, and the carefully-worded message
+written for precisely this case never appeared.
+
+ADR-072 reasoned: with a Page token `/me` IS the Page, and only a Page carries `category`, so that one
+field separates a Page from a person. The reasoning is right about Graph's **data model** and wrong
+about its **API**. Graph does not answer a User node with `category: null` — it refuses the entire
+request:
+
+    (#100) Tried accessing nonexisting field (category) on node type (User)
+
+So `check_facebook_page` never reached its own `if not data.get("category")` branch for a User token;
+it fell through to the generic "quote Graph's message" path and printed Graph's complaint about *our*
+request. The branch was unreachable code that looked, in review and in tests, like the feature working.
+
+**The test made it invisible.** `test_a_user_token_is_refused_however_readable_the_page_is` faked Graph
+returning `200` with no `category` — my assumption, not Graph's behaviour. It passed for months over a
+dead branch. A fake is a claim about the world, and this one was never checked against it.
+
+**Decision.**
+
+1. **Ask only for fields every node type has** (`id,name,picture`) and add **`metadata=1`**, Graph's
+   documented introspection, which returns `metadata.type` — `page` / `user` / `application` — as
+   *data*. The request can no longer be the thing that fails, so identification is never an error.
+2. **Translate a `#100 nonexisting field` error into what it means**, wherever it still arrives, and
+   lift the node type out of Graph's own text (`on node type (User)`) to say what was pasted. That
+   complaint is never news the operator can act on: it is about our request, not their token.
+3. **Keep a direct probe as the fallback.** If `metadata` is ever absent, ask the Page-only question
+   on its own, where a `#100` *is* the answer rather than an accident. If that is inconclusive the
+   result is `None` — "saved without checking" — never `True`. Trusting an unidentified token is the
+   failure this whole function exists to prevent.
+4. **`Why:` replaces `Facebook said:` in the banner.** The reason is sometimes Graph's sentence and
+   sometimes our translation of it; attributing our words to Facebook is a small lie, and this surface
+   is the one that must not tell them. The generic "check the Page ID and that it's a permanent token"
+   advice that used to trail the reason is gone — once the reason names the exact mistake, restating
+   the general case reads as though we are not sure.
+5. **A refusal opens the guide it points at.** The message says to switch a dropdown in the Graph API
+   Explorer; those steps sat in a collapsed `<details>`. Following our own advice should not need one
+   more hunt at the moment the operator is already stuck.
+
+**Why this keeps happening in this file.** Three times now the Facebook surface has been wrong in the
+same way: confident about what a remote API returns, with a test that encoded the confidence instead
+of checking it. The structural answer is not more care — it is that a check gating a save must be
+built from responses that cannot fail (`metadata`, universal fields), so there is no error path left
+to mistranslate.
+
+### ADR-078 — The billboard is a 3-second hook flash, and the thumbnail never lands on a titled frame
+
+**Context.** An operator shared a frame of a published 54-second episode with `title_overlay=on`:
+the hook title covered roughly half the screen, doubled into two offset copies, for the entire
+video. Two distinct defects, one root:
+
+1. **The billboard sat over the whole clip — by accident of architecture.** Each scene gets its own
+   ASS file whose clock starts at zero, and `produce()` passed the headline to *every* scene, so
+   every scene re-drew the "opening" title from its own second zero. On top of that the ASS path had
+   no fit logic: 5.2% of frame height per row, unlimited rows, while the AI writes 12–15-word
+   Vietnamese hooks. Thirteen words → six 100px rows → half of 1920, for 54 seconds.
+2. **The thumbnail doubled the title.** The poster thumbnail extracts a frame *from the finished
+   video* — where every frame already carried the burned headline — then drew the same title again
+   with PIL at a slightly different size and wrap. Worse, `_frame_score` selects the candidate
+   richest in edges, and giant outlined text is nothing but edges, so the scorer actively preferred
+   the most text-contaminated frames.
+
+**What the platforms actually reward.** Shorts/Reels feeds autoplay — the custom thumbnail is
+essentially invisible there (it shows in search, channel pages and shares). What ranking measures is
+behaviour: the stay-or-swipe decision in the first ~3 seconds, then retention over the rest. A title
+parked over the footage for the whole clip hurts the second number; no in-video title at all wastes
+the first window, especially for muted viewers. The right shape is the one reference channels use: a
+title that flashes over the opening seconds and gets out of the way.
+
+**Decision.**
+
+1. **`title_overlay` is tri-state: `off` | `thumb` | `flash`.** `thumb` draws the poster thumbnail
+   and keeps the video clean; `flash` adds the hook over the first `HEADLINE_FLASH_S` (3s) with a
+   fade-out. Legacy `"on"`/`True` normalize to `flash` — the behaviour "on" should have been — in
+   ONE place (`_title_mode`), because "off" is a truthy string and raw branching on the stored value
+   is exactly one `if title_overlay` away from drawing titles on every campaign.
+2. **The flash belongs to scene 0 only.** Passing the headline to one scene's ASS is the whole fix
+   for "parked over the entire video".
+3. **The drawn title is a teaser.** `teaser()` cuts at a word boundary near 56 chars; the flash
+   fits itself into ≤3 rows starting at 4% of frame height (mirroring the fit-to-width the PIL
+   poster always had and the ASS path never did). An unfinished hook is a better 3-second curiosity
+   gap than six rows nobody can read in time. The *published* title is never touched.
+4. **Thumbnail frames are sampled after the flash window** (`min_at_s`), so the poster can never be
+   drawn over a frame that already carries a title — the double-draw becomes impossible by
+   construction, not by luck. A clip shorter than the window caps to its end instead: a frame with
+   the title beats no thumbnail.
+
+**Rejected: title only on the thumbnail (the first instinct).** It fixes both defects and was
+seriously considered, but it surrenders the one window the feed actually measures — the first
+seconds, where a written hook works even for muted viewers and the thumbnail is never shown. `thumb`
+exists for operators who want a fully clean video; `flash` is the recommended default and what
+legacy "on" maps to.
+
+**Cost.** Existing "on" campaigns change behaviour mid-flight: their next episodes carry a 3-second
+flash instead of a permanent billboard. That is the point of the change, and the old behaviour is
+deliberately not preserved as an option — a mode whose observed effect is "cover half the video with
+text for its whole length" has no defensible use.
+
+### ADR-079 — Anti-slop and anti-flop: kill bad content where it is cheapest
+
+**Context.** The factory's only quality judge was vision QC on the FINISHED video — a bad script
+cost 30-60 minutes of CPU before anything noticed. And its only performance feedback was retention,
+which arrives ~2 days late — by then two more episodes had shipped into the same hole. Two loops,
+both closing too late.
+
+**Decision — four gates, ordered by cost:**
+
+1. **Deterministic script gate (0 AI, pre-render).** Word-3-gram similarity vs the campaign's
+   recent episodes catches "the model wrote the same episode again" (synopsis memory steers the
+   premise, never the sentences); a duplicate title blocks outright (a spam signal to both
+   platforms); cliché filler (VN+EN defaults + operator additions from Settings) and a rambling
+   first sentence warn into review. Every finished episode leaves a narration+title fingerprint in
+   `render_json` for future gates.
+2. **AI script judge (1 call, pre-render, C2).** Scores hook/specificity on the SAME /10 scale and
+   reject threshold as the vision QC — one vocabulary of quality. Fail-open: an outage is "no
+   verdict", never a stalled factory; skipped above the 80% AI-budget reserve.
+3. **One regenerate, total.** Gate and judge share a single regenerate budget; the retry carries
+   the specific issues as avoid-notes. A second failure fails the task honestly, classified
+   NON-transient (an autopilot retry would spend AI calls failing identically), with no checkpoint
+   — Retry writes a fresh script.
+4. **Early-flop detection (post-publish).** `views_24h` is stamped once at 24h; a flop = <30% of
+   the campaign's OWN median, judged only past 5 measured episodes — silence beats a guess. The
+   autopsy (views vs typical, variant, local publish hour, premise) writes itself into the same
+   avoid-notes the next script reads; when the retention curve later blames scene 1, the note gains
+   its cause ("the hook failed"). Three straight flops propose a wind-down (the flop breaker) days
+   before retention could say the same — proposing, never auto-stopping.
+
+**Why the gate is not an AI call first.** The n-gram check is exact, free, and catches the dominant
+failure (self-repetition) better than a judge reading one script in isolation ever could — the
+judge never sees the other episodes; the gate is built from them.
+
+### ADR-080 — Measure the money: watch time, thresholds, and the series playlist
+
+**Context.** Monetization thresholds are written in watch TIME (YPP: 4,000 hours/365d; Facebook
+in-stream: 600,000 minutes/60d) and the factory collected minutes nowhere — it could not see how
+far a channel was from being paid, let alone steer toward it.
+
+**Decision.** `estimatedMinutesWatched` rides the existing per-video Analytics query; Facebook's
+batched insight call adds `total_video_view_total_time`; each daily snapshot stamps the two YPP
+trailing windows (365d minutes, 90d views) — two tiny channel-level queries. `core/monetize.py`
+turns them into a per-channel scoreboard with honesty rules baked in: the 90d views bar is labeled
+an approximation (the free API does not split Shorts out), Facebook minutes are a labeled lower
+bound (only OUR episodes are summed), and no data means no bar — a progress bar over a guess is
+worse than none. The daily pass announces 80%/100% of each bar exactly once per level
+(`autopilot_json.milestones`); only 100% pings the phone. Every YouTube upload also lands in a
+per-campaign series playlist (created once, id cached on the campaign, one recreate if the operator
+deleted it, fail-open end to end) — binge navigation, session-time signal, and every extra minute
+counts toward the threshold.
+
+### ADR-081 — The strategy council: Gemini decides, rails keep it honest
+
+**Context.** The operator asked for an autopilot that "uses Gemini to crosscheck and decide,
+everything data-driven with reason and decision" — and that feels like a manager who understands,
+not a rule table. The danger in that ask is well known: an LLM given authority invents statistics
+and actions. The design answer is a boundary, not trust.
+
+**Decision — map-reduce with rails:**
+
+    code computes every number → the model interprets and chooses → code validates the choice
+
+`evidence_pack` (0 AI) computes everything the council may reason from — classification, flop
+counts, the publish-hour → first-day-views table, A/B retention, QC scores, monetization progress,
+and the council's own recent decisions (its memory, so it stays consistent instead of re-litigating
+daily). ONE structured call per channel per day (temperature 0.3) returns decisions from a CLOSED
+menu — extend / wind_down / successor / tune / slot_change / compile / hold — each with a reason in
+the channel's language, cited evidence, and confidence. The rails then refuse anything out of
+bounds: unknown action, dead campaign, params past their caps (extend ≤ +50%, one applied
+slot-change per week, compile needs ≥10 measured episodes), and **any number ≥ 10 in the model's
+prose that does not literally exist in the pack** — the anti-hallucination line. Valid decisions
+file as ordinary AutopilotAction proposals: copilot = inbox, full-auto = the existing auto-apply.
+Cached on the evidence hash (own filings excluded, or every verdict would invalidate its own
+cache); guarded by key, the 80% budget reserve, and one-per-day; step-isolated per ADR-076.
+
+The council's verdict doubles as the **manager report**: what I saw, what I filed, what I'm
+watching — logged daily, sent to the phone only when something was filed. No extra AI call; the
+verdict IS the report.
+
+**What this deliberately is not.** Review, retry and catch-up stay 100% deterministic — Gemini
+down means strategy pauses, never safety. And "feels like it understands" is engineered honestly:
+real numbers, real memory, consistent decisions — while correctness is guaranteed by the rails and
+the data, never by the model's understanding.
+
+### ADR-082 — Best-of compilations: the long-form money format from work already done
+
+**Context.** Shorts RPM is cents; long-form RPM is 10-30× and mid-rolls need 8+ minutes. The
+factory only made Shorts — and deleted every master at publish, destroying the raw material.
+
+**Decision.** Published masters are retained into a per-campaign library (moved at publish, capped
+at the 24 newest, fail-open to plain deletion so retention can never block a publish). A
+compilation is a stream-copy concat of the top-retention masters — near-zero CPU, zero AI — with a
+deterministic title/description in the campaign's language whose chapter lines YouTube turns into
+chapters, and a poster thumbnail. It runs as a queued job under the render lock (one ffmpeg at a
+time is the law of this box) and **always parks for review, in every mode** — approving the
+council's compile proposal only creates and queues the build. Compilations are Tasks with sentinel
+episode numbers (9001+): `unique(campaign, episode)` holds, hydration ignores them, and publishing
+one never advances the campaign. Retries route by `video_kind` — re-running `render_task` on a
+compilation would try to write a script for it. Facebook publishes it as a normal Page video (the
+format-aware path from ADR-073), never a Reel.
+
+**Honest bound.** Only masters published after this shipped exist in the library; old episodes are
+gone. The first compilation becomes possible ~10-12 publishes after deployment.

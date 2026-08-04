@@ -188,6 +188,9 @@ class Task(Base):
     # to improve it, and only the second can loop forever.
     auto_retry_count: Mapped[int] = mapped_column(Integer, default=0)
     auto_reject_count: Mapped[int] = mapped_column(Integer, default=0)
+    # "episode" (default) or "compilation" — a best-of built from the library (ADR-082).
+    # Compilations use sentinel episode numbers (9001+) and never advance the campaign.
+    video_kind: Mapped[str] = mapped_column(String(16), default="episode")
     published_video_id: Mapped[str | None] = mapped_column(String(128))
     published_url: Mapped[str | None] = mapped_column(String(512))
     # Which A/B metadata variant (A/B/C) actually went live — closes the A/B loop: joined with
@@ -299,6 +302,11 @@ class ChannelSnapshot(Base):
     subscribers: Mapped[int | None] = mapped_column(Integer)   # None where a platform hides it
     views: Mapped[int | None] = mapped_column(Integer)
     videos: Mapped[int | None] = mapped_column(Integer)
+    # Monetization currencies (ADR-080). YouTube pays thresholds in WATCH TIME, not views — the
+    # trailing-365d watched minutes (YPP asks 4,000 hours) and trailing-90d views, straight from the
+    # Analytics API. None on platforms that don't report them (Facebook) — never approximated.
+    watch_minutes_365d: Mapped[int | None] = mapped_column(Integer)
+    views_90d: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

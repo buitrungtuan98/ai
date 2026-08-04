@@ -6,7 +6,7 @@ import os
 
 from PIL import Image, ImageDraw, ImageFilter, ImageStat
 
-from core.captions import MARGIN_PX, VIDEO_H, VIDEO_W, _load_font, split_two_tone, wrap_text
+from core.captions import MARGIN_PX, VIDEO_H, VIDEO_W, _load_font, split_two_tone, teaser, wrap_text
 from core.ffmpeg_runner import extract_frame
 
 logger = logging.getLogger(__name__)
@@ -52,20 +52,32 @@ def _frame_score(img: Image.Image) -> float:
     return sharp + 0.3 * color
 
 
-def _select_frame(video_path: str, frame_png: str, at_fraction: float, duration: float | None) -> None:
+def _select_frame(video_path: str, frame_png: str, at_fraction: float, duration: float | None,
+                  min_at_s: float = 0.0) -> None:
     """Write the chosen candidate frame to `frame_png`. With a known duration, sample several frames
     and keep the sharpest/most-colourful (avoids a blurry or near-black mid-video grab); otherwise
-    fall back to one fixed-offset frame. Fully fail-open — any error yields the single-frame path."""
+    fall back to one fixed-offset frame. Fully fail-open — any error yields the single-frame path.
+
+    `min_at_s` keeps every sample AFTER that timestamp (ADR-078): with a hook flash burned into the
+    opening seconds, an early frame already contains a title — and drawing the poster title over it
+    is exactly the doubled-text thumbnail an operator reported. Worse, `_frame_score` rewards edge
+    density, and giant outlined text is nothing but edges, so the scorer actively preferred the
+    frames the flash was on. Sampling past the flash makes the double-draw impossible by
+    construction rather than by luck."""
     if not duration or duration <= 0:
-        extract_frame(video_path, frame_png, at_seconds=max(0.5, at_fraction * 10))
+        extract_frame(video_path, frame_png, at_seconds=max(0.5, min_at_s, at_fraction * 10))
         return
+    # Never seek past a very short clip's end; the flash floor yields to that, since a frame WITH
+    # the title beats no thumbnail at all.
+    latest = max(0.3, duration - 0.5)
+    floor = min(min_at_s, latest)
     best_score, best_tmp = None, None
     tmps: list[str] = []
     try:
         for i, frac in enumerate(_FRAME_SAMPLES):
             tmp = f"{frame_png}.cand{i}.png"
             try:
-                extract_frame(video_path, tmp, at_seconds=max(0.3, frac * duration))
+                extract_frame(video_path, tmp, at_seconds=min(max(0.3, floor, frac * duration), latest))
                 with Image.open(tmp) as raw:
                     score = _frame_score(raw.convert("RGB"))
             except Exception:  # noqa: BLE001 — a bad seek/decode on one candidate must not fail all
@@ -74,7 +86,8 @@ def _select_frame(video_path: str, frame_png: str, at_fraction: float, duration:
             if best_score is None or score > best_score:
                 best_score, best_tmp = score, tmp
         if best_tmp is None:  # every candidate failed — fall back to a single fixed grab
-            extract_frame(video_path, frame_png, at_seconds=max(0.5, at_fraction * duration))
+            extract_frame(video_path, frame_png,
+                          at_seconds=min(max(0.5, floor, at_fraction * duration), latest))
             return
         os.replace(best_tmp, frame_png)
         tmps.remove(best_tmp)
@@ -88,7 +101,9 @@ def _draw_poster_title(draw, title, *, width, height, accent, font_path):
     """Draw the top billboard title on a thumbnail: UPPERCASE, two-tone (white then accent), heavy
     black outline, over a dark top scrim. Mirrors the in-video headline so the two match."""
     usable = width - 2 * MARGIN_PX
-    line1, line2 = split_two_tone(title.upper())
+    # Same teaser cut as the in-video flash (ADR-078): a 13-word hook shrunk to fit is unreadable at
+    # feed size anyway, and the thumbnail must show the same words the video opens with.
+    line1, line2 = split_two_tone(teaser(title).upper())
     # Wrap each tone-line at a generous size, then pick a font that fits the widest row.
     max_px = round(height * 0.058)
     rows1 = wrap_text(line1, max_px, usable, font_path=font_path)
@@ -140,6 +155,7 @@ def generate_thumbnail(
     poster: bool = False,
     accent_hex: str | None = None,
     scribble_word: str | None = None,
+    min_at_s: float = 0.0,
 ) -> str:
     """Grab a representative frame, darken the lower area, and draw a wrapped bold title. `width`/
     `height` set the thumbnail geometry (default vertical 1080×1920; 1920×1080 for long-form). When
@@ -149,9 +165,11 @@ def generate_thumbnail(
     white, line 2 `accent_hex`, heavy black outline) at the TOP over a dark scrim, character/frame
     visible below — the same title treatment burned into the video, so the thumbnail matches.
     `scribble_word` (ADR-056) draws ONE evocative word, centered in soft italic over the illustration —
-    the aesthetic quote channel's cover look (ENEMY / CALM / AFRAID …)."""
+    the aesthetic quote channel's cover look (ENEMY / CALM / AFRAID …). `min_at_s` excludes the
+    opening seconds from frame sampling — pass the hook-flash window so the poster is never drawn
+    over a frame that already carries a burned title (ADR-078)."""
     frame_png = out_path + ".frame.png"
-    _select_frame(video_path, frame_png, at_fraction, duration)
+    _select_frame(video_path, frame_png, at_fraction, duration, min_at_s=min_at_s)
 
     try:
         with Image.open(frame_png) as raw:

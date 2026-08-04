@@ -16,7 +16,7 @@ from math import ceil
 
 from core import media, pexels, safety_filter, tts
 from core.ai_engine import VideoScript
-from core.captions import build_ass
+from core.captions import HEADLINE_FLASH_S, build_ass
 from core.cleanup import RenderWorkspace
 from core.config import settings
 from core.ffmpeg_runner import run_ffmpeg
@@ -487,6 +487,24 @@ def pick_metadata(script: VideoScript, episode_number: int, ab_testing: bool = T
     return meta
 
 
+# Billboard title modes (ADR-078). "off" = nothing drawn · "thumb" = poster thumbnail only, the
+# video stays clean · "flash" = poster thumbnail + the hook flashed over the first seconds of the
+# video. The old boolean/"on" meant "parked over the whole clip", which ate half the frame for the
+# entire video — legacy values map to "flash", the behaviour it should have been.
+TITLE_MODES = ("off", "thumb", "flash")
+
+
+def _title_mode(value) -> str:
+    """Normalize every historical `title_overlay` shape (bool, "on"/"off", new tri-state) to one of
+    TITLE_MODES. Strings are truthy, so no caller may branch on the raw value — "off" is truthy."""
+    if isinstance(value, bool):
+        return "flash" if value else "off"
+    v = str(value or "").strip().lower()
+    if v == "on":
+        return "flash"
+    return v if v in TITLE_MODES else "off"
+
+
 # ── Orchestration ────────────────────────────────────────────────────────────
 def produce(
     *,
@@ -523,7 +541,7 @@ def produce(
     gen_image=None,
     image_timeout_s: int | None = None,
     image_seed_salt: int = 0,
-    title_overlay: bool = False,
+    title_overlay: str | bool = "off",
     content_style: str = "story",
     signature: str | None = None,
     vet_batch=None,
@@ -551,6 +569,7 @@ def produce(
     # line's illustration comes from its brief + the campaign art style), centered quote captions, a
     # scribble-word cover. It rides the Studio render path but skips the character machinery.
     quote_mode = content_style == "quote"
+    title_mode = _title_mode(title_overlay)
     studio_character = None
     if studio_mode:
         from core import studio
@@ -726,13 +745,15 @@ def produce(
         durations = [p["d"] for p in plans]
         used_clip_ids: list[int] = []
 
-        # Metadata is picked up front (deterministic) so the "billboard" title can be burned into the
-        # video (top of every scene) and drawn on the thumbnail — the same hook text in both places.
+        # Metadata is picked up front (deterministic) so the "billboard" title can be flashed over
+        # the video's opening seconds and drawn on the thumbnail — the same hook text in both places.
         metadata = pick_metadata(script, episode_number, ab_testing=ab_testing,
                                  title_prefix=title_prefix,
                                  affiliate_url=affiliate_url, affiliate_label=affiliate_label)
-        # Quote mode shows ONLY the centered line (no top billboard); story mode may burn the title.
-        headline = (metadata.get("hook_title") or metadata["title"]) if (title_overlay and not quote_mode) else None
+        # Quote mode shows ONLY the centered line (no top billboard); story mode may flash the title
+        # over the opening seconds ("flash"); "thumb" keeps the video clean entirely (ADR-078).
+        headline = ((metadata.get("hook_title") or metadata["title"])
+                    if (title_mode == "flash" and not quote_mode) else None)
         headline_accent = branding.tint_color  # brand colour as the accent; None → default warm yellow
         # Quote captions are the whole line, centered + faded (not karaoke); story keeps its style.
         effective_caption_style = "quote" if quote_mode else subtitle_style
@@ -764,10 +785,14 @@ def produce(
                 used_clip_ids += [plan["found"][idx].id for idx in dict.fromkeys(picks)]
 
             ass_path = ws.path(f"scene_{si}.ass")
+            # The hook flash belongs to scene 0 only (ADR-078). Each scene has its own ASS starting
+            # at t=0, so passing the headline to every scene is exactly how the old billboard ended
+            # up parked over the entire video — every scene re-drew it from its own second zero.
             build_ass(plan["timings"], ass_path, clip_duration=d_i, style=effective_caption_style,
                       theme=caption_theme, accent_hex=branding.tint_color,
                       width=profile.width, height=profile.height,
-                      headline=headline, headline_accent_hex=headline_accent, signature=signature)
+                      headline=headline if si == 0 else None,
+                      headline_accent_hex=headline_accent, signature=signature)
             scene_out = ws.path(f"scene_{si}.mp4")
             # Motion effect seeded by episode so different episodes don't share an identical rhythm.
             effect = MOTION_EFFECTS[(motion_seed + si) % len(MOTION_EFFECTS)] if motion else None
@@ -801,16 +826,20 @@ def produce(
             if chapters:
                 metadata["description"] = "\n".join(chapters) + "\n\n" + metadata.get("description", "")
         thumb = os.path.join(output_dir, f"episode_{episode_number}.jpg")
-        # Quote mode: "scribble cover" — the one-word cover on the illustration. Billboard mode: the
-        # SAME hook title as the in-video headline (top, two-tone). Otherwise the standard thumbnail.
+        # Quote mode: "scribble cover" — the one-word cover on the illustration. Billboard modes
+        # ("thumb"/"flash"): the SAME hook title as the flash (top, two-tone). Otherwise the standard
+        # thumbnail. When a flash was burned, frames are sampled AFTER its window — the poster must
+        # never be drawn over a frame that already carries a title (the doubled-text bug, ADR-078).
         scribble = (getattr(script, "cover_word", None) or "").strip() if quote_mode else None
+        poster = title_mode in ("thumb", "flash")
         generate_thumbnail(master, thumb,
-                           (metadata.get("hook_title") or metadata["title"]) if title_overlay else metadata["title"],
+                           (metadata.get("hook_title") or metadata["title"]) if poster else metadata["title"],
                            duration=sum(durations),  # sample across the video for the best frame
                            logo_path=branding.watermark_path,
                            width=profile.width, height=profile.height,
-                           poster=title_overlay, accent_hex=branding.tint_color,
-                           scribble_word=scribble or None)
+                           poster=poster, accent_hex=branding.tint_color,
+                           scribble_word=scribble or None,
+                           min_at_s=(HEADLINE_FLASH_S + 0.5) if headline else 0.0)
         report("thumb", 100)
 
     # Scene map (absolute-timed spans + caption-hook labels) so a retention curve fetched days later

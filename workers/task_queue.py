@@ -54,6 +54,18 @@ def enqueue_render(task_id: int) -> str:
     return job.id
 
 
+def enqueue_compile(task_id: int) -> str:
+    """Enqueue a best-of compilation build (ADR-082). Same queue as renders — a stream-copy concat
+    is cheap, but one ffmpeg at a time is the law of this box either way."""
+    job = render_queue.enqueue(
+        "workers.video_worker.compile_task",
+        task_id,
+        job_timeout=1800,   # concat + one thumbnail — generous, nowhere near a render's cap
+        result_ttl=3600,
+    )
+    return job.id
+
+
 def enqueue_publish(buffer_item_id: int) -> str:
     """Enqueue a publish (upload) job for an approved buffer item. Same queue/worker, so uploads
     stay sequential with renders (KISS on one box); a short upload never blocks for long.

@@ -3,7 +3,10 @@
    now fails verification with a clear message — so the form has to say what to do instead. Shared by
    the "Add a Facebook Page" form and each Page's "Replace token" panel, so the instructions cannot
    drift apart. #}
-<details class="disclosure">
+{# Opened automatically when a token was just refused (ADR-077): the refusal names the mistake and
+   points here, so making the operator hunt for the collapsed panel is a step too many at exactly the
+   moment they are stuck. `help_open` is set by the caller via {% with %}. #}
+<details class="disclosure" {{ 'open' if help_open is defined and help_open }}>
   <summary>How do I get a permanent Page Access Token?</summary>
   <div class="disclosure-body">
     <ol class="crit-list">

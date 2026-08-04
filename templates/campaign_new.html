@@ -115,14 +115,22 @@
           reference channel's watermark, but your own. Blank = none.</p>
       </div>
       <div class="form-row"><label>Billboard title</label>
+        {# Legacy campaigns stored "on" (title parked over the whole clip); it renders as flash now
+           (ADR-078), so the edit form shows it selected on the option that matches its behaviour. #}
+        {% set tmode = cfg.get('title_overlay', 'off') %}
+        {% set tmode = 'flash' if tmode == 'on' else tmode %}
         <select name="title_overlay">
-          <option value="off" {{ 'selected' if cfg.get('title_overlay','off')!='on' }}>Off — no title drawn on the video</option>
-          <option value="on" {{ 'selected' if cfg.get('title_overlay')=='on' }}>On — burn the hook title on the video + poster thumbnail</option>
+          <option value="off" {{ 'selected' if tmode not in ('thumb', 'flash') }}>Off — no title drawn anywhere</option>
+          <option value="thumb" {{ 'selected' if tmode == 'thumb' }}>Thumbnail only — poster title on the thumbnail, video stays clean</option>
+          <option value="flash" {{ 'selected' if tmode == 'flash' }}>Thumbnail + 3s hook flash — title over the opening seconds, then a clean frame (recommended)</option>
         </select>
-        <p class="hint">The reference "explainer" look: the episode's hook title is drawn big at the
-          top of the video (UPPERCASE, two-tone — white + your brand accent) for the whole clip, and
-          the thumbnail becomes a matching poster. The accent colour uses the campaign's brand tint
-          (Aesthetics tab); blank tint = a default warm yellow. Works for stock and Studio campaigns.</p>
+        <p class="hint">The hook title, UPPERCASE two-tone (white + your brand accent).
+          <b>Hook flash</b> shows it for the first ~3 seconds and fades it out — the window where
+          Shorts/Reels viewers decide to stay, readable even watching muted — then the footage gets
+          the whole frame back. The thumbnail becomes a matching poster either way (seen in search,
+          on the channel page and in shares — the feed itself autoplays). A long hook is trimmed to a
+          teaser at a word boundary on screen; the <i>published</i> title is never touched. Accent =
+          the campaign's brand tint (Aesthetics tab); blank tint = a default warm yellow.</p>
       </div>
       <div class="form-row">
         <button type="button" class="btn ghost" id="script-preview">📝 Preview a script (1 AI call)</button>

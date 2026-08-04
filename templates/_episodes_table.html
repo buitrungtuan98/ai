@@ -20,7 +20,7 @@
         {% set ch = chan_by_id.get(camp.channel_id) if camp else none %}
         {% set stage = status_to_stage.get(t.status.value, t.status.value) %}
         <tr {% if t.status.value in _live %}data-live-task="{{ t.id }}"{% endif %}>
-          <td data-label="Episode"><a href="/episodes/{{ t.id }}"><b>Ep {{ t.episode_number }}</b></a>
+          <td data-label="Episode"><a href="/episodes/{{ t.id }}"><b>{% if t.video_kind == 'compilation' %}🎬 Best-of{% else %}Ep {{ t.episode_number }}{% endif %}</b></a>
             {% if t.synopsis %}<div class="meta">{{ t.synopsis[:70] }}</div>{% endif %}</td>
           {% if show_campaign %}<td data-label="Campaign">{{ camp.topic_name if camp else 'C' ~ t.campaign_id }}
             {% if ch %}<div class="meta">{{ ch.channel_name }}</div>{% endif %}</td>{% endif %}
