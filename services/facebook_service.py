@@ -31,8 +31,15 @@ GRAPH_VIDEO = f"https://graph-video.facebook.com/{GRAPH_VERSION}"
 
 # Graph's OAuth failure codes — the token is dead, revoked, or was never valid. Distinct from every
 # other error because no retry can fix it: the operator has to paste a new one (ADR-072).
+# Codes that really mean "this token is dead": 102 session key invalid, 190 access token invalid/
+# expired (the canonical one), 463/467 expired/invalidated. ONLY these retire a channel.
 _AUTH_ERROR_CODES = {102, 190, 463, 467}
-_AUTH_ERROR_TYPES = {"OAuthException"}
+# Codes that mean "not now", not "not this token": 1/2 temporary API errors, 4 app rate limit,
+# 17 user rate limit, 32 PAGE rate limit (a small Page's insights quota is tiny — the hourly stats
+# pass can trip this on a perfectly healthy token), 341/613 call-rate limits, 368 temporary block.
+# Graph stamps `"type": "OAuthException"` on MOST of these too, which is exactly why the type field
+# must never be used to declare a token dead (ADR-083).
+_TRANSIENT_ERROR_CODES = {1, 2, 4, 17, 32, 341, 368, 613}
 
 _TOKEN_IN_URL = re.compile(r"access_token=[^&\s\"']+")
 
@@ -41,12 +48,14 @@ _CALL_TIMEOUT = 60           # the small start/finish/comment calls
 
 
 class FacebookError(RuntimeError):
-    """A Graph call failed, carrying Facebook's own explanation instead of '400 Bad Request'."""
+    """A Graph call failed, carrying Facebook's own explanation instead of '400 Bad Request'.
+    `transient` marks rate limits and temporary API errors — failures that heal by waiting."""
 
     def __init__(self, message: str, *, code: int | None = None, subcode: int | None = None):
         super().__init__(message)
         self.code = code
         self.subcode = subcode
+        self.transient = code in _TRANSIENT_ERROR_CODES
 
 
 class FacebookAuthError(FacebookError):
@@ -74,22 +83,46 @@ def raise_for_graph(resp, *, token: str | None = None, what: str = "Facebook") -
     Facebook's own `error.message` ("Error validating access token: Session has expired…")."""
     if resp.status_code < 400:
         return
-    message, code, subcode, etype = "", None, None, ""
+    message, code, subcode = "", None, None
     try:
         err = (resp.json() or {}).get("error") or {}
         message = err.get("message") or ""
         code = err.get("code")
         subcode = err.get("error_subcode")
-        etype = err.get("type") or ""
     except ValueError:                      # an HTML error page, not JSON
         message = (resp.text or "")[:200]
     detail = scrub(message or f"HTTP {resp.status_code}", token)
-    if code in _AUTH_ERROR_CODES or etype in _AUTH_ERROR_TYPES:
+    # Auth is decided by CODE alone, never by `type` (ADR-083). Graph stamps "OAuthException" on
+    # rate limits and temporary errors too, and for months that blanket rule executed healthy
+    # channels: a small Page tripping its insights quota (code 32, type OAuthException) read as a
+    # dead token, the channel was retired hourly, and the operator's re-pasted — identical — token
+    # "fixed" it every time.
+    if code in _AUTH_ERROR_CODES:
         # The words matter: `core.failure` classifies from this text, and "OAuth error" is what tells
         # the episode page, the bell and the autopilot that no retry can fix it (ADR-072).
         raise FacebookAuthError(f"{what}: OAuth error {code or ''} — {detail}".replace("  ", " "),
                                 code=code, subcode=subcode)
+    if code in _TRANSIENT_ERROR_CODES:
+        raise FacebookError(f"{what}: temporarily unavailable (rate limit / transient, "
+                            f"code {code}) — {detail}", code=code, subcode=subcode)
     raise FacebookError(f"{what}: {detail}", code=code, subcode=subcode)
+
+
+def token_definitely_dead(channel: Channel) -> bool:
+    """True only when a fresh /me verification DEFINITELY rejects the stored token (ADR-083).
+
+    The one question both retirement sites must ask before condemning a channel — it encodes what
+    the operator does by hand when they re-paste the same token "and it works". A check that cannot
+    run or cannot tell returns False: under-retiring costs one more failed publish; falsely retiring
+    costs the operator a daily token-pasting ritual. Never raises."""
+    try:
+        from services import verification  # function-level: verification imports this module
+
+        page_id, token = _load(channel)
+        return verification.check_facebook_page(page_id, token).ok is False
+    except Exception:  # noqa: BLE001 — no verdict = not definitely dead
+        logger.warning("Token re-verification failed for channel %s", channel.id, exc_info=True)
+        return False
 
 
 def _load(channel: Channel) -> tuple[str, str]:

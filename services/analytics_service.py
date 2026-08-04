@@ -576,12 +576,19 @@ def collect_channel_snapshots(db, now: datetime | None = None) -> int:
         try:
             totals = fetch_channel_totals(channel)
         except FacebookAuthError as exc:
-            # The token is dead, not the network: retire the channel so the UI stops claiming it
-            # works, instead of failing this same call every hour forever (ADR-072).
-            if channel.status != ChannelStatus.expired:
+            # An auth-CLASS error — but verify before condemning (ADR-083): this pass re-runs every
+            # hour until a snapshot row lands, so a misclassified rate limit here used to retire a
+            # healthy channel over and over, and the operator's re-pasted (identical) token "fixed"
+            # it every time. Only a definite re-rejection retires.
+            from services.facebook_service import token_definitely_dead
+
+            if channel.status != ChannelStatus.expired and token_definitely_dead(channel):
                 channel.status = ChannelStatus.expired
                 db.commit()
                 logger.warning("Channel %s marked expired during snapshot: %s", channel.id, exc)
+            else:
+                logger.warning("Snapshot auth-class error for channel %s but the token re-verified "
+                               "— not retiring: %s", channel.id, exc)
             continue
         except Exception as exc:  # noqa: BLE001 — a dead token/quota must not break the pass
             # `exc_info` is deliberately absent: a raw requests traceback embeds the Graph URL, and
