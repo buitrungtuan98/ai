@@ -645,6 +645,50 @@ def _maybe_trip_circuit_breaker(db, campaign: Campaign, user: User) -> bool:
 
 # ── The jobs ─────────────────────────────────────────────────────────────────
 @with_render_lock
+def requalify_task(buffer_item_id: int) -> None:
+    """Re-run Auto-QC on a parked render whose judge was unavailable (ADR-084) — the “Run QC now”
+    button. Updates the stored verdict in place; the item STAYS parked either way (routing decisions
+    belong to review/autopilot, not to this job). Cheap: frames + one vision call."""
+    from core import qc
+
+    db = SessionLocal()
+    try:
+        buf = db.get(BufferPoolItem, buffer_item_id)
+        if buf is None or not (buf.video_path and os.path.exists(buf.video_path)):
+            logger.warning("requalify_task: buffer %s missing or file gone", buffer_item_id)
+            return
+        campaign = db.get(Campaign, buf.campaign_id)
+        user = db.get(User, campaign.user_id) if campaign else None
+        if user is None:
+            return
+        gemini_key = user.gemini_api_key or settings.GEMINI_API_KEY
+        if not gemini_key:
+            return
+        cfg = campaign.config_json or {}
+        det = qc.run_deterministic_qc(buf.video_path)
+        verdict = qc.run_final_qc(buf.video_path, api_key=gemini_key,
+                                  model=(user.gemini_model or settings.GEMINI_MODEL),
+                                  context=f"The narration language is '{cfg.get('language', 'en')}'.")
+        prior = (buf.metadata_json or {}).get("qc") or {}
+        report = {"passed": det.passed and verdict.passed, "score": verdict.score,
+                  "issues": det.issues + verdict.issues,
+                  "attempts": int(prior.get("attempts") or 1)}
+        if verdict.unavailable:
+            report.update(unavailable=True, unavailable_reason=verdict.unavailable_reason,
+                          prior_fail=bool(prior.get("prior_fail")))
+        buf.metadata_json = {**(buf.metadata_json or {}), "qc": report}
+        db.commit()
+        logger.info("Requalified buffer %s: passed=%s score=%s unavailable=%s",
+                    buffer_item_id, report["passed"], report["score"],
+                    report.get("unavailable", False))
+    except Exception:  # noqa: BLE001 — a requalify hiccup must not disturb the queue
+        db.rollback()
+        logger.warning("requalify_task failed for buffer %s", buffer_item_id, exc_info=True)
+    finally:
+        db.close()
+
+
+@with_render_lock
 def compile_task(task_id: int) -> None:
     """Build a best-of compilation from the campaign's library (ADR-082): a stream-copy concat of
     the top-retention masters — near-zero CPU, zero AI — with chapters and a poster thumbnail. It
@@ -814,6 +858,12 @@ def render_task(task_id: int) -> None:
             except Exception:  # noqa: BLE001 — an unreadable checkpoint just regenerates
                 logger.warning("Task %s: persisted script did not validate — regenerating", task.id)
         slop_warnings: list[str] = []
+        # The decision journey (ADR-084): every judgment made about this episode, in order, in
+        # plain words — persisted on the Task so the episode page can answer "why is it in this
+        # state" without the operator reading worker logs.
+        journey: list[dict] = []
+        if script is not None:
+            journey.append({"step": "Script", "note": "resumed from the interrupted attempt's checkpoint"})
         if script is None:
             # The pre-render quality gate (ADR-079). A blocked script regenerates ONCE with the
             # gate's issues as explicit avoid-notes; a second block fails the task honestly — a
@@ -856,20 +906,28 @@ def render_task(task_id: int) -> None:
                 gate = slop_gate.check_script(fp["narration"], fp["title"], recent=recent,
                                               cliches=cliches, content_style=content_style)
                 if not gate.blocked:
+                    journey.append({"step": "Script gate",
+                                    "note": ("warnings: " + "; ".join(gate.issues))
+                                    if gate.issues else "clean"})
                     # C2 (ADR-079): the AI judge shares the ONE regenerate budget with the
                     # deterministic gate and the channel's reject threshold with the vision QC —
                     # one scale, one discipline. Fail-open: a judge outage is "no verdict", never
                     # a stalled factory (the deterministic gate has already run).
                     verdict = _judge_script_safe(user, channel, cfg, fp, gemini_key, gemini_model)
                     if verdict is None:
+                        journey.append({"step": "Script judge", "note": "no verdict (off or unavailable)"})
                         break
                     from core import autopilot as _ap
 
                     _approve_min, reject_max = _ap.review_thresholds(channel)
                     if verdict.score > reject_max:
+                        journey.append({"step": "Script judge", "note": f"{verdict.score}/10"
+                                        + ("; " + "; ".join(verdict.issues) if verdict.issues else "")})
                         break
                     gate = slop_gate.GateReport(
                         "block", [f"script judge scored it {verdict.score}/10"] + verdict.issues)
+                journey.append({"step": "Script gate", "note": "BLOCKED — regenerating once: "
+                                + "; ".join(gate.issues)})
                 logger.info("Task %s: script blocked by the quality gate (%s) — regenerating once",
                             task.id, "; ".join(gate.issues))
                 avoid_notes = avoid_notes + [f"your previous draft was rejected: {i}"
@@ -965,7 +1023,23 @@ def render_task(task_id: int) -> None:
             )
             passed = det.passed and verdict.passed
             issues = det.issues + verdict.issues
-            qc_report = {"passed": passed, "score": verdict.score, "issues": issues, "attempts": attempt}
+            qc_report = {"passed": passed, "score": verdict.score, "issues": issues,
+                         "attempts": attempt}
+            journey.append({"step": f"Auto-QC (attempt {attempt})",
+                            "note": ("could not run — " + (verdict.unavailable_reason or "API error"))
+                            if verdict.unavailable else
+                            (f"{'passed' if passed else 'FAILED'}"
+                             + (f" {verdict.score}/10" if verdict.score is not None else "")
+                             + ("; " + "; ".join(issues) if issues and not passed else ""))})
+            if verdict.unavailable:
+                # No verdict is not a verdict (ADR-084). Never burn the one re-render on an ABSENT
+                # judge — the video was not judged bad — and record why it could not run. Routing
+                # happens below: after a real fail this always parks; on a first attempt it parks
+                # unless the campaign explicitly chose the old fail-open (`qc_failopen: publish`).
+                qc_report.update(unavailable=True,
+                                 unavailable_reason=verdict.unavailable_reason,
+                                 prior_fail=attempt > 1)
+                break
             if passed:
                 break
             if attempt == 1:
@@ -973,6 +1047,13 @@ def render_task(task_id: int) -> None:
                             task.episode_number, verdict.score, issues)
                 _safe_remove(result.master_path, result.thumbnail_path)
         qc_failed = qc_report is not None and not qc_report["passed"]
+        # An unavailable judge parks for review: always after a prior fail (the judge already
+        # disliked this episode once — publishing because the judge went ABSENT is the one
+        # indefensible path), and by default even on a first attempt; `qc_failopen: publish`
+        # restores the old behaviour for operators who prefer availability over the check.
+        qc_no_verdict_park = bool(
+            qc_report and qc_report.get("unavailable")
+            and (qc_report.get("prior_fail") or cfg.get("qc_failopen", "review") != "publish"))
         _record_clip_usage(db, channel.id, result.used_clip_ids)  # so future episodes vary footage
         # Persist the scene map + duration on the Task (it outlives the buffer item) so the retention
         # curve fetched days later can be attributed to the scene that lost viewers. `render_seconds`
@@ -984,7 +1065,8 @@ def render_task(task_id: int) -> None:
         # fingerprint survives it: future episodes compare their narration/title against these
         # (ADR-079) — without it, every completed episode is invisible to the slop gate.
         task.render_json = {"scenes": result.scene_map, "duration": result.duration,
-                            "render_seconds": render_seconds, **slop_gate.script_fingerprint(script)}
+                            "render_seconds": render_seconds, "journey": journey[:12],
+                            **slop_gate.script_fingerprint(script)}
         _set_status(db, task, TaskStatus.AUDIO_SYNCED, 88)
 
         # Carry distribution settings into the stored metadata so the publish step (now or after
@@ -1024,7 +1106,10 @@ def render_task(task_id: int) -> None:
         db.flush()
 
         # A double Auto-QC failure never publishes: it degrades to review mode for this episode.
-        parked_for_review = not auto_publish or qc_failed
+        # So does an ABSENT judge (ADR-084): "the check could not run" used to route exactly like
+        # "the check approved", which meant a video the judge failed once could publish unseen
+        # because the judge was unavailable for the re-check.
+        parked_for_review = not auto_publish or qc_failed or qc_no_verdict_park
         buf = BufferPoolItem(
             campaign_id=campaign.id,
             channel_id=channel.id,
@@ -1044,6 +1129,12 @@ def render_task(task_id: int) -> None:
             issues = "; ".join((qc_report or {}).get("issues") or []) or "low quality score"
             _notify(user, f"🔍 Episode {task.episode_number} of '{campaign.topic_name}' failed "
                           f"Auto-QC twice ({issues}). It is parked in the Asset Pool for your review.")
+        elif qc_no_verdict_park:
+            task.finished_at = datetime.utcnow()
+            _set_status(db, task, TaskStatus.AWAITING_REVIEW, 90)
+            _notify(user, f"⚪ Episode {task.episode_number} of '{campaign.topic_name}' rendered, "
+                          f"but Auto-QC could not run ({qc_report.get('unavailable_reason')}). "
+                          "It is parked in the Asset Pool — review it, or hit “Run QC now”.")
         elif not auto_publish:
             task.finished_at = datetime.utcnow()
             _set_status(db, task, TaskStatus.AWAITING_REVIEW, 90)

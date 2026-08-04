@@ -228,6 +228,11 @@
       <div class="disclosure-body">
         <p class="hint">Let the AI run this channel from its data — review &amp; publish videos, auto-reject weak renders (with a reason that teaches the scriptwriter), retry failures, and recover missed slots. Reversible anytime.</p>
         {% if amode != 'off' %}
+          {% set cn = a.get('council') %}
+          {% if cn and cn.get('summary') %}
+          {# The manager's note (ADR-084): what the council concluded today, in its own words. #}
+          <p class="hint">🧠 <i>{{ cn.summary }}</i>{% if cn.get('watching') %} · watching: {{ cn.watching|join('; ') }}{% endif %}</p>
+          {% endif %}
           {% if lr %}
           <p class="hint">🕒 Last ran <b>{{ ago(lr.at) }}</b>{% if lr.summary %} — {{ lr.summary }}{% endif %}. <a href="/autopilot">See its decisions →</a></p>
           {% else %}

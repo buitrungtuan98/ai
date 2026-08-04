@@ -1668,6 +1668,33 @@ it every time — the signature of a false conviction (ADR-083).
 - Verified: 625 tests (4 new incl. the operator's exact loop encoded as a test), ruff clean, docs
   guard green.
 
+## R19 — QC tells the truth, and the autopilot shows its work `DONE`
+
+Reported: "why does QC sometimes show unavailable or fail?" + "I can't see how the AI decides —
+no log of its reasoning or decisions" (ADR-084).
+
+**Batch Q — three honest QC states:**
+- `QCResult` gained `unavailable`/`unavailable_reason` (classified: daily quota, rate limit, model
+  missing, unreachable). An errored judge is never rendered as a green "Auto-QC passed" again —
+  the review pages show ⚪ "Auto-QC could not run — {reason}".
+- No-verdict routing: never burns the single re-render; parks for review by default; campaigns may
+  opt into `qc_failopen: publish` — but **failed-then-unavailable always parks**, a video already
+  known bad is never published on a shrug.
+- "Run QC now" button on parked items → `requalify_task` re-judges in place (render lock
+  respected); the item stays parked, the verdict refreshes.
+- New campaign form controls: `qc_failopen` (review/publish) + `script_judge` (on/off).
+
+**Batch T — glass box:**
+- Rails refusals now logged as `AutopilotAction(kind="refused")` with wanted/refused-because/
+  council-reason/confidence — visible in the autopilot feed, not just log files.
+- Council proposals render with confidence % + cited facts; each channel row on Autopilot and
+  Channels carries the council's one-line "manager's note".
+- Every render stores a `journey` timeline (script resumed / gate verdict / judge score / QC per
+  attempt) in `render_json` — the episode page can replay the machine's reasoning per video.
+- Verified: 632 tests (7 new: unavailable classification, park-by-default, no wasted re-render,
+  failed-then-absent always parks, requalify in place, review page shows truth, episode page
+  replays the journey), ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

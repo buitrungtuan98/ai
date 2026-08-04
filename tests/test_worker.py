@@ -175,7 +175,10 @@ def test_render_task_full_flow_and_failure(session, user, channel, monkeypatch):
     from workers import video_worker
 
     cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="Robots",
-                   current_episode=0, total_episodes=3, status=CampaignStatus.active, config_json={"language": "en"})
+                   current_episode=0, total_episodes=3, status=CampaignStatus.active,
+                   # auto_qc off: this test is the publish flow; with QC on, an unreachable judge
+                   # now parks for review instead of publishing blind (ADR-084) — tested separately.
+                   config_json={"language": "en", "auto_qc": "off"})
     session.add(cam)
     session.commit()
     session.refresh(cam)
@@ -280,7 +283,8 @@ def test_slot_scheduled_mode_parks_ready(session, user, channel, monkeypatch):
 
     cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="Daily", total_episodes=5,
                    status=CampaignStatus.active,
-                   config_json={"language": "en", "auto_publish": True, "posting_slots": ["21:00"]})
+                   config_json={"language": "en", "auto_publish": True, "auto_qc": "off",
+                                "posting_slots": ["21:00"]})
     session.add(cam)
     session.commit()
     session.refresh(cam)

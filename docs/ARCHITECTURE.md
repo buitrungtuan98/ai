@@ -2002,3 +2002,40 @@ signature of a false conviction, and the code had two ways to produce one:
 transient, but a rate limit can persist for hours — it would still convict. The re-verification
 asks the only question that matters ("is THIS token refused, right now, on the cheapest possible
 call?") and its cost is one request at exactly the moment the channel would otherwise be retired.
+
+### ADR-084 — Three QC states, honestly routed — and a glass-box autopilot
+
+**Context.** Two operator reports, one root. (1) "Why does QC sometimes show unavailable or fail?"
+— because final QC had only two representable states. When the Gemini judge errored (quota, rate
+limit, network), `run_final_qc` failed open as `passed=True, issues=["qc-unavailable"]`, which the
+review page rendered as a green "Auto-QC passed". Worse: a render that FAILED QC, was re-rendered,
+and then met an absent judge on attempt 2 published unseen in full-auto — the one video already
+known bad slipped through on the judge's day off. (2) "I can't see how the AI decides" — council
+reasons existed in the DB but rendered as a raw dict dump, rails refusals lived only in log files,
+and the script gate/judge decisions only in worker logs. The machine was making good decisions
+invisibly, which is indistinguishable from not making them.
+
+**Decision.**
+
+1. **QC has three states: passed / failed / unavailable.** `QCResult` carries
+   `unavailable`/`unavailable_reason` (classified: daily quota, rate limit, model missing,
+   unreachable). An errored judge is *never* a green pass.
+2. **No-verdict routing is a policy, with one absolute.** An unavailable verdict never burns the
+   single re-render (the loop breaks; regeneration is for *failed* verdicts). First-attempt
+   no-verdict parks for review by default; campaigns may opt into `qc_failopen: publish` to keep
+   the old keep-shipping behaviour. But **failed-then-unavailable always parks** — a video that
+   already failed once is never published on a shrug, regardless of config.
+3. **Parked-for-no-verdict is re-judgeable in place.** A "Run QC now" button enqueues
+   `requalify_task` (render-lock respected): re-runs deterministic + final QC, updates the stored
+   verdict, and leaves the item parked — the human still clicks Approve; the machine just refreshes
+   its opinion.
+4. **Glass box.** Every rails refusal is logged as an `AutopilotAction(kind="refused")` with what
+   the council wanted and why rails said no; the autopilot feed renders council proposals with
+   confidence + cited facts instead of a dict dump; each channel row carries the council's one-line
+   "manager's note"; and every render stores a `journey` timeline (script resumed/gate/judge/QC per
+   attempt) on the episode so an operator can replay the machine's reasoning per video.
+
+**Why park instead of retry-until-verdict?** The judge's outages are quota-shaped — retrying
+inside the render burns worker time and can't manufacture quota. Parking converts an API outage
+into a human glance, and "Run QC now" gives the cheap retry *after* the quota window resets,
+without re-rendering anything.

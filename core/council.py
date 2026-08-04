@@ -298,6 +298,18 @@ def run_council(db, channel, *, api_key: str, model: str) -> dict:
             refused += 1
             logger.warning("Council decision refused by rails (channel %s, campaign %s, %s): %s",
                            channel.id, d.campaign_id, d.action, problem)
+            # The refusal is part of the thinking, and thinking must be visible (ADR-084): "the AI
+            # wanted X, the rails said no because Y" was only ever in a log file — the operator
+            # asked, reasonably, how they were supposed to trust a brain they cannot watch.
+            db.add(AutopilotAction(
+                user_id=channel.user_id, channel_id=channel.id,
+                campaign_id=d.campaign_id if any(
+                    c["campaign_id"] == d.campaign_id for c in pack["campaigns"]) else None,
+                kind="refused", status="done", resolved_at=datetime.utcnow(),
+                summary=(f"Council wanted “{d.action}” — rails refused: {problem}")[:300],
+                evidence={"wanted": d.action, "refused_because": problem,
+                          "council_reason": d.reason[:200], "confidence": d.confidence}))
+            db.commit()
             continue
         if _already_proposed(db, d.campaign_id, d.action):
             held += 1

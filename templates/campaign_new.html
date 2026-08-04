@@ -337,7 +337,24 @@
             </select>
             <p class="hint">Footage that doesn't match the narration is swapped before render; a finished video that fails the
               quality check is re-rendered once, and if it fails again it waits in the Asset Pool for you instead of publishing.
-              Uses your Gemini key; if the vision API is unavailable the pipeline continues as if QC were off.</p>
+              Uses your Gemini key.</p>
+          </div>
+          <div class="form-row"><label>If the QC judge can't run (quota / API down)</label>
+            <select name="qc_failopen">
+              <option value="review" {{ 'selected' if cfg.get('qc_failopen','review')!='publish' }}>Park for my review — an unchecked video never publishes itself (recommended)</option>
+              <option value="publish" {{ 'selected' if cfg.get('qc_failopen')=='publish' }}>Publish anyway — availability over the check</option>
+            </select>
+            <p class="hint">Applies to a judge that is <i>unavailable</i>, not one that failed the video. After a real
+              QC fail, the re-check always parks — a video the judge disliked once never publishes because the judge
+              went absent (ADR-084).</p>
+          </div>
+          <div class="form-row"><label>Script judge (AI reads the script before any render)</label>
+            <select name="script_judge">
+              <option value="on" {{ 'selected' if cfg.get('script_judge','on')!='off' }}>On — one cheap call that can save a 30-minute render (recommended)</option>
+              <option value="off" {{ 'selected' if cfg.get('script_judge')=='off' }}>Off — deterministic gate only</option>
+            </select>
+            <p class="hint">Scores hook &amp; specificity on the same /10 scale as Auto-QC, using the channel's reject
+              threshold. One regenerate on a bad score, then it asks you. Skipped automatically near the AI daily budget.</p>
           </div>
           <div class="form-row"><label>Campaign timezone — posting slots fire in this zone</label>
             {{ ui.tz_select('timezone', cfg.get('timezone'), settings.TIMEZONE) }}</div>

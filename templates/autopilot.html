@@ -7,7 +7,8 @@
 {% endcall %}
 
 {% set kind_icon = {'extend': '📈', 'successor': '🌱', 'wind_down': '📉', 'tune': '🎛', 'audience_drift': '🎯',
-  'approved': '✅', 'rejected': '❌', 'escalated': '🧭', 'recommended': '👍', 'retried': '↺', 'caught_up': '⏰'} %}
+  'approved': '✅', 'rejected': '❌', 'escalated': '🧭', 'recommended': '👍', 'retried': '↺', 'caught_up': '⏰',
+  'slot_change': '🕑', 'compile': '🎬', 'council': '🧠', 'report': '📋', 'refused': '🚧', 'milestone': '💰'} %}
 {% set advisory_kinds = ['audience_drift'] %}
 {% set mode_labels = {'copilot': '🧭 Copilot', 'autopilot': '✈️ Full auto'} %}
 
@@ -22,6 +23,11 @@
       <div class="grow">
         <b>{{ c.channel_name }}</b> <span class="meta">· {{ mode_labels.get(ap.get('mode'), ap.get('mode')) }} · every {{ ap.get('interval_hours', 3) }}h</span>
         <div class="meta">{% if lr %}🕒 Last ran <b>{{ ago(lr.at) }}</b>{% if lr.summary %} — {{ lr.summary }}{% endif %}{% else %}<span style="color:var(--st-failed)">⚠ Has never run — check the worker container is up.</span>{% endif %}</div>
+        {% set cn = ap.get('council') %}
+        {% if cn and cn.get('summary') %}
+        {# The manager's note (ADR-084): the council's own words for what it saw today. #}
+        <div class="meta">🧠 <i>{{ cn.summary }}</i>{% if cn.get('watching') %} · watching: {{ cn.watching|join('; ') }}{% endif %}{% if cn.get('at') %} <span data-reltime="{{ cn.at }}Z"></span>{% endif %}</div>
+        {% endif %}
       </div>
       <a class="btn ghost sm" href="/channels">Configure →</a>
     </li>
@@ -39,10 +45,17 @@
     <li class="ap-row">
       <div class="grow">
         <b>{{ kind_icon.get(a.kind, '•') }} {{ a.summary }}</b>
+        {% set ev = a.evidence or {} %}
+        {% if ev.get('by') == 'council' %}
+        {# A judged decision reads like one (ADR-084): the facts it cites, then how sure it is. #}
+        <div class="meta">{% if ch %}{{ ch.channel_name }} · {% endif %}confidence <b>{{ (ev.get('confidence', 0) * 100)|round|int }}%</b></div>
+        <ul class="crit-list meta">{% for fact in ev.get('cited', [])[:4] %}<li>{{ fact }}</li>{% endfor %}</ul>
+        {% else %}
         <div class="meta">
           {% if ch %}{{ ch.channel_name }} · {% endif %}
-          {% for k, v in (a.evidence or {}).items() %}{{ k.replace('_', ' ') }}: <b>{{ v }}</b>{% if not loop.last %} · {% endif %}{% endfor %}
+          {% for k, v in ev.items() %}{{ k.replace('_', ' ') }}: <b>{{ v }}</b>{% if not loop.last %} · {% endif %}{% endfor %}
         </div>
+        {% endif %}
       </div>
       {% if a.kind not in advisory_kinds %}
       <form method="post" action="/autopilot/{{ a.id }}/approve"><button class="btn sm" type="submit">✓ Approve</button></form>

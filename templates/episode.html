@@ -52,6 +52,19 @@
     {% if task.started_at %}started {{ task.started_at.strftime('%Y-%m-%d %H:%M') }} UTC{% endif %}
     {% if task.finished_at %} · finished {{ task.finished_at.strftime('%H:%M') }} UTC{% endif %}
   </p>
+  {# ── Decision journey (ADR-084): every judgment the machine made about this render, in order —
+       gate, judge, QC per attempt — so "why did this park/publish?" is answerable from this page. #}
+  {% set journey = (task.render_json or {}).get('journey') %}
+  {% if journey %}
+  <details class="mt-sm">
+    <summary class="hint">🧠 How this render was judged ({{ journey|length }} decision{{ 's' if journey|length != 1 }})</summary>
+    <ol class="crit-list mt-sm">
+      {% for j in journey %}
+      <li><b>{{ j.get('step') }}</b> — {{ j.get('note') }}</li>
+      {% endfor %}
+    </ol>
+  </details>
+  {% endif %}
 </div>
 
 {# ── Preview + metadata ── #}
@@ -74,7 +87,17 @@
       <p class="meta">{{ task.synopsis or '—' }}</p>
       {% set qc = meta.get('qc') if buffer else none %}
       {% if qc %}
+      {% if qc.get('unavailable') %}
+      <p class="hint">⚪ Auto-QC could not run — {{ qc.get('unavailable_reason') or 'the vision API was unreachable' }}.{% if qc.get('prior_fail') %} <b>An earlier render failed QC</b>, so it is held for your eyes.{% endif %}</p>
+      {% if buffer and buffer.status.value == 'awaiting_review' %}
+      <form method="post" action="/assets/{{ buffer.id }}/run-qc" class="mt-sm">
+        <input type="hidden" name="return_to" value="/episodes/{{ task.id }}">
+        <button class="btn ghost sm" type="submit">↻ Run QC now</button>
+      </form>
+      {% endif %}
+      {% else %}
       <p class="hint">{% if qc.get('passed') %}🟢 Auto-QC passed{% else %}🔴 Auto-QC FAILED{% endif %}{% if qc.get('score') is not none %} · score {{ qc.get('score') }}/10{% endif %}{% if qc.get('attempts', 1) > 1 %} · {{ qc.get('attempts') }} attempts{% endif %}{% if qc.get('issues') %} · {{ qc.get('issues')|join('; ') }}{% endif %}</p>
+      {% endif %}
       {% endif %}
 
       {# ── Stage-aware actions (post to the shared asset/task routes, return here) ── #}

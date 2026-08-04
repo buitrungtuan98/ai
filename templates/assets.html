@@ -22,6 +22,9 @@
 {% elif flash == 'rejected' %}
 {% call ui.banner() %}🗑 <b>Rejected.</b> The render was deleted{% if flash_reason %} and the AI was told to avoid:
   “{{ flash_reason }}”{% endif %}. Use <b>Discard &amp; re-render</b> on any card to produce that episode again.{% endcall %}
+{% elif flash == 'qc_queued' %}
+{% call ui.banner() %}⏳ <b>QC queued.</b> The judge re-checks this episode as soon as the worker is
+  free — the card's verdict updates when it finishes.{% endcall %}
 {% elif flash == 'missing' %}
 {% call ui.banner('danger') %}⚠️ <b>That episode's video file is no longer on disk</b>, so it can't be published.
   Use <b>Discard &amp; re-render</b> on the card to produce it again.{% endcall %}
@@ -61,7 +64,13 @@
       {% if ch %}<a href="/assets?channel={{ i.channel_id }}">{{ ch.channel_name }}</a> · {% endif %}<span {% if i.created_at %}data-reltime="{{ i.created_at.isoformat() }}Z"{% endif %}>{{ i.created_at.strftime('%Y-%m-%d %H:%M') if i.created_at else '' }} UTC</span></p>
     {% set qc = i.metadata_json.get('qc') %}
     {% if qc %}
+    {# THREE states (ADR-084): a judge that errored is not a judge that approved — "unavailable"
+       used to render as a green pass with a cryptic "qc-unavailable" tag. #}
+    {% if qc.get('unavailable') %}
+    <p class="hint">⚪ Auto-QC could not run — {{ qc.get('unavailable_reason') or 'the vision API was unreachable' }}.{% if qc.get('prior_fail') %} <b>An earlier render of this episode failed QC</b>, so it is held for your eyes.{% endif %}</p>
+    {% else %}
     <p class="hint">{% if qc.get('passed') %}🟢 Auto-QC passed{% else %}🔴 Auto-QC FAILED{% endif %}{% if qc.get('score') is not none %} · score {{ qc.get('score') }}/10{% endif %}{% if qc.get('attempts', 1) > 1 %} · {{ qc.get('attempts') }} attempts{% endif %}{% if qc.get('issues') %} · {{ qc.get('issues')|join('; ') }}{% endif %}</p>
+    {% endif %}
     {% endif %}
     {% if i.metadata_json.get('slop_warnings') %}
     {# Warn-level findings from the pre-render script gate (ADR-079) — the render went ahead, but
@@ -96,6 +105,10 @@
     {% endif %}
     <div class="row-actions mt">
       <form method="post" action="/assets/{{ i.id }}/approve"><button class="btn sm" type="submit">✓ Approve &amp; publish</button></form>
+      {% if qc and qc.get('unavailable') %}
+      <form method="post" action="/assets/{{ i.id }}/run-qc">
+        <button class="btn ghost sm" type="submit">↻ Run QC now</button></form>
+      {% endif %}
       <form method="post" action="/assets/{{ i.id }}/rerender"
             data-confirm="Delete this render of {{ camp.topic_name if camp else 'C' ~ i.campaign_id }} · Ep {{ i.episode_number }} and render it again from scratch? The current video file is removed." data-confirm-verb="Discard &amp; re-render">
         <button class="btn ghost sm" type="submit">🗑 Re-render</button></form>

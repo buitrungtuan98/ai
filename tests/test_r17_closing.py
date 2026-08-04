@@ -55,8 +55,10 @@ def _judge_env(session, user, channel):
     from database.models import Campaign, Task
     from database.types import CampaignStatus
 
+    # auto_qc off: these tests exercise the SCRIPT judge; with vision QC on, an unreachable judge
+    # now parks for review instead of completing (ADR-084) — that path has its own tests.
     cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="T", total_episodes=5,
-                   status=CampaignStatus.active, config_json={"language": "vi"})
+                   status=CampaignStatus.active, config_json={"language": "vi", "auto_qc": "off"})
     session.add(cam)
     session.commit()
     session.refresh(cam)

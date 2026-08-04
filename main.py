@@ -1487,6 +1487,7 @@ def _build_campaign_config(
     motion: str = "on", caption_theme: str = "highlight", self_critique: str = "on",
     script_depth: str = "standard", video_format: str = "short",
     visual_source: str = "stock", visual_style: str = "", title_overlay: str = "off",
+    qc_failopen: str = "review", script_judge: str = "on",
     content_style: str = "story", signature: str = "", voice_delivery: str = "normal",
     music_mode: str = "none", music_mood: str = "",
     color_grade: str = "", auto_qc: str = "on",
@@ -1546,6 +1547,10 @@ def _build_campaign_config(
         # maps to flash, the behaviour it should have been.
         "title_overlay": (title_overlay if title_overlay in ("thumb", "flash")
                           else ("flash" if title_overlay == "on" else "off")),
+        # ADR-084: what an ABSENT QC judge means for routing (a failed judge always parks), and
+        # whether the pre-render script judge runs (ADR-079 C2).
+        "qc_failopen": "publish" if qc_failopen == "publish" else "review",
+        "script_judge": "off" if script_judge == "off" else "on",
         # Content style (ADR-056): "story" = normal narrated video (default); "quote" = aesthetic
         # poem-per-video with a per-episode Vibe roll, centered quote text, drawn visuals + scribble
         # cover. `signature` is an optional custom on-screen text mark (channel name), drawn small
@@ -1634,6 +1639,7 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
     visual_source: str = Form("stock"),
     visual_style: str = Form(""),
     title_overlay: str = Form("off"),
+    qc_failopen: str = Form("review"), script_judge: str = Form("on"),
     content_style: str = Form("story"),
     signature: str = Form(""),
     music_mode: str = Form("none"),
@@ -1663,6 +1669,7 @@ def _campaign_form(  # noqa: PLR0913 — mirrors the 3-tab form
             motion=motion, caption_theme=caption_theme, self_critique=self_critique,
             script_depth=script_depth, video_format=video_format,
             visual_source=visual_source, visual_style=visual_style, title_overlay=title_overlay,
+            qc_failopen=qc_failopen, script_judge=script_judge,
             content_style=content_style, signature=signature, voice_delivery=voice_delivery,
             music_mode=music_mode, music_mood=music_mood,
             color_grade=color_grade, auto_qc=auto_qc,
@@ -2021,7 +2028,7 @@ def assets_page(request: Request, user: CurrentUser, db: DbDep,
          "page": page, "pages": pages, "scope_qs": scope_qs,
          "stage_counts": _episode_stage_counts(db, user, campaign=campaign, channel=channel),
          # Post-action feedback (whitelisted — never echo arbitrary input back into the page).
-         "flash": flash if flash in ("publish", "rerender", "rejected", "missing") else "",
+         "flash": flash if flash in ("publish", "rerender", "rejected", "missing", "qc_queued") else "",
          "flash_reason": flash_reason[:200]},
     )
 
@@ -2143,6 +2150,17 @@ def publish_asset_now(db: DbDep, item=Depends(get_owned_buffer_item), return_to:
         return _action_redirect(return_to, "missing", "/assets?flash=missing")
     task_queue.enqueue_publish(item.id)
     return _action_redirect(return_to, "publish", "/assets?flash=publish")
+
+
+@app.post("/assets/{item_id}/run-qc")
+def run_qc_now(item=Depends(get_owned_buffer_item), return_to: str = Form("")):
+    """Queue a re-run of Auto-QC on a parked render (ADR-084) — the recovery for “the judge was
+    unavailable”: one vision call instead of waiting for a tick or judging blind. The item stays
+    parked; only the verdict on its card changes."""
+    if item.status != BufferStatus.awaiting_review:
+        raise HTTPException(400, "Only awaiting-review items can be re-judged")
+    task_queue.enqueue_requalify(item.id)
+    return _action_redirect(return_to, "qc_queued", "/assets?flash=qc_queued")
 
 
 @app.post("/assets/{item_id}/rerender")
@@ -2413,7 +2431,7 @@ def episode_view(request: Request, user: CurrentUser, db: DbDep, task_id: int,
          "retention_curve": curve, "retention_drops": retention_drops,
          "failed": task.status == TaskStatus.FAILED, "diagnosis": diagnosis,
          "cancelled": task.status == TaskStatus.CANCELLED,
-         "flash": flash if flash in ("publish", "rerender", "rejected", "missing") else "",
+         "flash": flash if flash in ("publish", "rerender", "rejected", "missing", "qc_queued") else "",
          "flash_reason": flash_reason[:200]},
     )
 

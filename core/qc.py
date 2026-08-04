@@ -89,9 +89,31 @@ class QCResult:
     passed: bool
     score: int | None = None            # None = check could not run (fail-open pass)
     issues: list[str] = field(default_factory=list)
+    # THREE states, not two (ADR-084): a judge that errored is not a judge that approved. When
+    # `unavailable` is set the verdict above is a fail-open placeholder and `unavailable_reason`
+    # says why in operator words — the UI shows ⚪ "could not run", never a green pass.
+    unavailable: bool = False
+    unavailable_reason: str | None = None
 
     def as_dict(self) -> dict:
-        return {"passed": self.passed, "score": self.score, "issues": self.issues}
+        out = {"passed": self.passed, "score": self.score, "issues": self.issues}
+        if self.unavailable:
+            out["unavailable"] = True
+            out["unavailable_reason"] = self.unavailable_reason
+        return out
+
+
+def _unavailable_reason(exc: Exception) -> str:
+    """Why the judge could not run, in words the operator can act on — classified from the error,
+    never quoted raw (provider errors can embed request URLs)."""
+    msg = str(exc).lower()
+    if "daily quota" in msg or "resets ~midnight" in msg:
+        return "Gemini daily quota is spent — it resets around midnight US-Pacific"
+    if "429" in msg or "rate" in msg and "limit" in msg:
+        return "Gemini is rate-limiting right now — usually clears within minutes"
+    if "model not found" in msg or "404" in msg:
+        return "the configured Gemini model was not found — check the model chain on Credentials"
+    return "the vision API could not be reached"
 
 
 # Deterministic post-render checks — free, no API. They catch catastrophic breakage (a mostly-black
@@ -158,6 +180,11 @@ def run_final_qc(master_path: str, *, api_key: str, context: str = "",
         if not passed:
             logger.info("Final QC failed (score %s/10): %s", verdict.quality_score, verdict.issues)
         return QCResult(passed=passed, score=verdict.quality_score, issues=verdict.issues)
-    except Exception:  # noqa: BLE001 — QC must never fail a render
-        logger.warning("Final QC errored — passing (fail-open)", exc_info=True)
-        return QCResult(passed=True, score=None, issues=["qc-unavailable"])
+    except Exception as exc:  # noqa: BLE001 — QC must never fail a render
+        logger.warning("Final QC errored — no verdict (unavailable)", exc_info=True)
+        # `passed=True` remains the fail-open placeholder for callers that ignore `unavailable`,
+        # but every caller that ROUTES on QC must treat this as "no verdict", not "approved"
+        # (ADR-084): a video the judge already failed once must not publish because the judge
+        # was absent for the re-check.
+        return QCResult(passed=True, score=None, issues=["qc-unavailable"],
+                        unavailable=True, unavailable_reason=_unavailable_reason(exc))
