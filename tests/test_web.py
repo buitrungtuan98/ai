@@ -694,6 +694,36 @@ def test_review_and_track_entry_points_go_to_episode(client):
     assert f'href="/tasks?campaign={cam_id}"' not in perf              # old Tasks tab removed
 
 
+def test_triage_failed_row_links_the_classified_fix_not_just_retry(client):
+    """The dashboard triage row renders the diagnosis's action link exactly like the episode page
+    (ADR-068, R21): a quality-gate failure whose copy says "trim the blacklist in Settings" must
+    offer that path, not leave Retry as the only clickable thing — retrying is what the classifier
+    says won't help. Retry stays, because the operator may disagree with the judge."""
+    from database.db_session import SessionLocal
+    from database.models import Task
+    from database.types import TaskStatus
+
+    cam = _seed_campaign(client)
+    db = SessionLocal()
+    t = Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=7,
+             status=TaskStatus.FAILED,
+             error_message="Script failed the quality gate twice: hook nearly identical to Ep 5")
+    db.add(t)
+    db.commit()
+    db.refresh(t)
+    tid = t.id
+    db.close()
+
+    body = client.get("/").text
+    assert f'href="/episodes/{tid}"' in body                    # row still links the episode
+    assert "Review settings →" in body                          # …and now the classified fix too
+    assert f'data-task="{tid}"' in body                         # Retry kept for "when you disagree"
+    # The fix copy points at something the reader can find from here — not "the raw error",
+    # which this page never shows.
+    assert "details in the raw error" not in body
+    assert "What the render reported" in body
+
+
 def test_ownership_guard_404(client):
     assert client.post("/campaigns/99999/delete", follow_redirects=False).status_code == 404
 

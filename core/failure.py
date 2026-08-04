@@ -34,11 +34,15 @@ PATTERNS: tuple[tuple[tuple[str, ...], str, str, str, str, bool], ...] = (
      "shipped). Let the campaign publish a few more episodes, then approve a new compile proposal "
      "— retrying now would just count the same library again.",
      "/campaigns", "Open campaigns", False),
+    # Fix copy is read on surfaces that don't show the raw error (the dashboard triage row, R21),
+    # so it must point at things the reader can see from anywhere — "details in the raw error"
+    # named an element that only exists collapsed on the episode page.
     (("failed the quality gate",),
      "The script was judged too repetitive or generic to be worth rendering",
-     "Two drafts in a row failed the pre-render quality gate (details in the raw error) — the "
-     "campaign may be running out of fresh angles on this topic. Adjust the topic or persona, "
-     "trim the blacklist in Settings, or Retry for a fresh attempt when you disagree.",
+     "Two drafts in a row failed the pre-render quality gate — the campaign may be running out of "
+     "fresh angles on this topic. The judge's exact objections are on the episode page under "
+     "“What the render reported”. Adjust the topic or persona, trim the blacklist in Settings, or "
+     "Retry for a fresh attempt when you disagree.",
      "/settings", "Review settings", False),
     # Facebook's own OAuth wording, ahead of the generic key class because the FIX IS SOMEWHERE ELSE:
     # an API key lives on /credentials, a Page token lives on the channel. These phrases only ever
@@ -85,9 +89,9 @@ PATTERNS: tuple[tuple[tuple[str, ...], str, str, str, str, bool], ...] = (
      "", "", True),
     (("safety", "blocked", "policy", "profanity"),
      "The safety filter blocked the content",
-     "The generated script tripped the brand-safety filter. Discard & re-render writes a fresh "
-     "script (a plain Retry reuses the same one); if it keeps happening, soften the campaign's "
-     "topic or persona.", "", "", False),
+     "The generated script tripped the brand-safety filter. Open the episode and use Discard & "
+     "re-render — it writes a fresh script, where a plain Retry reuses the blocked one. If it "
+     "keeps happening, soften the campaign's topic or persona.", "", "", False),
 )
 
 

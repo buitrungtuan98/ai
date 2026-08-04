@@ -89,6 +89,10 @@
         <b><a href="/episodes/{{ t.id }}">{{ camp.topic_name if camp else 'C' ~ t.campaign_id }} · Ep {{ t.episode_number }}</a></b> failed{% if dg %} — {{ dg.cause }}{% endif %}
         <div class="meta">{{ dg.fix if dg else (t.error_message or 'Render failed — open the episode for details.')[:120] }}</div>
       </div>
+      {# The classified fix gets its link here too (ADR-068), not only on the episode page — a
+         quota/blacklist/token failure whose copy says "go to Settings/Credentials" must not offer
+         Retry as the only clickable thing when retrying is exactly what won't help. #}
+      {% if dg and dg.action %}<a class="btn sm" href="{{ dg.href }}">{{ dg.action }} →</a>{% endif %}
       <form class="retry-form" data-task="{{ t.id }}"><button class="btn ghost sm" type="submit">↻ Retry</button></form>
     </li>
     {% endfor %}

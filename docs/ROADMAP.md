@@ -1742,6 +1742,26 @@ no log of its reasoning or decisions" (ADR-084).
   escalates); analytics passes persist mid-fetch token refreshes.
 - Verified: 662 tests (30 new across R20), ruff clean, docs guard green.
 
+## R21 — the triage row must offer the fix it recommends `DONE`
+
+Reported with a screenshot: a quality-gate failure in "Needs your attention" — copy saying *"details
+in the raw error … trim the blacklist in Settings"* next to a lone **Retry** button.
+
+- **Retry was the only clickable thing, again.** ADR-068 built `diagnose()` because a failure page
+  with just a Retry button was "a dead end when retrying was not the answer" — and the dashboard
+  triage row had quietly reproduced that dead end: it showed the classified cause and fix but
+  dropped the action link (`Review settings →`, `Fix the channel →`, …) the episode page renders.
+  The row whose own copy says the fix lives in Settings now links there, beside Retry (kept — the
+  copy invites it "when you disagree" with the judge, and a fresh script is exactly what a gate
+  Retry writes).
+- **Fix copy is now reader-anchored.** "(details in the raw error)" named an element the dashboard
+  never shows — and that even the episode page keeps collapsed. The quality-gate fix now points at
+  "the episode page under “What the render reported”"; the safety-filter fix names WHERE Discard &
+  re-render lives ("open the episode and…") instead of assuming the reader is already there. Rule
+  recorded in the SYSTEM_MAP row: a fix string may only point at things visible from every surface
+  that renders it.
+- Verified: 663 tests (1 new), ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download
