@@ -152,7 +152,13 @@ def test_ai_garbage_cannot_reach_the_inbox(session, user, channel, monkeypatch):
         watching=[]))
     r = council.run_council(session, channel, api_key="k", model="m")
     assert r["filed"] == 0 and r["refused"] == 2
-    assert session.query(AutopilotAction).count() == 0
+    # Nothing ACTIONABLE reaches the inbox — but the refusals are visible in the activity log
+    # (ADR-084): "the AI wanted X, the rails said no because Y" is thinking the operator gets to see.
+    assert session.query(AutopilotAction).filter_by(status="proposed").count() == 0
+    refused = session.query(AutopilotAction).filter_by(kind="refused", status="done").all()
+    assert len(refused) == 2
+    assert all("rails refused" in a.summary for a in refused)
+    assert refused[0].evidence["refused_because"]
 
 
 def test_scheduler_guards_key_budget_and_daily_cadence(session, user, channel, monkeypatch):

@@ -69,12 +69,58 @@ def build_credentials(channel: Channel):
     return creds
 
 
-def upload_video(channel: Channel, video_path: str, metadata: dict, user: User | None = None) -> str:
+def find_existing_upload(channel: Channel, title: str) -> str | None:
+    """Did a previous attempt already upload this episode? (ADR-087 — parity with
+    `facebook_service.find_existing_upload`.)
+
+    An upload that succeeds server-side but times out client-side looks exactly like a failure, so
+    the retry used to post the video a second time. YouTube has no reserve-an-id phase, so the only
+    guard is our own exact title among the channel's most recent uploads (~2 cheap Data-API units;
+    the expensive `search.list` is deliberately avoided). Best-effort: any doubt returns None and
+    the upload proceeds — a duplicate is bad, a missing episode is worse."""
+    from googleapiclient.discovery import build
+
+    want = (title or "").strip()
+    if not want:
+        return None
+    try:
+        creds = build_credentials(channel)
+        youtube = build("youtube", "v3", credentials=creds, cache_discovery=False)
+        chans = youtube.channels().list(part="contentDetails", mine=True).execute()
+        items = chans.get("items") or []
+        uploads = (((items[0].get("contentDetails") or {}).get("relatedPlaylists") or {})
+                   .get("uploads")) if items else None
+        if not uploads:
+            return None
+        resp = youtube.playlistItems().list(part="snippet", playlistId=uploads,
+                                            maxResults=10).execute()
+        for row in resp.get("items", []) or []:
+            sn = row.get("snippet") or {}
+            if (sn.get("title") or "").strip() == want:
+                vid = (sn.get("resourceId") or {}).get("videoId")
+                if vid:
+                    return str(vid)
+    except Exception:  # noqa: BLE001 — a guard that raises would block a legitimate retry
+        logger.warning("Could not check for an existing YouTube upload", exc_info=True)
+    return None
+
+
+def upload_video(channel: Channel, video_path: str, metadata: dict, user: User | None = None,
+                 *, check_existing: bool = False) -> str:
     """Upload a video (resumable) to the channel and return the new video id. Posts the CTA as a
-    top-level comment if provided (YouTube's API cannot pin comments programmatically)."""
+    top-level comment if provided (YouTube's API cannot pin comments programmatically).
+    `check_existing` is set on RETRIES only (ADR-087): the extra lookup costs quota and an exact
+    title match on a first attempt proves nothing, but on a retry it is the difference between
+    adopting the upload that actually landed and posting it twice."""
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaFileUpload
 
+    if check_existing:
+        already = find_existing_upload(channel, metadata.get("title", ""))
+        if already:
+            logger.warning("YouTube: episode already uploaded as %s — adopting it instead of "
+                           "posting a duplicate", already)
+            return already
     creds = build_credentials(channel)
     youtube = build("youtube", "v3", credentials=creds, cache_discovery=False)
 

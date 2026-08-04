@@ -260,6 +260,7 @@ def test_the_qc_rerender_passes_a_salt_but_the_first_attempt_does_not(session, u
         passed = False
         score = 3
         issues = ["blurry"]
+        unavailable = False           # a REAL verdict — the judge ran and disliked it (ADR-084)
 
     monkeypatch.setattr(video_worker, "generate_script", lambda **k: _script())
     monkeypatch.setattr(video_worker.video_factory, "produce", fake_produce)

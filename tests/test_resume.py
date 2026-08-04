@@ -296,7 +296,7 @@ def test_retry_reuses_the_persisted_script_but_success_forgets_it(session, user,
     from workers import video_worker
 
     cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="T", current_episode=0,
-                   total_episodes=1, status=CampaignStatus.active, config_json={"language": "en"})
+                   total_episodes=1, status=CampaignStatus.active, config_json={"language": "en", "auto_qc": "off"})
     session.add(cam)
     session.commit()
     session.refresh(cam)

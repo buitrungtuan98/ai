@@ -63,6 +63,7 @@
             <span class="runway {{ rw }}"><span class="dot2 {{ 'bad' if rw == 'none' else 'ok' }}"></span>{{ row.ready }} ready</span>
             {% if row.own_time %}<br><span class="hint">incl. {{ row.own_time }} at your own time</span>{% endif %}
             {% if row.ready == 0 %}<br><a class="hint text-bad" href="/episodes?status=queued">⚠ buffer empty →</a>{% endif %}
+            {% if row.slot_move %}<br><a class="hint" href="/autopilot" title="The council proposes moving this posting slot — review it on the Autopilot page">🕑 proposed: {{ row.slot_move.frm }} → <b>{{ row.slot_move.to }}</b></a>{% endif %}
           </td>
           {% for day in row.cells %}
           <td class="cell{{ ' gate' if day.gate }}{{ ' today' if day_headers[loop.index0].today }}">
@@ -73,6 +74,7 @@
               {% elif cell.state == 'own' %}✏ {{ cell.t }} <span class="cal-ep">Ep {{ cell.ep }}</span>
               {% elif cell.state == 'missed' %}○ {{ cell.t }}
               {% else %}{{ cell.t }}{% endif %}
+              {%- if row.slot_move and row.slot_move.frm == cell.t %} <span title="The council proposes moving this slot to {{ row.slot_move.to }}">🕑</span>{% endif %}
             </div>
             {% endfor %}
           </td>

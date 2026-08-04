@@ -775,7 +775,8 @@ def test_the_worker_stores_the_pending_id_before_uploading(session, user, channe
     session.refresh(buf)
     session.refresh(t)
 
-    def fake_publish(channel, path, metadata, user, *, pending_video_id=None, on_pending=None):
+    def fake_publish(channel, path, metadata, user, *, pending_video_id=None, on_pending=None,
+                     retrying=False):
         assert metadata["video_format"] == "short"      # the format reaches the uploader
         on_pending("R42")
         return "R42"

@@ -27,6 +27,8 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select
 
 from core import failure
+# One dismissal-cooldown definition for every proposer (ADR-086) — the council shares it too.
+from core.autopilot import REPROPOSE_AFTER_DAYS
 from core.cleanup import sweep_orphans
 from core.config import settings
 from database.db_session import SessionLocal
@@ -83,13 +85,21 @@ def is_within_slot(slots: list[str], now: datetime, tolerance_min: int | None = 
 def expire_stale_buffers(db, *, max_age_hours: int | None = None, now: datetime | None = None) -> int:
     """Mark `ready` buffer items older than the cutoff as expired and delete their files.
 
-    Campaigns with weekday-gated publishing (`posting_days`) get a stretched window (≥ 7.5 days):
-    a healthy pre-render can legitimately wait most of a week for its publish day — expiring it at
-    the default 72h would destroy it before its slot ever arrived."""
+    The cutoff knows the schedule (ADR-087), because "old" depends on when the item's turn IS:
+      * weekday-gated campaigns (`posting_days`) get ≥ 7.5 days — a healthy pre-render can wait
+        most of a week for its publish day;
+      * slot-scheduled campaigns get a RUNWAY-aware age: the N-th item in line with S slots/day
+        legitimately waits ~N/S days, so a buffer deeper than the daily slot count no longer
+        cycles render → expire → re-render (a bounded but pure-waste loop the autopilot ran on
+        its own retry budget);
+      * an operator-scheduled item (`publish_at`, ADR-059) lives until its OWN time + a day —
+        the flat cutoff used to destroy an episode deliberately parked five days out."""
     now = now or datetime.utcnow()
     max_age_hours = settings.BUFFER_MAX_AGE_HOURS if max_age_hours is None else max_age_hours
     campaigns = {c.id: c for c in db.scalars(select(Campaign)).all()}
-    items = db.scalars(select(BufferPoolItem).where(BufferPoolItem.status == BufferStatus.ready)).all()
+    items = db.scalars(select(BufferPoolItem).where(BufferPoolItem.status == BufferStatus.ready)
+                       .order_by(BufferPoolItem.campaign_id, BufferPoolItem.episode_number)).all()
+    queue_pos: dict[int, int] = {}   # position of each campaign's next item in its publish queue
     expired = 0
     for item in items:
         cfg = {}
@@ -97,6 +107,16 @@ def expire_stale_buffers(db, *, max_age_hours: int | None = None, now: datetime 
         if campaign is not None:
             cfg = campaign.config_json or {}
         item_max_age = max(max_age_hours, 7 * 24 + 12) if cfg.get("posting_days") else max_age_hours
+        slots = [s for s in (cfg.get("posting_slots") or []) if s]
+        if item.publish_at is None:
+            pos = queue_pos.get(item.campaign_id, 0)
+            queue_pos[item.campaign_id] = pos + 1
+            if slots:
+                days_until_turn = pos // len(slots) + 1
+                item_max_age = max(item_max_age, (days_until_turn + 1) * 24)  # +1 day of slack
+        elif item.created_at is not None:
+            own_wait_h = (item.publish_at - item.created_at).total_seconds() / 3600
+            item_max_age = max(item_max_age, own_wait_h + 24)
         cutoff = now.timestamp() - item_max_age * 3600
         created = item.created_at.timestamp() if item.created_at else now.timestamp()
         if created < cutoff:
@@ -121,10 +141,89 @@ def expire_stale_buffers(db, *, max_age_hours: int | None = None, now: datetime 
                 task.error_message = (
                     f"Pre-rendered episode expired before its posting slot (buffer older than "
                     f"{item_max_age}h). Use Retry to re-render.")
+            # The machine threw finished work away — that belongs in the activity feed, not only
+            # in a log file the operator never reads (ADR-087).
+            channel = db.get(Channel, item.channel_id)
+            if channel is not None:
+                _log_action(db, channel, "expired",
+                            f"Expired Ep {item.episode_number} of "
+                            f"“{campaign.topic_name if campaign else '?'}” — it waited "
+                            f"{int(item_max_age)}h for a posting slot and went stale; a retry "
+                            "re-renders it nearer its turn.",
+                            campaign_id=item.campaign_id,
+                            evidence={"episode": item.episode_number,
+                                      "max_age_hours": int(item_max_age)})
     if expired:
         db.commit()
         logger.info("Expired %d stale buffer item(s)", expired)
     return expired
+
+
+def finish_stranded_campaign(db, campaign) -> bool:
+    """Complete a campaign that can no longer finish on its own (ADR-087). Returns True if it did.
+
+    A permanently-failed episode used to strand its campaign "active" at N-1/N forever:
+    `current_episode` only advances on publish, hydration saw nothing left to create, and no code
+    path ever closed the loop. Stranded = active, short of its total, every planned episode exists
+    and is terminal, nothing is waiting in the buffer, and no failed episode is still within the
+    autopilot's reach (transient/quota failures under the retry cap WILL be retried — those are
+    not stranded, just slow). Completing is reversible the same way it always was: a manual Retry
+    of the dead episode still works, and a later publish keeps the completed status consistent."""
+    from core.compilation import COMPILATION_EPISODE_BASE
+
+    if campaign.status != CampaignStatus.active:
+        return False
+    total = campaign.total_episodes or 0
+    if not total or campaign.current_episode >= total:
+        return False
+    tasks = [t for t in db.scalars(select(Task).where(Task.campaign_id == campaign.id)).all()
+             if t.episode_number < COMPILATION_EPISODE_BASE]
+    by_ep = {t.episode_number: t for t in tasks}
+    if any(ep not in by_ep for ep in range(1, total + 1)):
+        return False   # episodes still to be created — hydration owns this campaign
+    terminal = (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED)
+    if any(t.status not in terminal for t in tasks):
+        return False   # something is still rendering/waiting — not stranded
+    if db.scalar(select(func.count()).select_from(BufferPoolItem).where(
+            BufferPoolItem.campaign_id == campaign.id,
+            BufferPoolItem.status.in_([BufferStatus.ready, BufferStatus.awaiting_review]),
+            BufferPoolItem.episode_number < COMPILATION_EPISODE_BASE)):
+        return False   # a rendered episode is still on its way out
+    dead = [t for t in tasks if t.status == TaskStatus.FAILED]
+    for t in dead:
+        msg = (t.error_message or "").lower()
+        human_reject = "rejected in review" in msg and "auto-review" not in msg
+        if (not human_reject and (t.auto_retry_count or 0) < AUTOPILOT_MAX_RETRIES
+                and (failure.is_transient(msg) or failure.is_quota(msg))):
+            return False   # the autopilot can still save this one — wait for it
+    campaign.status = CampaignStatus.completed
+    db.commit()
+    user = db.get(User, campaign.user_id)
+    blocked = ", ".join(f"Ep {t.episode_number}" for t in dead[:5]) or "—"
+    channel = db.get(Channel, campaign.channel_id)
+    if channel is not None:
+        _log_action(db, channel, "report",
+                    f"Completed “{campaign.topic_name}” at {campaign.current_episode}/{total} — "
+                    f"{blocked} cannot be produced automatically (details on the episode page); "
+                    "a manual Retry re-opens them.",
+                    campaign_id=campaign.id,
+                    evidence={"published": campaign.current_episode, "planned": total,
+                              "blocked": [t.episode_number for t in dead[:5]]})
+    if user is not None:
+        video_worker._notify(
+            user,
+            f"🏁 Campaign '{campaign.topic_name}' completed at {campaign.current_episode}/{total} "
+            f"episodes — {blocked} failed in a way no automatic retry can fix. Retry them from "
+            "the episode page if you want the full run.")
+    nxt = db.scalar(select(Campaign).where(
+        Campaign.user_id == campaign.user_id,
+        Campaign.status == CampaignStatus.pending).order_by(Campaign.id))
+    if nxt is not None:   # the lifecycle promise: finishing one activates the next in line
+        nxt.status = CampaignStatus.active
+        db.commit()
+    logger.warning("Campaign %s completed stranded at %s/%s", campaign.id,
+                   campaign.current_episode, total)
+    return True
 
 
 def disk_usage_pct(path: str) -> float:
@@ -136,12 +235,17 @@ def disk_usage_pct(path: str) -> float:
 
 
 def _recently_published(db, campaign_id: int, window_minutes: int) -> bool:
-    """True if this campaign already published within the window — the one-per-slot guard, so an
-    hourly tick landing twice inside one slot's tolerance can't double-post."""
+    """True if this campaign already published an ORDINARY episode within the window — the
+    one-per-slot guard, so an hourly tick landing twice inside one slot's tolerance can't
+    double-post. Compilations are extra content outside the slot schedule (ADR-085): approving
+    one must not eat the slot the next regular episode was waiting for."""
+    from core.compilation import COMPILATION_EPISODE_BASE
+
     cutoff = datetime.utcnow() - timedelta(minutes=window_minutes)
     latest = db.scalar(
         select(Task.finished_at)
-        .where(Task.campaign_id == campaign_id, Task.status == TaskStatus.COMPLETED)
+        .where(Task.campaign_id == campaign_id, Task.status == TaskStatus.COMPLETED,
+               Task.episode_number < COMPILATION_EPISODE_BASE)
         .order_by(Task.finished_at.desc())
         .limit(1)
     )
@@ -323,7 +427,12 @@ def maybe_distill_campaign(db, campaign: Campaign, now: datetime | None = None) 
     ).all()
     # Only MEASURED episodes count — early views (near-real-time, no retention yet) carry stats_json
     # but no `avg_pct_viewed`, and must not trip the learning threshold or dilute the summary (T4).
-    rows = [r for r in rows if (r.stats_json or {}).get("avg_pct_viewed") is not None]
+    # Ordinary episodes only (ADR-085): a compilation's retention would teach the playbook lessons
+    # about a format the scriptwriter never writes.
+    from core.compilation import ordinary_episodes
+
+    rows = [r for r in ordinary_episodes(rows)
+            if (r.stats_json or {}).get("avg_pct_viewed") is not None]
     if len(rows) < DISTILL_MIN_EPISODES:
         return False
     user = db.get(User, campaign.user_id)
@@ -378,10 +487,14 @@ def check_daily_minimums(db, now: datetime | None = None) -> int:
         min_per_day = (campaign.config_json or {}).get("min_per_day")
         if not min_per_day:
             continue
+        from core.compilation import COMPILATION_EPISODE_BASE
+
         published = db.scalar(
             select(func.count()).select_from(Task).where(
                 Task.campaign_id == campaign.id,
                 Task.status == TaskStatus.COMPLETED,
+                # A compilation must not paper over a day the campaign's REGULAR cadence failed.
+                Task.episode_number < COMPILATION_EPISODE_BASE,
                 Task.finished_at >= cutoff,
             )
         ) or 0
@@ -573,7 +686,8 @@ def resume_checkpoint_ids(db) -> set[str]:
                               Task.updated_at >= cutoff)).all()}
 
 
-AUTOPILOT_LOG_KINDS = ("approved", "rejected", "escalated", "recommended", "retried", "caught_up")
+AUTOPILOT_LOG_KINDS = ("approved", "rejected", "escalated", "recommended", "retried", "caught_up",
+                       "requalified", "expired")
 AUTOPILOT_LOG_RETENTION_DAYS = 90  # prune the operational decision log beyond this so it never bloats
 
 
@@ -661,6 +775,54 @@ def autopilot_review_channel(db, channel, mode: str, approve_min: int, reject_ma
     return counts
 
 
+REQUALIFY_MIN_AGE_HOURS = 2   # give a judge outage time to clear before asking again
+REQUALIFY_MAX_AUTO = 1        # ONE automatic re-judge per item; after that the button is the human's
+
+
+def autopilot_requalify_channel(db, channel) -> int:
+    """Re-judge parked renders whose QC judge was ABSENT when they rendered (ADR-084/086).
+
+    Batch Q made an unavailable judge park honestly — but then the item waited for a human forever,
+    even though `requalify_task` exists and judge outages are quota-shaped (they clear at the
+    Pacific reset or within minutes for a rate limit). This queues ONE automatic re-judge per item,
+    only after the outage has had ≥ REQUALIFY_MIN_AGE_HOURS to clear, and only below the shared
+    budget reserve. The re-judge updates the verdict in place and the item STAYS parked — the next
+    review pass routes on the fresh verdict exactly as it would on any other. The marker lives at
+    the metadata top level (`auto_requalify`) because `requalify_task` rewrites the `qc` dict."""
+    from core.usage import reserve_reached
+
+    user = db.get(User, channel.user_id)
+    if user is None or not (user.gemini_api_key or settings.GEMINI_API_KEY):
+        return 0
+    if reserve_reached(user):
+        return 0   # the judge is likely absent for exactly this reason — asking again burns quota
+    cutoff = datetime.utcnow() - timedelta(hours=REQUALIFY_MIN_AGE_HOURS)
+    queued = 0
+    items = db.scalars(
+        select(BufferPoolItem).join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
+        .where(Campaign.channel_id == channel.id,
+               BufferPoolItem.status == BufferStatus.awaiting_review)
+        .order_by(BufferPoolItem.id)).all()
+    for item in items:
+        md = item.metadata_json or {}
+        qc = md.get("qc") or {}
+        if not qc.get("unavailable") or md.get("auto_requalify"):
+            continue
+        if item.created_at and item.created_at > cutoff:
+            continue   # too fresh — the outage that parked it may still be in force
+        item.metadata_json = {**md, "auto_requalify": datetime.utcnow().isoformat()}
+        db.commit()
+        task_queue.enqueue_requalify(item.id)
+        queued += 1
+        _log_action(db, channel, "requalified",
+                    f"Re-running Auto-QC on Ep {item.episode_number} — the judge was unavailable "
+                    "when it rendered; the verdict updates in place and the video stays parked.",
+                    campaign_id=item.campaign_id,
+                    evidence={"episode": item.episode_number,
+                              "was": qc.get("unavailable_reason")})
+    return queued
+
+
 def autopilot_retry_channel(db, channel) -> int:
     """Re-queue genuinely-failed renders (both modes — re-rendering never publishes), which is how an
     interrupted render CONTINUES on its own (ADR-069): the retry resumes from the kept checkpoint —
@@ -687,8 +849,12 @@ def autopilot_retry_channel(db, channel) -> int:
         # rejections, silently spent the self-healing budget R7 exists to provide.
         if (t.auto_retry_count or 0) >= AUTOPILOT_MAX_RETRIES:
             continue
-        if not failure.is_transient(msg):
-            continue  # a retry can't mint a key, refill a quota, or unblock deterministic content
+        # A retry can't mint a key or unblock deterministic content — but a spent QUOTA is the one
+        # non-transient failure that heals by pure waiting (it resets at midnight US-Pacific), and
+        # nothing else ever re-queued those: every quota-failed episode was a manual Retry the
+        # operator owed the machine (ADR-085).
+        if not failure.is_transient(msg) and not failure.quota_reset_since(msg, t.finished_at):
+            continue
         t.status = TaskStatus.PENDING_QUEUE
         t.error_message = None
         t.progress_pct = 0
@@ -696,6 +862,25 @@ def autopilot_retry_channel(db, channel) -> int:
         t.auto_retry_count = (t.auto_retry_count or 0) + 1
         db.commit()
         task_queue.clear_progress(t.id)  # drop any ghost % from the interrupted attempt (F1)
+        # Retry the step that actually failed (ADR-085). When the rendered file still exists (a
+        # transient UPLOAD failure parked it back to review), only the publish is re-queued — the
+        # manual Retry button has always been this smart, while the autopilot re-rendered 30-60
+        # minutes of CPU it already owned and then deleted the good file it was replacing.
+        buf = db.scalar(select(BufferPoolItem).where(
+            BufferPoolItem.campaign_id == t.campaign_id,
+            BufferPoolItem.episode_number == t.episode_number,
+            BufferPoolItem.status.in_([BufferStatus.ready, BufferStatus.awaiting_review])))
+        if buf is not None and buf.video_path and os.path.exists(buf.video_path):
+            task_queue.enqueue_publish(buf.id)
+            retried += 1
+            _log_action(db, channel, "retried",
+                        f"Retried the UPLOAD of Ep {t.episode_number} — the video is already "
+                        f"rendered, only the publish failed (attempt "
+                        f"{t.auto_retry_count}/{AUTOPILOT_MAX_RETRIES}).",
+                        campaign_id=t.campaign_id,
+                        evidence={"episode": t.episode_number, "attempt": t.auto_retry_count,
+                                  "mode": "publish"})
+            continue
         t.rq_job_id = video_worker.enqueue_task(t)   # kind-aware: compilations re-concat
         db.commit()
         retried += 1
@@ -715,10 +900,15 @@ def _published_today(db, campaign_id: int, now_local: datetime, tz_name: str | N
         tz = ZoneInfo(tz_name or settings.TIMEZONE)
     except Exception:  # noqa: BLE001
         tz = _tz.utc
+    from core.compilation import COMPILATION_EPISODE_BASE
+
     day = now_local.date()
     n = 0
+    # Ordinary episodes only (ADR-085): a published compilation must not count as "today's slot
+    # was filled" — the catch-up pass would then skip the regular episode the slot was for.
     for ft in db.scalars(select(Task.finished_at).where(
             Task.campaign_id == campaign_id, Task.status == TaskStatus.COMPLETED,
+            Task.episode_number < COMPILATION_EPISODE_BASE,
             Task.finished_at.is_not(None))).all():
         if ft.replace(tzinfo=_tz.utc).astimezone(tz).date() == day:
             n += 1
@@ -781,7 +971,6 @@ def autopilot_catchup_channel(db, channel, now: datetime | None = None) -> int:
     return published
 
 
-REPROPOSE_AFTER_DAYS = 30  # don't re-file a proposal the operator dismissed until this long passes
 
 
 def autopilot_propose_channel(db, channel, now: datetime | None = None) -> int:
@@ -851,15 +1040,13 @@ def _design_successor(db, parent):
     proven formula (its playbook + the channel profile). Returns a CampaignProposal or None (no
     key / over the daily budget / AI error) — the caller then falls back to a plain clone."""
     from core import ai_engine
-    from core.usage import ai_calls_today
+    from core.usage import reserve_reached
 
     user = db.get(User, parent.user_id)
     key = (user.gemini_api_key if user else None) or settings.GEMINI_API_KEY
     if not key:
         return None
-    budget = ((user.settings_json or {}).get("ai_daily_budget") if user else None) \
-        or settings.GEMINI_DAILY_BUDGET
-    if budget and ai_calls_today() >= budget * 0.8:
+    if reserve_reached(user):
         return None  # budget reserve — a successor design never eats the quota rendering needs
     channel = db.get(Channel, parent.channel_id)
     pcfg = parent.config_json or {}
@@ -921,7 +1108,7 @@ def autopilot_council_channel(db, user, channel) -> dict:
     starved for strategy), and once per UTC day per channel — the pack-hash cache inside makes even
     that call free when nothing changed. Returns the council summary dict (zeros when skipped)."""
     from core import council
-    from core.usage import ai_calls_today
+    from core.usage import reserve_reached
 
     zeros = {"filed": 0, "refused": 0, "held": 0, "skipped_unchanged": False}
     gemini_key = None
@@ -932,26 +1119,31 @@ def autopilot_council_channel(db, user, channel) -> dict:
     state = (channel.autopilot_json or {}).get("council") or {}
     if str(state.get("at", ""))[:10] == datetime.utcnow().strftime("%Y-%m-%d"):
         return zeros    # already judged today
-    budget = int((user.settings_json or {}).get("ai_daily_budget") or 0) if user else 0
-    if budget and ai_calls_today() >= budget * 0.8:
+    if reserve_reached(user):
         return zeros    # strategy never outbids rendering for the daily AI budget
     model = (user.gemini_model if user else None) or settings.GEMINI_MODEL
     result = council.run_council(db, channel, api_key=gemini_key, model=model)
-    if not result["skipped_unchanged"]:
-        # The manager report (D4, ADR-081): the council's own verdict text, delivered like a human
-        # manager's daily note — what I saw, what I filed, what I'm watching. No extra AI call:
-        # the verdict IS the report. Logged always; Telegram only when something was filed.
-        state = (channel.autopilot_json or {}).get("council") or {}
-        watching = "; ".join(state.get("watching") or [])
-        report = (state.get("summary", "") +
-                  (f" — filed {result['filed']} proposal(s) for your review." if result["filed"]
-                   else " — no changes proposed today.") +
-                  (f" Watching: {watching}." if watching else ""))
-        _log_action(db, channel, "report", report[:300],
-                    evidence={"filed": result["filed"], "refused": result["refused"]})
-        if result["filed"] and user is not None:
-            video_worker._notify(user, f"🧠 {channel.channel_name} — {report[:400]}")
+    log_council_report(db, channel, user, result)
     return result
+
+
+def log_council_report(db, channel, user, result: dict) -> None:
+    """The manager report (D4, ADR-081): the council's own verdict text, delivered like a human
+    manager's daily note — what I saw, what I filed, what I'm watching. No extra AI call: the
+    verdict IS the report. Logged always; Telegram only when something was filed. Shared by the
+    daily pass and the operator's "Run council now" button (ADR-086)."""
+    if result["skipped_unchanged"]:
+        return
+    state = (channel.autopilot_json or {}).get("council") or {}
+    watching = "; ".join(state.get("watching") or [])
+    report = (state.get("summary", "") +
+              (f" — filed {result['filed']} proposal(s) for your review." if result["filed"]
+               else " — no changes proposed today.") +
+              (f" Watching: {watching}." if watching else ""))
+    _log_action(db, channel, "report", report[:300],
+                evidence={"filed": result["filed"], "refused": result["refused"]})
+    if result["filed"] and user is not None:
+        video_worker._notify(user, f"🧠 {channel.channel_name} — {report[:400]}")
 
 
 def apply_autopilot_action(db, action, *, auto_start_successor: bool = False,
@@ -1072,7 +1264,7 @@ def autopilot_strategist_channel(db, user, channel, respect_cadence: bool = True
     confirmed, even in full-auto). Guarded three ways: weekly cadence (Redis NX), a Gemini key, and
     the daily-budget reserve (skips above 80% so rendering is never starved). Returns 0 or 1."""
     from core import autopilot
-    from core.usage import ai_calls_today
+    from core.usage import reserve_reached
 
     if respect_cadence:
         try:
@@ -1083,8 +1275,7 @@ def autopilot_strategist_channel(db, user, channel, respect_cadence: bool = True
     key = user.gemini_api_key or settings.GEMINI_API_KEY
     if not key:
         return 0
-    budget = (user.settings_json or {}).get("ai_daily_budget") or settings.GEMINI_DAILY_BUDGET
-    if budget and ai_calls_today() >= budget * 0.8:
+    if reserve_reached(user):
         return 0  # budget reserve — strategy never eats the quota rendering needs
     campaigns = db.scalars(select(Campaign).where(
         Campaign.channel_id == channel.id, Campaign.status == CampaignStatus.active)).all()
@@ -1216,6 +1407,9 @@ def autopilot_pass(db=None, now: datetime | None = None, respect_cadence: bool =
             # Free and load-bearing first — these are the safety net.
             r = _ap_step(db, ch, "review", lambda: autopilot_review_channel(
                 db, ch, mode, approve_min, reject_max), zero_review, failures)
+            # Self-healing QC (ADR-086): one vision call per no-verdict park, budget-guarded.
+            _ap_step(db, ch, "requalify",
+                     lambda: autopilot_requalify_channel(db, ch), 0, failures)
             caught = _ap_step(db, ch, "catchup",
                               lambda: autopilot_catchup_channel(db, ch, now=now), 0, failures)
             retried = _ap_step(db, ch, "retry", lambda: autopilot_retry_channel(db, ch), 0, failures)
@@ -1365,6 +1559,9 @@ def periodic_tick(db=None, now: datetime | None = None) -> dict:
                 published = publish_due_campaign(db, campaign, now=now)
                 if published is not None:
                     summary["published"].append(published)
+                # A campaign with no path to its own finish line gets closed honestly (ADR-087)
+                # instead of sitting "active" at N-1/N forever.
+                finish_stranded_campaign(db, campaign)
             except Exception:  # noqa: BLE001 — keep processing the remaining campaigns
                 logger.warning("Tick failed for campaign %s", campaign.id, exc_info=True)
                 db.rollback()

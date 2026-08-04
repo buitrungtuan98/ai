@@ -1668,6 +1668,80 @@ it every time — the signature of a false conviction (ADR-083).
 - Verified: 625 tests (4 new incl. the operator's exact loop encoded as a test), ruff clean, docs
   guard green.
 
+## R19 — QC tells the truth, and the autopilot shows its work `DONE`
+
+Reported: "why does QC sometimes show unavailable or fail?" + "I can't see how the AI decides —
+no log of its reasoning or decisions" (ADR-084).
+
+**Batch Q — three honest QC states:**
+- `QCResult` gained `unavailable`/`unavailable_reason` (classified: daily quota, rate limit, model
+  missing, unreachable). An errored judge is never rendered as a green "Auto-QC passed" again —
+  the review pages show ⚪ "Auto-QC could not run — {reason}".
+- No-verdict routing: never burns the single re-render; parks for review by default; campaigns may
+  opt into `qc_failopen: publish` — but **failed-then-unavailable always parks**, a video already
+  known bad is never published on a shrug.
+- "Run QC now" button on parked items → `requalify_task` re-judges in place (render lock
+  respected); the item stays parked, the verdict refreshes.
+- New campaign form controls: `qc_failopen` (review/publish) + `script_judge` (on/off).
+
+**Batch T — glass box:**
+- Rails refusals now logged as `AutopilotAction(kind="refused")` with wanted/refused-because/
+  council-reason/confidence — visible in the autopilot feed, not just log files.
+- Council proposals render with confidence % + cited facts; each channel row on Autopilot and
+  Channels carries the council's one-line "manager's note".
+- Every render stores a `journey` timeline (script resumed / gate verdict / judge score / QC per
+  attempt) in `render_json` — the episode page can replay the machine's reasoning per video.
+- Verified: 632 tests (7 new: unavailable classification, park-by-default, no wasted re-render,
+  failed-then-absent always parks, requalify in place, review page shows truth, episode page
+  replays the journey), ruff clean, docs guard green.
+
+## R20 — the audit sweep: every finding from the full-code read, fixed `DONE`
+
+**Batch X — correctness bugs (ADR-085) `DONE`:**
+- Compilations out of every learning statistic: flop median/verdicts, consecutive-flop streak
+  (sentinel numbers sorted NEWEST and could mask the breaker forever), retention baselines,
+  council golden-hour/A-B tables, daily minimums, slot guards, playbook distillation — one
+  `ordinary_episodes` definition in `core/compilation.py`.
+- Facebook retry adopts an upload only when the bytes actually landed (`uploading_phase ==
+  complete` / `video_status == ready`) — a reserved-id-with-no-bytes re-uploads instead of
+  marking an empty draft "published".
+- Autopilot retry mirrors the manual Retry: video still on disk → re-queue the PUBLISH only,
+  never a 30-60 min re-render that deletes the good file.
+- `apply_reject(rerender=True)` routes through the kind router (a rejected compilation
+  re-concats, it is never scripted).
+- Quota-class failures self-heal: retryable once the US-Pacific quota day rolls over
+  (`failure.quota_reset_since`), still inside the autopilot retry cap.
+- ONE budget-reserve guard (`usage.reserve_reached`) replacing four drifted copies — two had
+  no `GEMINI_DAILY_BUDGET` fallback (script judge, council ran unprotected on env-only budgets).
+
+**Batch U — self-healing QC (ADR-086) `DONE`:**
+- New autopilot step re-judges no-verdict parks via `requalify_task`: once per item, ≥2h after the
+  park, budget-guarded; the item stays parked and the next review pass routes on the fresh verdict.
+
+**Batch V — autopilot in context (ADR-086) `DONE`:**
+- Campaign hub Overview: "Autopilot on this campaign" card — open proposals decidable in place
+  (approve/dismiss with allow-listed `return_to`) + the last 3 autonomous actions.
+- Calendar: a pending `slot_change` proposal is marked on the campaign row and the affected slot.
+
+**Batch W — the council knows operations and remembers "no" (ADR-086) `DONE`:**
+- Evidence pack gains per-campaign `operations` (failures, streak, buffer runway vs slots/day,
+  no-verdict QC count) + `operator_recently_dismissed`; the prompt says production health outranks
+  ambition and a dismissal is a decision.
+- The council honours the same 30-day dismissal cooldown as the deterministic proposer — the
+  constant lives once, in `core.autopilot`.
+- "🧠 Run council now" per channel: bypasses only the daily gate; budget reserve + pack-hash cache
+  still apply, and the flash reports "nothing changed — no AI call spent" honestly.
+
+**Batch Y — waste-proofing (ADR-087) `DONE`:**
+- Buffer expiry knows the schedule: runway-aware age for slot queues, `publish_at` items live to
+  their own time + a day; genuinely-stale head items still expire; expiries land in the feed (⌛).
+- Stranded campaigns complete honestly (all planned episodes terminal, none in the autopilot's
+  reach) + the next pending campaign activates; a manual Retry still re-opens the dead episode.
+- YouTube publish idempotency on retries (exact-title match over recent uploads — parity with the
+  Facebook guard); compilations get the free deterministic QC (score-less → review always
+  escalates); analytics passes persist mid-fetch token refreshes.
+- Verified: 662 tests (30 new across R20), ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

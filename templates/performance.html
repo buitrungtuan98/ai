@@ -27,6 +27,42 @@
   {% endif %}
 </div>
 
+{# ── What the autopilot thinks about THIS campaign (ADR-086) — proposals are decidable in place,
+     and the last few autonomous actions show the machine working without a tab switch. ── #}
+{% if ap_open or ap_recent %}
+{% set ap_icon = {'extend': '📈', 'successor': '🌱', 'wind_down': '📉', 'tune': '🎛', 'slot_change': '🕑',
+                  'compile': '🎬', 'approved': '✅', 'rejected': '❌', 'escalated': '🧭', 'recommended': '👍',
+                  'retried': '↺', 'caught_up': '⏰', 'requalified': '♻️', 'refused': '🚧', 'expired': '⌛',
+                  'milestone': '💰', 'report': '📋'} %}
+<div class="card mt">
+  <div class="card-head"><h3>🤖 Autopilot on this campaign</h3>
+    <a class="hint" href="/autopilot">Full feed →</a></div>
+  {% for a in ap_open %}
+  <div class="loop-note mt-sm">
+    <b>{{ ap_icon.get(a.kind, '•') }} {{ a.summary }}</b>
+    {% if (a.evidence or {}).get('confidence') is not none %}
+    <span class="meta"> · confidence {{ ((a.evidence or {}).get('confidence') * 100)|round|int }}%</span>
+    {% endif %}
+    <div class="row-actions mt-sm">
+      <form method="post" action="/autopilot/{{ a.id }}/approve">
+        <input type="hidden" name="return_to" value="/campaigns/{{ campaign.id }}">
+        <button class="btn sm" type="submit">✓ Approve</button></form>
+      <form method="post" action="/autopilot/{{ a.id }}/dismiss">
+        <input type="hidden" name="return_to" value="/campaigns/{{ campaign.id }}">
+        <button class="btn ghost sm" type="submit">✕ Dismiss</button></form>
+    </div>
+  </div>
+  {% endfor %}
+  {% if ap_recent %}
+  <ul class="crit-list {{ 'mt' if ap_open else 'mt-sm' }}">
+    {% for a in ap_recent %}
+    <li class="meta">{{ ap_icon.get(a.kind, '•') }} {{ a.summary }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</div>
+{% endif %}
+
 {# Scorecard — the campaign's results at a glance; retention (avg % viewed) is the Shorts metric. #}
 <div class="grid cols-3 mt">
   {{ ui.stat(episodes|length, 'Episodes') }}

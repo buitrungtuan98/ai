@@ -285,6 +285,10 @@ def collect_early_stats(db, now: datetime | None = None) -> int:
         except Exception:  # noqa: BLE001 — early stats must never break the factory
             logger.warning("Early-stats fetch failed for channel %s", channel_id, exc_info=True)
             continue
+        # Persist a token refresh `build_credentials` may have written onto the channel (ADR-087):
+        # the pass used to commit only when an episode updated, so a refreshed token was thrown
+        # away and re-minted on every pass.
+        db.commit()
         for t in channel_tasks:
             if t.published_video_id not in stats:
                 continue
@@ -329,11 +333,15 @@ def _publish_hour(task, campaign) -> int | None:
 
 
 def judge_flops(db, campaign) -> int:
-    """Judge every not-yet-judged episode of a campaign against its own median first-day views
-    (ADR-079). Below MIN_MEASURED_24H measured episodes this is silent — "not enough data" must
-    never be dressed up as a verdict. Idempotent per episode. Returns new flops recorded."""
-    tasks = db.scalars(select(Task).where(Task.campaign_id == campaign.id,
-                                          Task.stats_json.isnot(None))).all()
+    """Judge every not-yet-judged ORDINARY episode of a campaign against its own median first-day
+    views (ADR-079). Below MIN_MEASURED_24H measured episodes this is silent — "not enough data"
+    must never be dressed up as a verdict. Compilations are never judged (ADR-085): a "flop"
+    verdict on one would write an autopsy note that steers the SCRIPTWRITER — the exact leak
+    ADR-082 closed for reject reasons. Idempotent per episode. Returns new flops recorded."""
+    from core.compilation import ordinary_episodes
+
+    tasks = ordinary_episodes(db.scalars(select(Task).where(
+        Task.campaign_id == campaign.id, Task.stats_json.isnot(None))).all())
     median = flop.campaign_median_24h(tasks)
     if median is None:
         return 0
@@ -413,6 +421,7 @@ def collect_stats(db, now: datetime | None = None) -> int:
             else:
                 stats = fetch_facebook_stats(channel, ids)
             _note_analytics_health(db, channel, None)   # it worked — clear any stale complaint
+            db.commit()   # persist a token refresh written onto the channel mid-fetch (ADR-087)
         except Exception as exc:  # noqa: BLE001 — stats must never break the factory
             problem = scope_problem(exc)
             if problem:
@@ -596,6 +605,7 @@ def collect_channel_snapshots(db, now: datetime | None = None) -> int:
             logger.warning("channel-totals fetch failed for channel %s: %s",
                            channel.id, _scrub(str(exc)))
             continue
+        db.commit()   # persist a token refresh written onto the channel mid-fetch (ADR-087)
         if not totals:
             continue
         if channel.platform == Platform.youtube:

@@ -177,11 +177,25 @@ def find_existing_upload(channel: Channel, *, video_id: str | None = None,
     page_id, token = _load(channel)
     try:
         if video_id:
-            resp = requests.get(f"{GRAPH}/{video_id}", params={"fields": "id,status",
-                                                               "access_token": token},
+            resp = requests.get(f"{GRAPH}/{video_id}",
+                                params={"fields": "id,status{video_status,uploading_phase}",
+                                        "access_token": token},
                                 timeout=_CALL_TIMEOUT)
-            if resp.status_code == 200 and (resp.json() or {}).get("id"):
-                return str((resp.json() or {}).get("id"))
+            body = (resp.json() or {}) if resp.status_code == 200 else {}
+            if not body.get("id"):
+                return None
+            # The id EXISTS the moment `start` reserves it — BEFORE any byte goes up (ADR-085).
+            # Adopting on existence alone marked an episode "published" pointing at an empty
+            # draft whenever the transfer phase died: the exact failure this guard exists for.
+            # Only adopt when Facebook says the bytes actually landed.
+            st = body.get("status") or {}
+            uploaded = str((st.get("uploading_phase") or {}).get("status") or "").lower()
+            video_status = str(st.get("video_status") or "").lower()
+            if uploaded == "complete" or video_status == "ready":
+                return str(body["id"])
+            logger.warning("Facebook id %s is reserved but its bytes never landed "
+                           "(video_status=%r, uploading=%r) — uploading again", video_id,
+                           video_status, uploaded)
             return None
         if not title:
             return None

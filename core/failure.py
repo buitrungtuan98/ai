@@ -11,12 +11,17 @@ trace.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 # (match words, cause, fix, href, action, transient) — matched lowercase, first match wins, so keep
 # the specific classes (credential, quota) ahead of the generic network one: a "429 … timed out"
 # message must classify as quota, not as a connection blip. `transient` answers the autopilot's
 # question — can a plain retry of the SAME episode succeed? A missing key can't be retried into
 # existence, a spent quota is fixed by the reset (the scheduler already waits for it), and a safety
 # block is deterministic for the same script — only a reject/re-render (new script) clears it.
+# Named so `quota_reset_since` can recognise its own class by identity, not by re-matching words.
+_QUOTA_WORDS = ("quota", "429", "rate limit", "resource_exhausted", "exceeded")
+
 PATTERNS: tuple[tuple[tuple[str, ...], str, str, str, str, bool], ...] = (
     # Pre-render quality gate (ADR-079). NOT transient: the autopilot's retry regenerates against
     # the same recent episodes with the same avoid-notes, so it would spend AI calls to fail the
@@ -49,7 +54,7 @@ PATTERNS: tuple[tuple[tuple[str, ...], str, str, str, str, bool], ...] = (
      "A provider rejected the key",
      "The AI or footage provider refused the credentials this render used. Check the key is present "
      "and still valid, then retry.", "/credentials", "Check credentials", False),
-    (("quota", "429", "rate limit", "resource_exhausted", "exceeded"),
+    (_QUOTA_WORDS,
      "A free-tier quota ran out",
      "The daily or per-minute allowance for the AI model is spent. It resets on its own — retry "
      "later, or put a bigger-quota model first in the model chain.", "/credentials", "Model chain",
@@ -86,6 +91,17 @@ PATTERNS: tuple[tuple[tuple[str, ...], str, str, str, str, bool], ...] = (
 )
 
 
+def _match(message: str):
+    """The first PATTERNS row whose words appear in `message` (lowercased), or None — the single
+    matching pass `diagnose`, `is_transient` and `quota_reset_since` all share (first match wins,
+    same as it always did)."""
+    low = message.lower()
+    for row in PATTERNS:
+        if any(w in low for w in row[0]):
+            return row
+    return None
+
+
 def diagnose(message: str | None) -> dict | None:
     """Turn a recorded render error into a cause, a fix and somewhere to go (ADR-068).
 
@@ -94,11 +110,11 @@ def diagnose(message: str | None) -> dict | None:
     Returns None when nothing matches — the raw message is always shown either way."""
     if not message:
         return None
-    low = message.lower()
-    for words, cause, fix, href, action, _transient in PATTERNS:
-        if any(w in low for w in words):
-            return {"cause": cause, "fix": fix, "href": href, "action": action}
-    return None
+    row = _match(message)
+    if row is None:
+        return None
+    _words, cause, fix, href, action, _transient = row
+    return {"cause": cause, "fix": fix, "href": href, "action": action}
 
 
 def is_transient(message: str | None) -> bool:
@@ -106,8 +122,29 @@ def is_transient(message: str | None) -> bool:
     retry cap bounds the cost of optimism, while a wrong "no" would strand a recoverable episode."""
     if not message:
         return True
-    low = message.lower()
-    for words, *_rest, transient in PATTERNS:
-        if any(w in low for w in words):
-            return transient
-    return True
+    row = _match(message)
+    return row[-1] if row is not None else True
+
+
+def is_quota(message: str | None) -> bool:
+    """Does this failure classify as the quota class — the one that heals by pure waiting?"""
+    if not message:
+        return False
+    row = _match(message)
+    return row is not None and row[0] is _QUOTA_WORDS
+
+
+def quota_reset_since(message: str | None, failed_at: datetime | None,
+                      now: datetime | None = None) -> bool:
+    """A spent quota is the one non-transient failure that heals by pure waiting: Google's free
+    tier resets at midnight US-Pacific. True when this failure classifies as quota-class AND at
+    least one Pacific midnight has passed since it was recorded — the autopilot may then retry it
+    (still inside its own retry cap). `failed_at`/`now` are naive-UTC DB timestamps."""
+    if failed_at is None or not is_quota(message):
+        return False
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo("America/Los_Angeles")
+    failed_day = failed_at.replace(tzinfo=timezone.utc).astimezone(tz).date()
+    now_day = ((now or datetime.utcnow()).replace(tzinfo=timezone.utc).astimezone(tz)).date()
+    return now_day > failed_day

@@ -47,3 +47,27 @@ def ai_calls_today() -> int:
         return int(raw) if raw else 0
     except Exception:  # noqa: BLE001
         return 0
+
+
+RESERVE_FRACTION = 0.8  # strategy/judging work stops here so rendering never starves for quota
+
+
+def reserve_reached(user=None) -> bool:
+    """True when today's AI calls have reached the reserve threshold of the daily budget — THE
+    shared guard for every optional AI consumer (script judge, council, strategist, successor
+    design, requalify). It existed as four hand-rolled copies that drifted: two of them forgot the
+    app-wide `GEMINI_DAILY_BUDGET` fallback, so an operator who set only the env budget had no
+    reserve protection on exactly the passes that run unattended (ADR-085).
+
+    Budget = the user's Settings value when set, else the app-wide fallback; no budget configured
+    means the reserve never trips (there is nothing to protect a share of)."""
+    from core.config import settings
+
+    budget = None
+    if user is not None:
+        budget = (user.settings_json or {}).get("ai_daily_budget")
+    try:
+        budget = int(budget or settings.GEMINI_DAILY_BUDGET or 0)
+    except (TypeError, ValueError):
+        budget = 0
+    return bool(budget) and ai_calls_today() >= budget * RESERVE_FRACTION

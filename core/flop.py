@@ -27,8 +27,12 @@ SNAPSHOT_AGE_H = 24       # when views_24h is stamped (first early-stats refresh
 
 
 def campaign_median_24h(tasks) -> float | None:
-    """Median first-day views across this campaign's measured episodes, or None below the floor."""
-    vals = sorted(t.stats_json["views_24h"] for t in tasks
+    """Median first-day views across this campaign's measured ORDINARY episodes, or None below the
+    floor. Compilations are excluded here, at the definition (ADR-085): a long-form video's
+    first-day views are a different distribution, and one in the median skews every flop verdict."""
+    from core.compilation import ordinary_episodes
+
+    vals = sorted(t.stats_json["views_24h"] for t in ordinary_episodes(tasks)
                   if (t.stats_json or {}).get("views_24h") is not None)
     if len(vals) < MIN_MEASURED_24H:
         return None

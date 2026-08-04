@@ -66,6 +66,17 @@ def enqueue_compile(task_id: int) -> str:
     return job.id
 
 
+def enqueue_requalify(buffer_item_id: int) -> str:
+    """Enqueue a re-run of Auto-QC on a parked render (ADR-084) — the "Run QC now" button."""
+    job = render_queue.enqueue(
+        "workers.video_worker.requalify_task",
+        buffer_item_id,
+        job_timeout=600,
+        result_ttl=3600,
+    )
+    return job.id
+
+
 def enqueue_publish(buffer_item_id: int) -> str:
     """Enqueue a publish (upload) job for an approved buffer item. Same queue/worker, so uploads
     stay sequential with renders (KISS on one box); a short upload never blocks for long.
