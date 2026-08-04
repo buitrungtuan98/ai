@@ -920,8 +920,13 @@ def delete_channel(channel=Depends(get_owned_channel), db=Depends(get_db)):
 _AUTOPILOT_FEED_PAGE = 25
 
 
+_COUNCIL_FLASHES = ("council_filed", "council_no_changes", "council_unchanged",
+                    "council_no_key", "council_budget", "council_failed")
+
+
 @app.get("/autopilot", response_class=HTMLResponse)
-def autopilot_page(request: Request, user: CurrentUser, db: DbDep, page: int = 1):
+def autopilot_page(request: Request, user: CurrentUser, db: DbDep, page: int = 1,
+                   flash: str = ""):
     """The autopilot mission control: a per-channel run status strip (mode + 'last ran'), strategy
     proposals to approve/dismiss, and the full activity log of every autonomous decision with the
     data evidence + reasoning that drove it. ADR-044. The feed is paginated so it never bloats."""
@@ -945,12 +950,41 @@ def autopilot_page(request: Request, user: CurrentUser, db: DbDep, page: int = 1
         request, "autopilot.html",
         {"request": request, "user": user, "nav": "autopilot", "proposed": proposed,
          "history": feed, "ap_channels": ap_channels, "chan_by_id": chan_by_id,
+         "flash": flash if flash in _COUNCIL_FLASHES else "",
          "page": page, "feed_pages": max(1, -(-total // _AUTOPILOT_FEED_PAGE)), "feed_total": total},
     )
 
 
+@app.post("/channels/{channel_id}/council-now")
+def run_council_now(user: CurrentUser, db: DbDep, channel=Depends(get_owned_channel)):
+    """Ask the council for a fresh verdict NOW (ADR-086) — after approving proposals or editing
+    slots, the next scheduled verdict is up to 24h away. Bypasses only the once-a-day gate: the
+    budget reserve still applies, and the pack-hash cache still makes an unchanged-data run free
+    (that outcome is reported honestly instead of pretending a new judgment happened)."""
+    from core import council
+    from core.usage import reserve_reached
+    from workers import scheduler
+
+    key = user.gemini_api_key or settings.GEMINI_API_KEY
+    if not key:
+        return RedirectResponse("/autopilot?flash=council_no_key", status_code=303)
+    if reserve_reached(user):
+        return RedirectResponse("/autopilot?flash=council_budget", status_code=303)
+    try:
+        result = council.run_council(db, channel, api_key=key,
+                                     model=user.gemini_model or settings.GEMINI_MODEL)
+    except Exception:  # noqa: BLE001 — an AI outage is a flash message, not a 500
+        logger.warning("Run-council-now failed for channel %s", channel.id, exc_info=True)
+        return RedirectResponse("/autopilot?flash=council_failed", status_code=303)
+    scheduler.log_council_report(db, channel, user, result)
+    flash = ("council_unchanged" if result["skipped_unchanged"]
+             else ("council_filed" if result["filed"] else "council_no_changes"))
+    return RedirectResponse(f"/autopilot?flash={flash}", status_code=303)
+
+
 @app.post("/autopilot/{action_id}/approve")
-def approve_autopilot_action(action_id: int, user: CurrentUser, db: DbDep):
+def approve_autopilot_action(action_id: int, user: CurrentUser, db: DbDep,
+                             return_to: str = Form("")):
     action = db.get(AutopilotAction, action_id)
     if action is None or action.user_id != user.id:
         raise HTTPException(404, "Action not found")
@@ -958,11 +992,13 @@ def approve_autopilot_action(action_id: int, user: CurrentUser, db: DbDep):
         from workers import scheduler
 
         scheduler.apply_autopilot_action(db, action)
-    return RedirectResponse("/autopilot", status_code=303)
+    # `return_to` lets the campaign hub's inline proposal cards keep the operator in place (ADR-086).
+    return RedirectResponse(_safe_return(return_to) or "/autopilot", status_code=303)
 
 
 @app.post("/autopilot/{action_id}/dismiss")
-def dismiss_autopilot_action(action_id: int, user: CurrentUser, db: DbDep):
+def dismiss_autopilot_action(action_id: int, user: CurrentUser, db: DbDep,
+                             return_to: str = Form("")):
     from datetime import datetime
 
     action = db.get(AutopilotAction, action_id)
@@ -972,7 +1008,7 @@ def dismiss_autopilot_action(action_id: int, user: CurrentUser, db: DbDep):
         action.status = "dismissed"
         action.resolved_at = datetime.utcnow()
         db.commit()
-    return RedirectResponse("/autopilot", status_code=303)
+    return RedirectResponse(_safe_return(return_to) or "/autopilot", status_code=303)
 
 
 _PROFILE_LANGS = ("vi", "en", "es")
@@ -2106,13 +2142,18 @@ def _episode_return(return_to: str) -> str | None:
 
 def _safe_return(return_to: str) -> str | None:
     """An internal path a shared action may bounce back to, or None. Allow-list only (never an
-    arbitrary `return_to`, which would be an open redirect): the Episode view, and the Operations
+    arbitrary `return_to`, which would be an open redirect): the Episode view, the Operations
     page — whose Publish-queue tab reuses the same asset actions and must not dump the operator on
-    /assets afterwards."""
+    /assets afterwards — and a campaign hub Overview, whose inline proposal cards reuse the
+    autopilot approve/dismiss routes (ADR-086)."""
     ep = _episode_return(return_to)
     if ep is not None:
         return ep
-    if (return_to or "").split("?", 1)[0] in ("/operations", "/calendar"):
+    path = (return_to or "").split("?", 1)[0]
+    if path in ("/operations", "/calendar", "/autopilot"):
+        return return_to
+    m = re.fullmatch(r"/campaigns/(\d+)", path)
+    if m:
         return return_to
     return None
 
@@ -2486,9 +2527,18 @@ def campaign_overview(request: Request, user: CurrentUser, db: DbDep,
     measured = [t for t in episodes if t.stats_json and t.stats_json.get("avg_pct_viewed") is not None]
     best = max(measured, key=lambda t: t.stats_json.get("avg_pct_viewed", 0), default=None)
     hub = _hub_context(db, user, campaign)  # single channel fetch, reused for the audience line
+    # What the autopilot thinks about THIS campaign (ADR-086): open proposals are decidable right
+    # here, and the last few autonomous actions say what the machine did without a tab switch.
+    ap_open = db.scalars(select(AutopilotAction).where(
+        AutopilotAction.campaign_id == campaign.id, AutopilotAction.status == "proposed")
+        .order_by(AutopilotAction.id.desc())).all()
+    ap_recent = db.scalars(select(AutopilotAction).where(
+        AutopilotAction.campaign_id == campaign.id, AutopilotAction.status.in_(["done", "applied"]))
+        .order_by(AutopilotAction.id.desc()).limit(3)).all()
     return templates.TemplateResponse(
         request, "performance.html",
         {"request": request, "user": user, "nav": "campaigns", "campaign": campaign,
+         "ap_open": ap_open, "ap_recent": ap_recent,
          "episodes": episodes, "learning": campaign.learning_json or {},
          "best_id": best.id if best else None,
          "best_ret": best.stats_json.get("avg_pct_viewed") if best else None,
@@ -2635,11 +2685,22 @@ def calendar_page(request: Request, user: CurrentUser, db: DbDep, week: int = 0,
         campaign_obj = next((c for c in campaigns if c.id == cid), None)
         if campaign_obj is not None:
             override_by_camp.setdefault(cid, []).append((_to_campaign_tz(at, campaign_obj), epn))
+    # Pending slot-change proposals (ADR-086): the council wants to move a posting hour, and the
+    # calendar is where the operator thinks about hours — say it HERE, on the affected slot, not
+    # only in the Autopilot feed. At most one live slot_change per campaign (kind idempotency).
+    slot_moves: dict[int, dict] = {}
+    for a in db.scalars(select(AutopilotAction).where(
+            AutopilotAction.user_id == user.id, AutopilotAction.kind == "slot_change",
+            AutopilotAction.status == "proposed")).all():
+        if a.campaign_id is not None:
+            slot_moves[a.campaign_id] = {"id": a.id, "frm": (a.params or {}).get("from"),
+                                         "to": (a.params or {}).get("to")}
     slotted, unslotted = [], []
     for c in campaigns:
         overrides = override_by_camp.get(c.id, [])
         cells = _calendar_row_cells(c, ready_by_camp.get(c.id, []), overrides, week=week)
         entry = {"campaign": c,
+                 "slot_move": slot_moves.get(c.id),
                  # Everything rendered and waiting — slot-bound AND own-time. Counting only the
                  # slot-bound ones made the calendar disagree with the hub after a reschedule.
                  "ready": len(ready_by_camp.get(c.id, [])) + len(overrides),

@@ -95,6 +95,9 @@
         <button class="btn ghost sm" type="submit">↻ Run QC now</button>
       </form>
       {% endif %}
+      {% elif qc.get('deterministic_only') %}
+      {# A compilation's free sanity check (ADR-087) — honest about its narrower scope. #}
+      <p class="hint">{% if qc.get('passed') %}🟢 Sanity checks passed (black-frame/silence — compilations skip the vision judge){% else %}🔴 Sanity checks FAILED{% if qc.get('issues') %} · {{ qc.get('issues')|join('; ') }}{% endif %}{% endif %}</p>
       {% else %}
       <p class="hint">{% if qc.get('passed') %}🟢 Auto-QC passed{% else %}🔴 Auto-QC FAILED{% endif %}{% if qc.get('score') is not none %} · score {{ qc.get('score') }}/10{% endif %}{% if qc.get('attempts', 1) > 1 %} · {{ qc.get('attempts') }} attempts{% endif %}{% if qc.get('issues') %} · {{ qc.get('issues')|join('; ') }}{% endif %}</p>
       {% endif %}

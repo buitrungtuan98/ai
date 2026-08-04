@@ -6,9 +6,25 @@
   <a class="btn ghost" href="/channels">Channels →</a>
 {% endcall %}
 
+{# Run-council-now outcomes (ADR-086) — each says what actually happened, incl. "nothing changed". #}
+{% if flash == 'council_filed' %}
+{% call ui.banner('success') %}🧠 <b>The council ran</b> and filed new proposal(s) — they are in the list below.{% endcall %}
+{% elif flash == 'council_no_changes' %}
+{% call ui.banner() %}🧠 <b>The council ran</b> and proposes no changes — its note is on the channel row above.{% endcall %}
+{% elif flash == 'council_unchanged' %}
+{% call ui.banner() %}🧠 <b>Nothing new to judge</b> — the data has not changed since the council's last verdict, so no AI call was spent. Its standing note is on the channel row.{% endcall %}
+{% elif flash == 'council_no_key' %}
+{% call ui.banner('danger') %}⚠ <b>No Gemini key</b> — add one on the Credentials page before running the council.{% endcall %}
+{% elif flash == 'council_budget' %}
+{% call ui.banner('danger') %}⚠ <b>The AI budget reserve is reached</b> — the council never outbids rendering for quota. Try again after the daily reset.{% endcall %}
+{% elif flash == 'council_failed' %}
+{% call ui.banner('danger') %}⚠ <b>The council could not run</b> — the AI was unreachable or rate-limited. Nothing was changed; try again in a few minutes.{% endcall %}
+{% endif %}
+
 {% set kind_icon = {'extend': '📈', 'successor': '🌱', 'wind_down': '📉', 'tune': '🎛', 'audience_drift': '🎯',
   'approved': '✅', 'rejected': '❌', 'escalated': '🧭', 'recommended': '👍', 'retried': '↺', 'caught_up': '⏰',
-  'slot_change': '🕑', 'compile': '🎬', 'council': '🧠', 'report': '📋', 'refused': '🚧', 'milestone': '💰'} %}
+  'slot_change': '🕑', 'compile': '🎬', 'council': '🧠', 'report': '📋', 'refused': '🚧', 'milestone': '💰',
+  'requalified': '♻️', 'expired': '⌛'} %}
 {% set advisory_kinds = ['audience_drift'] %}
 {% set mode_labels = {'copilot': '🧭 Copilot', 'autopilot': '✈️ Full auto'} %}
 
@@ -29,6 +45,10 @@
         <div class="meta">🧠 <i>{{ cn.summary }}</i>{% if cn.get('watching') %} · watching: {{ cn.watching|join('; ') }}{% endif %}{% if cn.get('at') %} <span data-reltime="{{ cn.at }}Z"></span>{% endif %}</div>
         {% endif %}
       </div>
+      <form method="post" action="/channels/{{ c.id }}/council-now"
+            title="Ask the council for a fresh verdict now — free when the data hasn't changed; the daily budget reserve still applies.">
+        <button class="btn ghost sm" type="submit">🧠 Run council now</button>
+      </form>
       <a class="btn ghost sm" href="/channels">Configure →</a>
     </li>
     {% endfor %}

@@ -126,16 +126,21 @@ def is_transient(message: str | None) -> bool:
     return row[-1] if row is not None else True
 
 
+def is_quota(message: str | None) -> bool:
+    """Does this failure classify as the quota class — the one that heals by pure waiting?"""
+    if not message:
+        return False
+    row = _match(message)
+    return row is not None and row[0] is _QUOTA_WORDS
+
+
 def quota_reset_since(message: str | None, failed_at: datetime | None,
                       now: datetime | None = None) -> bool:
     """A spent quota is the one non-transient failure that heals by pure waiting: Google's free
     tier resets at midnight US-Pacific. True when this failure classifies as quota-class AND at
     least one Pacific midnight has passed since it was recorded — the autopilot may then retry it
     (still inside its own retry cap). `failed_at`/`now` are naive-UTC DB timestamps."""
-    if not message or failed_at is None:
-        return False
-    row = _match(message)
-    if row is None or row[0] is not _QUOTA_WORDS:
+    if failed_at is None or not is_quota(message):
         return False
     from zoneinfo import ZoneInfo
 

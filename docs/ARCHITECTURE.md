@@ -2077,3 +2077,65 @@ video still on disk → re-queue the PUBLISH. (4) The reject re-render goes thro
 (5) `failure.quota_reset_since` — quota-class failures become retryable once a Pacific midnight has
 passed, still inside the autopilot's retry cap. (6) `usage.reserve_reached(user)` is THE guard,
 with the user-setting-else-env-fallback rule in one place.
+
+### ADR-086 — The autopilot heals its own parks, shows up in context, and the council learns operations
+
+**Context.** Three gaps left after ADR-084. (1) Batch Q parked no-verdict renders honestly — and
+then they waited for a human forever, though judge outages are quota-shaped and clear on their own.
+(2) The autopilot's thinking was visible only on its own tab: a campaign's hub said nothing about
+proposals filed FOR that campaign, and the calendar said nothing about a pending slot move — the
+two places the operator actually decides those things. (3) The council judged strategy while blind
+to production health, and re-proposed ideas the operator had dismissed the day before (the
+deterministic proposer has had a 30-day dismissal cooldown since it shipped; the council never got
+one — two dedup implementations had drifted).
+
+**Decision.**
+
+1. **Auto-requalify.** A new autopilot step queues `requalify_task` for items parked with
+   `qc.unavailable` — once per item (`auto_requalify` marker at the metadata top level, because the
+   re-judge rewrites the `qc` dict), only after ≥2h (the outage needs time to clear), and only
+   below the shared budget reserve. The item stays parked; the next review pass routes on the
+   fresh verdict like any other. The "Run QC now" button remains the human's unlimited retry.
+2. **Context surfaces.** The campaign hub Overview gains an "Autopilot on this campaign" card —
+   open proposals with inline Approve/Dismiss (the shared routes gained an allow-listed
+   `return_to`) plus the last three autonomous actions. The calendar marks a pending `slot_change`
+   on the affected campaign row and slot cell.
+3. **The council knows operations and remembers "no".** Each campaign's pack entry gains an
+   `operations` block (failed renders 7d, consecutive failures, buffer runway vs slots/day, recent
+   no-verdict QC count — all computed by code) and `operator_recently_dismissed`; the system prompt
+   tells the model production health outranks ambition and a dismissal is a decision to work with.
+   `_already_proposed` now honours the same `REPROPOSE_AFTER_DAYS` cooldown as the deterministic
+   proposer — the constant moved to `core.autopilot` so there is exactly one.
+4. **Run council now.** A per-channel button bypasses only the once-a-day gate; the budget reserve
+   still applies and the pack-hash cache still answers "nothing changed" honestly (the flash says
+   no AI call was spent, instead of pretending a new judgment happened). The manager report logic
+   is shared with the daily pass (`log_council_report`).
+
+### ADR-087 — Expiry knows the schedule, campaigns finish honestly, uploads never double-post
+
+**Context.** Robustness holes from the audit, all of the shape "the machine wastes or strands work
+it already owns". A flat 72h buffer expiry destroyed healthy pre-renders whenever the buffer was
+deeper than the daily slot count (then the autopilot re-rendered the same episodes into the same
+fate), and it destroyed operator-scheduled episodes (`publish_at`) parked more than 3 days out. A
+permanently-failed episode stranded its campaign "active" at N-1/N forever. A YouTube upload that
+succeeded server-side but timed out client-side was posted twice on retry (Facebook had an
+idempotency guard; YouTube had none). Compilations parked with NO check at all — a truncated
+library master concatenated into a broken long-form video nobody looked at until the human review.
+Token refreshes made inside analytics passes were thrown away un-committed and re-minted hourly.
+Buffer expiry lived only in a log file.
+
+**Decision.** (1) `expire_stale_buffers` computes a per-item max age: weekday-gated ≥7.5 days
+(as before), slot-scheduled items get a runway-aware age (the N-th in line with S slots/day may
+wait ~N/S days + a day of slack), and a `publish_at` item lives until its own time + a day. Head-
+of-queue items that genuinely missed 3+ days of slots still expire at the old bound. (2)
+`finish_stranded_campaign`: active, short of total, every planned episode exists and is terminal,
+nothing left in the buffer, and no failed episode still within the autopilot's reach (transient/
+quota under the cap are "slow", not stranded) → complete + notify + feed entry + activate the next
+pending campaign; a manual Retry still re-opens the dead episode. (3) `youtube_service.
+find_existing_upload` — exact-title match over the channel's recent uploads (~2 quota units, never
+`search.list`), armed only on retries. (4) `compile_task` runs the free deterministic QC and
+stores a `deterministic_only` verdict; score stays None so the review autopilot always escalates —
+a compilation is never auto-approved or auto-rejected, and its verdict line says exactly what was
+checked. (5) The analytics collectors commit after each channel's fetch so a token refresh
+persists. (6) Expired buffers land in the autopilot feed (kind `expired`) — the machine discarding
+finished work is an event the operator sees.

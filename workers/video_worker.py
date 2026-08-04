@@ -297,13 +297,16 @@ def hydrate_buffers(db, *, buffer_size: int | None = None, enqueue=enqueue_rende
 
 # ── Publishing / notification dispatch (lazy imports) ────────────────────────
 def _publish(channel: Channel, video_path: str, metadata: dict, user: User,
-             *, pending_video_id: str | None = None, on_pending=None) -> str:
-    """Upload to whichever platform this channel is. `pending_video_id`/`on_pending` are the
-    duplicate-post guard (ADR-073) — Facebook uses them; YouTube's resumable upload has its own."""
+             *, pending_video_id: str | None = None, on_pending=None,
+             retrying: bool = False) -> str:
+    """Upload to whichever platform this channel is. `pending_video_id`/`on_pending` are Facebook's
+    duplicate-post guard (ADR-073); `retrying` arms YouTube's title-match guard (ADR-087) — its
+    resumable upload only protects within one call, not across a fresh retry job."""
     if channel.platform == Platform.youtube:
         from services import youtube_service
 
-        return youtube_service.upload_video(channel, video_path, metadata, user)
+        return youtube_service.upload_video(channel, video_path, metadata, user,
+                                            check_existing=retrying)
     if channel.platform == Platform.facebook:
         from services import facebook_service
 
@@ -507,7 +510,8 @@ def _publish_buffer(db, task: Task, buf: BufferPoolItem, campaign: Campaign,
 
     video_id = _publish(channel, buf.video_path, meta, user,
                         pending_video_id=(buf.metadata_json or {}).get("pending_video_id"),
-                        on_pending=remember_pending)
+                        on_pending=remember_pending,
+                        retrying=bool(task.retry_count))
 
     task.published_video_id = video_id
     task.published_url = published_url_for(channel.platform, video_id, fmt)
@@ -696,7 +700,7 @@ def compile_task(task_id: int) -> None:
     holds the render lock like any job (cheap or not, one ffmpeg at a time is the law of this box)
     and ALWAYS parks for review: a ten-minute video that will anchor the channel's long-form shelf
     gets one human look, in every mode."""
-    from core import compilation, media
+    from core import compilation, media, qc
     from core.captions import teaser
     from core.ffmpeg_runner import run_ffmpeg
     from core.thumbnail import generate_thumbnail
@@ -740,6 +744,14 @@ def compile_task(task_id: int) -> None:
         cfg = campaign.config_json or {}
         metadata.setdefault("cta", cfg.get("cta"))
         metadata.setdefault("privacy", cfg.get("privacy", "public"))
+        # Free sanity check on the concat (ADR-087): a truncated library master produces a broken
+        # long-form video, and until now NOTHING looked at a compilation before it parked. Score
+        # stays None on purpose — the review autopilot escalates score-less verdicts, so a
+        # compilation is never auto-rejected (its complaints must not steer the scriptwriter) and
+        # never auto-approved; the human look stays mandatory, now with a verdict line on the card.
+        det = qc.run_deterministic_qc(master)
+        metadata["qc"] = {"passed": det.passed, "score": None, "issues": det.issues,
+                          "deterministic_only": True}
 
         buf = BufferPoolItem(
             campaign_id=campaign.id, channel_id=campaign.channel_id,

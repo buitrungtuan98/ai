@@ -155,6 +155,12 @@ def review_decision(qc: dict | None, approve_min: int, reject_max: int) -> tuple
 
 
 # ── Strategy proposals (Phase III): reversible, evidence-backed, deterministic ─
+# A dismissal is a DECISION, not a scheduling accident: no proposer — deterministic or council —
+# re-files the same (campaign, kind) until this cooldown passes (ADR-086). Lives here because both
+# the scheduler's proposer and the council import this module; two copies had already diverged
+# (the council had no cooldown at all and could nag daily with a rejected idea).
+REPROPOSE_AFTER_DAYS = 30
+
 EXTEND_AT_PCT = 0.8        # a campaign this far through its run is "near its cap"
 EXTEND_BY = 0.25           # extend a winner by +25% episodes
 WIND_DOWN_CONSECUTIVE = 5  # this many straight measured episodes below the bar → wind down

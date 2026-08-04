@@ -29,11 +29,11 @@ import re
 from datetime import datetime, timedelta
 
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from core import autopilot, flop, monetize
 from database.models import AutopilotAction, BufferPoolItem, Campaign, Task
-from database.types import CampaignStatus, TaskStatus
+from database.types import BufferStatus, CampaignStatus, TaskStatus
 
 logger = logging.getLogger(__name__)
 
@@ -120,12 +120,41 @@ def evidence_pack(db, channel) -> dict:
         tasks = ordinary_episodes(db.scalars(select(Task).where(Task.campaign_id == c.id)).all())
         done = [t for t in tasks if t.status == TaskStatus.COMPLETED]
         # QC verdicts live on the buffer rows (consumed rows persist after publish).
-        qc_scores = [((b.metadata_json or {}).get("qc") or {}).get("score")
-                     for b in db.scalars(select(BufferPoolItem).where(
-                         BufferPoolItem.campaign_id == c.id)
-                         .order_by(BufferPoolItem.id.desc()).limit(8)).all()]
+        qc_dicts = [((b.metadata_json or {}).get("qc") or {})
+                    for b in db.scalars(select(BufferPoolItem).where(
+                        BufferPoolItem.campaign_id == c.id)
+                        .order_by(BufferPoolItem.id.desc()).limit(8)).all()]
+        qc_scores = [q.get("score") for q in qc_dicts]
         learning = c.learning_json or {}
         cfg = c.config_json or {}
+        # Operational health (ADR-086) — the council was deciding STRATEGY while blind to whether
+        # production is limping: failures, an empty buffer, a judge that keeps being absent. All
+        # computed by code, like every other number in the pack.
+        week_ago = datetime.utcnow() - timedelta(days=7)
+        failed_7d = sum(1 for t in tasks
+                        if t.status == TaskStatus.FAILED
+                        and t.finished_at is not None and t.finished_at >= week_ago)
+        ready_n = db.scalar(select(func.count()).select_from(BufferPoolItem).where(
+            BufferPoolItem.campaign_id == c.id,
+            BufferPoolItem.status == BufferStatus.ready)) or 0
+        slots_per_day = len(cfg.get("posting_slots") or [])
+        from workers.video_worker import consecutive_failures
+
+        operations = {
+            "failed_renders_7d": failed_7d,
+            "consecutive_failures": consecutive_failures(db, c),
+            "buffer_ready": ready_n,
+            "slots_per_day": slots_per_day,
+            "runway_days": round(ready_n / slots_per_day, 1) if slots_per_day else None,
+            "qc_no_verdict_recent": sum(1 for q in qc_dicts if q.get("unavailable")),
+        }
+        # What the operator recently said NO to (ADR-086) — so the model understands why an idea
+        # is off the table instead of rediscovering it.
+        dismissed = [a.kind for a in db.scalars(select(AutopilotAction).where(
+            AutopilotAction.campaign_id == c.id, AutopilotAction.status == "dismissed")
+            .order_by(AutopilotAction.id.desc()).limit(5)).all()
+            if a.resolved_at is not None and (datetime.utcnow() - a.resolved_at)
+            < timedelta(days=autopilot.REPROPOSE_AFTER_DAYS)]
         packs.append({
             "campaign_id": c.id,
             "topic": c.topic_name,
@@ -142,6 +171,8 @@ def evidence_pack(db, channel) -> dict:
             "recent_reject_reasons": (learning.get("reject_reasons") or [])[-3:],
             "recent_flop_notes": (learning.get("flop_notes") or [])[-3:],
             "qc_scores_recent": [s for s in qc_scores if s is not None][-5:],
+            "operations": operations,
+            "operator_recently_dismissed": dismissed,
         })
     profile = channel.profile_json or {}
     recent = db.scalars(select(AutopilotAction).where(
@@ -256,7 +287,16 @@ def _already_proposed(db, campaign_id: int, kind: str) -> bool:
     row = db.scalars(select(AutopilotAction).where(
         AutopilotAction.campaign_id == campaign_id, AutopilotAction.kind == kind)
         .order_by(AutopilotAction.id.desc()).limit(1)).first()
-    return bool(row and row.status in ("proposed", "applied"))
+    if row is None:
+        return False
+    if row.status in ("proposed", "applied"):
+        return True
+    # A dismissal is a decision (ADR-086): the deterministic proposer has honoured this cooldown
+    # since it shipped, but the council did not — so an idea the operator said no to came back the
+    # very next day, every day the pack changed. One shared constant now governs both.
+    return bool(row.status == "dismissed" and row.resolved_at is not None
+                and (datetime.utcnow() - row.resolved_at)
+                < timedelta(days=autopilot.REPROPOSE_AFTER_DAYS))
 
 
 # ── D2: the council call ─────────────────────────────────────────────────────
@@ -265,10 +305,14 @@ _SYSTEM = (
     "every number in it was measured; nothing else exists. Decide what to do next for this channel "
     "like a careful human manager: weigh flops, retention, QC and the monetization goal, stay "
     "consistent with your own recent decisions, and prefer doing nothing over acting on thin "
-    "evidence. Rules you cannot break: use ONLY numbers present in the pack; choose actions ONLY "
-    "from the allowed list (use 'hold' for campaigns needing none); every decision names its "
-    "evidence; write reasons in the channel's language when one is set, otherwise English, in a "
-    "plain, human voice — no jargon, no filler."
+    "evidence. Each campaign's `operations` block is its production health (failures, buffer "
+    "runway, absent QC judge) — weigh it before any growth move: a limping factory needs fixing, "
+    "not more ambition. `operator_recently_dismissed` lists action kinds the operator explicitly "
+    "said NO to recently — do not re-propose those; work with the decision. Rules you cannot "
+    "break: use ONLY numbers present in the pack; choose actions ONLY from the allowed list (use "
+    "'hold' for campaigns needing none); every decision names its evidence; write reasons in the "
+    "channel's language when one is set, otherwise English, in a plain, human voice — no jargon, "
+    "no filler."
 )
 
 

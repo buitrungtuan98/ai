@@ -285,6 +285,10 @@ def collect_early_stats(db, now: datetime | None = None) -> int:
         except Exception:  # noqa: BLE001 — early stats must never break the factory
             logger.warning("Early-stats fetch failed for channel %s", channel_id, exc_info=True)
             continue
+        # Persist a token refresh `build_credentials` may have written onto the channel (ADR-087):
+        # the pass used to commit only when an episode updated, so a refreshed token was thrown
+        # away and re-minted on every pass.
+        db.commit()
         for t in channel_tasks:
             if t.published_video_id not in stats:
                 continue
@@ -417,6 +421,7 @@ def collect_stats(db, now: datetime | None = None) -> int:
             else:
                 stats = fetch_facebook_stats(channel, ids)
             _note_analytics_health(db, channel, None)   # it worked — clear any stale complaint
+            db.commit()   # persist a token refresh written onto the channel mid-fetch (ADR-087)
         except Exception as exc:  # noqa: BLE001 — stats must never break the factory
             problem = scope_problem(exc)
             if problem:
@@ -600,6 +605,7 @@ def collect_channel_snapshots(db, now: datetime | None = None) -> int:
             logger.warning("channel-totals fetch failed for channel %s: %s",
                            channel.id, _scrub(str(exc)))
             continue
+        db.commit()   # persist a token refresh written onto the channel mid-fetch (ADR-087)
         if not totals:
             continue
         if channel.platform == Platform.youtube:
