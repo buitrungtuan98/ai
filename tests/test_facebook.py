@@ -349,6 +349,14 @@ def test_a_dead_token_retires_the_channel(session, user, channel, monkeypatch):
 
     notes = []
     monkeypatch.setattr(video_worker, "_notify", lambda user, msg: notes.append(msg))
+    # Retirement requires a SECOND opinion now (ADR-083): the re-verification must definitely
+    # reject the token, not merely fail to reach Facebook.
+    from services import verification
+
+    monkeypatch.setattr(verification, "check_facebook_page",
+                        lambda page_id, token: verification.PageCheck(False, "dead"))
+    channel.encrypted_credentials = '{"page_id": "P1", "page_access_token": "tok"}'
+    session.commit()
     video_worker._fail_task(session, t, user, cam, FacebookAuthError("Facebook upload: OAuth error 190"),
                             "render_task")
     session.refresh(channel)
@@ -1146,3 +1154,112 @@ def test_a_refusal_opens_the_token_guide_it_points_at(client):
     guide = page.split("How do I get a permanent Page Access Token", 1)[0]
     # The <details> immediately wrapping the guide summary carries `open`.
     assert guide.rstrip().endswith("<summary>") or "open" in guide.rsplit("<details", 1)[-1]
+
+
+# ── ADR-083 — a rate limit is "not now", never "not this token" ───────────────────────────────
+# Reported live: a healthy permanent token kept getting marked expired; re-pasting the SAME token
+# "fixed" it every time. Two defects compounded: (1) any Graph error typed "OAuthException" was
+# classified as a dead token, and Facebook stamps that type on rate limits (code 4/17/32) and
+# temporary errors too — a small Page's insights quota trips exactly that under the hourly stats
+# pass; (2) the retirement sites condemned on a single error and never re-verified, even though
+# re-verification is precisely what the operator was doing by hand.
+
+def test_rate_limits_are_not_auth_errors_even_typed_oauthexception():
+    from services import facebook_service as fb
+
+    for code in (4, 17, 32, 613, 2):
+        with pytest.raises(fb.FacebookError) as err:
+            fb.raise_for_graph(_graph_error("(#%d) Application request limit reached" % code,
+                                            code=code, etype="OAuthException"), what="FB insights")
+        assert not isinstance(err.value, fb.FacebookAuthError), f"code {code} must not read as auth"
+        assert err.value.transient is True
+        assert "temporarily unavailable" in str(err.value)
+
+    # The genuinely dead token still classifies as auth — by CODE, no longer by type.
+    with pytest.raises(fb.FacebookAuthError):
+        fb.raise_for_graph(_graph_error("Error validating access token", code=190, etype=""),
+                           what="FB upload")
+
+
+def test_verification_says_could_not_tell_when_rate_limited(monkeypatch, real_check):
+    """The Check-token button during a rate-limited window must never say "rejected" — that message
+    sends the operator hunting for a new token they do not need."""
+    import requests
+
+    from services import verification
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _graph_error(
+        "(#32) Page request limit reached", code=32, etype="OAuthException"))
+    check = verification.check_facebook_page("1", "EAA" + "x" * 200)
+    assert check.ok is None
+    assert "NOT rejected" in check.detail
+
+
+def test_channel_survives_an_auth_class_error_when_the_token_reverifies(session, user, channel,
+                                                                        monkeypatch):
+    """The operator's exact loop, encoded: an auth-class error fires, the re-check says the token
+    is fine → the channel is NOT retired."""
+    from database.models import Campaign, Task
+    from database.types import CampaignStatus, ChannelStatus, Platform
+    from services import verification
+    from services.facebook_service import FacebookAuthError
+    from workers import video_worker
+
+    channel.platform = Platform.facebook
+    channel.encrypted_credentials = '{"page_id": "P1", "page_access_token": "tok"}'
+    cam = Campaign(user_id=user.id, channel_id=channel.id, topic_name="T", total_episodes=3,
+                   status=CampaignStatus.active)
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    t = Task(campaign_id=cam.id, user_id=user.id, episode_number=1)
+    session.add(t)
+    session.commit()
+    monkeypatch.setattr(video_worker, "_notify", lambda u, m: None)
+    monkeypatch.setattr(verification, "check_facebook_page",
+                        lambda page_id, token: verification.PageCheck(True, "Verified: fine."))
+
+    video_worker._fail_task(session, t, user, cam,
+                            FacebookAuthError("Facebook upload: OAuth error 190"), "render_task")
+    session.refresh(channel)
+    assert channel.status == ChannelStatus.active            # verified alive → not condemned
+
+    # "Could not tell" (Facebook unreachable) also does NOT retire — under-retiring costs one
+    # failed publish; falsely retiring costs the operator a daily token-pasting ritual.
+    monkeypatch.setattr(verification, "check_facebook_page",
+                        lambda page_id, token: verification.PageCheck(None, "unreachable"))
+    video_worker._fail_task(session, t, user, cam,
+                            FacebookAuthError("Facebook upload: OAuth error 190"), "render_task")
+    session.refresh(channel)
+    assert channel.status == ChannelStatus.active
+
+
+def test_snapshot_pass_also_verifies_before_condemning(session, user, monkeypatch):
+    """The hourly snapshot retries all day until a row lands — the single worst amplifier of a
+    misclassified rate limit. Same second-opinion rule applies."""
+    from database.models import Channel
+    from database.types import ChannelStatus, Platform
+    from services import analytics_service, verification
+    from services.facebook_service import FacebookAuthError
+
+    ch = Channel(user_id=user.id, platform=Platform.facebook, channel_name="P",
+                 encrypted_credentials='{"page_id": "P1", "page_access_token": "tok"}')
+    session.add(ch)
+    session.commit()
+    session.refresh(ch)
+
+    def boom(channel):
+        raise FacebookAuthError("Facebook page: OAuth error 190 — bad", code=190)
+
+    monkeypatch.setattr(analytics_service, "fetch_channel_totals", boom)
+    monkeypatch.setattr(verification, "check_facebook_page",
+                        lambda page_id, token: verification.PageCheck(True, "fine"))
+    analytics_service.collect_channel_snapshots(session)
+    session.refresh(ch)
+    assert ch.status == ChannelStatus.active                 # token re-verified → survives
+
+    monkeypatch.setattr(verification, "check_facebook_page",
+                        lambda page_id, token: verification.PageCheck(False, "dead"))
+    analytics_service.collect_channel_snapshots(session)
+    session.refresh(ch)
+    assert ch.status == ChannelStatus.expired                # definitely dead → retired

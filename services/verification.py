@@ -171,6 +171,20 @@ def _graph_message(resp) -> str:
         return ""
 
 
+def _graph_code(resp) -> int | None:
+    """The numeric `error.code`, or None — the ONLY field that reliably classifies a Graph error."""
+    try:
+        return ((resp.json() or {}).get("error") or {}).get("code")
+    except ValueError:
+        return None
+
+
+def _fb():
+    from services import facebook_service
+
+    return facebook_service
+
+
 def _wrong_node_kind(message: str) -> str | None:
     """`""`/node name if this error means "the token does not point at a Page"; None otherwise.
 
@@ -265,6 +279,14 @@ def check_facebook_page(page_id: str, token: str) -> PageCheck:
         # Graph answers a bad token with 400/401/403 and an explanation of its own.
         if resp.status_code in (400, 401, 403, 404):
             detail = _graph_message(resp)
+            # Rate limits and temporary API errors arrive with the SAME 4xx statuses (and Graph
+            # stamps them "OAuthException" too). They mean "not now", never "not this token" — a
+            # definite rejection here retires channels and blocks saves, so it is reserved for
+            # errors that are actually about the credential (ADR-083).
+            code = _graph_code(resp)
+            if code in _fb()._TRANSIENT_ERROR_CODES:
+                return PageCheck(None, "Facebook is rate-limiting or temporarily unavailable — "
+                                       "could not verify right now. The token was NOT rejected.")
             # A field-does-not-exist complaint is never news the operator can use — it is about OUR
             # request, not their token. Translate it into what it actually means (ADR-077).
             kind = _wrong_node_kind(detail)

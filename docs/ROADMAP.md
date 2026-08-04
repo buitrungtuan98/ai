@@ -1651,6 +1651,23 @@ every decision — behind hard rails. Shipped as six commits, each test-green:
   (one regenerate, one slot change/week, one council run/day, milestone once per level); every
   autopilot behaviour simulated in tests including AI-garbage verdicts and judge outages.
 
+## R18 — a healthy token must stay believed: no more false expiries `DONE`
+
+Reported: a valid permanent Page token repeatedly marked expired; re-pasting the SAME token fixed
+it every time — the signature of a false conviction (ADR-083).
+
+- **Root cause 1:** any Graph error typed "OAuthException" classified as a dead token — and
+  Facebook stamps that type on rate limits (4/17/32/613) and temporary errors (1/2/368) too. A
+  small Page's insights quota trips code 32 under the hourly stats pass on a perfectly healthy
+  token. Auth is now decided by `error.code` alone.
+- **Root cause 2:** both retirement sites (publish, hourly-retrying snapshot) condemned on a single
+  error with no second opinion. They now re-verify the token first and retire only on a DEFINITE
+  rejection — "verified fine" and "could not tell" both leave the channel alone.
+- The Check-token button says "could not verify right now — the token was NOT rejected" when
+  Facebook is rate-limiting, instead of a rejection that sends the operator token-hunting.
+- Verified: 625 tests (4 new incl. the operator's exact loop encoded as a test), ruff clean, docs
+  guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

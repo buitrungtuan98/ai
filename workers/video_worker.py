@@ -565,6 +565,16 @@ def _mark_channel_expired(db, campaign: Campaign, exc: Exception) -> bool:
     channel = db.get(Channel, campaign.channel_id)
     if channel is None or channel.status == ChannelStatus.expired:
         return False
+    # Verify before condemning (ADR-083): one cheap /me re-check, exactly what the operator does by
+    # hand when they re-paste the same token "and it works". Only a DEFINITE rejection retires the
+    # channel — a rate-limited or unreachable Graph is "not now", never "not this token". An operator
+    # reported living this loop: healthy token, hourly false expiries, same token re-pasted daily.
+    from services.facebook_service import token_definitely_dead
+
+    if not token_definitely_dead(channel):
+        logger.warning("Channel %s hit an auth-class error but its token re-verified — NOT marking "
+                       "expired (transient misclassification?): %s", channel.id, exc)
+        return False
     channel.status = ChannelStatus.expired
     db.commit()
     logger.warning("Channel %s marked expired: %s", channel.id, exc)

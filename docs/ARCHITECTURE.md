@@ -1965,3 +1965,40 @@ format-aware path from ADR-073), never a Reel.
 
 **Honest bound.** Only masters published after this shipped exist in the library; old episodes are
 gone. The first compilation becomes possible ~10-12 publishes after deployment.
+
+### ADR-083 — A rate limit is "not now", never "not this token": verify before condemning
+
+**Context.** An operator reported a loop: their permanent Page token — genuinely valid — kept
+getting marked expired; re-pasting the *same* token "fixed" it every time. That symptom is the
+signature of a false conviction, and the code had two ways to produce one:
+
+1. **Classification by the wrong field.** `raise_for_graph` declared a token dead when the error
+   carried `code ∈ {102,190,463,467}` **or `type == "OAuthException"`**. Graph stamps
+   "OAuthException" on far more than auth failures — application/user/Page rate limits (codes
+   4/17/32/613) and temporary API errors (1/2/368) all wear it. A small Page has a tiny insights
+   quota, and the hourly stats pass batches up to 50 insight calls — tripping the Page limit
+   (code 32) on a perfectly healthy token. That read as `FacebookAuthError` → channel retired.
+2. **Conviction without a second opinion — hourly.** The daily snapshot pass retries every hour
+   until a row lands for the day, so on a rate-limited day it re-convicted the channel again and
+   again. Neither retirement site (publish, snapshot) ever re-verified the token it was condemning
+   — even though re-verification is exactly what the operator was doing by hand, successfully.
+
+**Decision.**
+
+1. **Auth is decided by `error.code` alone.** `{102, 190, 463, 467}` retire; the `type` field is
+   never consulted. Rate-limit/temporary codes `{1, 2, 4, 17, 32, 341, 368, 613}` raise a
+   `FacebookError` marked `transient` with "temporarily unavailable" in the message — the autopilot
+   already treats unknown errors as retryable, so these heal by waiting.
+2. **Verify before condemning.** Both retirement sites now ask one question first —
+   `token_definitely_dead(channel)`, a single `/me` re-verification. Only a **definite** rejection
+   (`ok is False`) retires. "Verified fine" and "could not tell" both leave the channel alone:
+   under-retiring costs one more failed publish; falsely retiring costs the operator a daily
+   token-pasting ritual. This encodes the operator's own manual fix into the machine.
+3. **The Check-token button tells the same truth.** A rate-limited verification returns "could not
+   verify right now — the token was NOT rejected" instead of a definite rejection that sends the
+   operator hunting for a new token they do not need.
+
+**Why not require N consecutive failures instead?** A counter distinguishes persistent from
+transient, but a rate limit can persist for hours — it would still convict. The re-verification
+asks the only question that matters ("is THIS token refused, right now, on the cheapest possible
+call?") and its cost is one request at exactly the moment the channel would otherwise be retired.
