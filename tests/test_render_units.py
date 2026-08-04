@@ -836,7 +836,7 @@ def test_ffmpeg_runner_uses_nice_threads(monkeypatch):
         assert cmd[0] == "nice"
 
 
-def test_frame_sampling_dodges_the_flash_window(monkeypatch):
+def test_frame_sampling_dodges_the_flash_window(monkeypatch, tmp_path):
     """ADR-078, the doubled-text thumbnail: with a hook flash burned into the opening seconds, an
     early frame already carries a title — and _frame_score REWARDS edge density, so giant outlined
     text was actively preferred. Every sample (and both fallbacks) must land after `min_at_s`."""
@@ -852,7 +852,7 @@ def test_frame_sampling_dodges_the_flash_window(monkeypatch):
 
     monkeypatch.setattr(thumbnail, "extract_frame", fake_extract)
 
-    tmp = "/tmp/claude-0/-home-user-ai/ecbd0f63-45b6-5152-a81f-982afc89d745/scratchpad/fr.png"
+    tmp = str(tmp_path / "fr.png")
     thumbnail._select_frame("v.mp4", tmp, 0.15, 54.0, min_at_s=3.5)
     assert grabbed and all(t >= 3.5 for t in grabbed)
 
