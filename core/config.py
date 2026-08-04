@@ -92,6 +92,12 @@ class Settings(BaseSettings):
     # mid-encode — when it is spent, the render fails fast and resumes later from its checkpoint.
     IMAGE_TIMEOUT_SECONDS: int = 120
     IMAGE_WAIT_BUDGET_SECONDS: int = 1080
+    # Per-attempt cap on every Gemini TEXT/VISION call (R22). Without it the SDK allows ~600s per
+    # RPC; chained script/judge/QC calls at that pace outlive the stall limit with zero progress
+    # written, and the watchdog restarts a worker that was never wedged — the mass "worker stopped
+    # making progress" incident. 180s is generous for a JSON completion and keeps the worst-case
+    # AI phase (calls × retries) safely inside the render's own job timeout.
+    AI_CALL_TIMEOUT_SECONDS: int = 180
     # Watchdog (ADR-057): a render whose progress has not moved for JOB_TIMEOUT + this grace has
     # outlived its own RQ timeout without being killed — proof the worker loop is no longer
     # executing. The grace keeps the watchdog strictly BEHIND RQ's own timeout, so a legitimately

@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 
 from rq import SimpleWorker
+from rq.timeouts import UnixSignalDeathPenalty
 
 from core.config import settings
 from database.db_session import init_db
@@ -17,6 +18,28 @@ from database.db_session import SessionLocal
 from workers.scheduler import fail_orphaned_renders, run_scheduler_thread
 from workers.task_queue import LOCK_KEY, clear_all_progress, clear_restart_request, conn, render_queue
 from workers.watchdog import run_watchdog_thread
+
+
+class JobHardTimeout(BaseException):
+    """RQ's job-timeout signal, made unswallowable (R22).
+
+    Stock rq raises JobTimeoutException, an ordinary Exception — and the pipeline is full of broad
+    `except Exception` retry/fail-open handlers (structured-output retries, image/TTS retry loops,
+    QC fail-open). When the one-shot SIGALRM fired inside one of those, the timeout was logged as a
+    transient provider error, retried, and the job ran on with NO timeout armed at all — leaving the
+    watchdog's mid-transaction os._exit as the only terminator. Deriving from BaseException means no
+    handler in the pipeline can eat it; rq's perform_job still records the job failed."""
+
+
+class _HardTimeoutPenalty(UnixSignalDeathPenalty):
+    def handle_death_penalty(self, signum, frame):  # noqa: ARG002 — signal-handler signature
+        raise JobHardTimeout(f"Task exceeded maximum timeout value ({self._timeout} seconds)")
+
+
+class FactoryWorker(SimpleWorker):
+    """SimpleWorker whose death penalty cannot be swallowed by pipeline exception handlers."""
+
+    death_penalty_class = _HardTimeoutPenalty
 
 
 def main() -> None:
@@ -39,7 +62,7 @@ def main() -> None:
         fail_orphaned_renders(db)
     run_scheduler_thread()  # periodic buffer hydration + housekeeping (in-process, no extra container)
     run_watchdog_thread()   # wedged-render / operator-restart recovery (ADR-057)
-    worker = SimpleWorker([render_queue], connection=conn)
+    worker = FactoryWorker([render_queue], connection=conn)
     worker.work(with_scheduler=False, logging_level=settings.LOG_LEVEL)
 
 

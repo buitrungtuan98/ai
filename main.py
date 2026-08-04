@@ -357,12 +357,27 @@ def _task_counts(db, user_id: int) -> dict:
         .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
         .where(Campaign.user_id == user_id, BufferPoolItem.status == BufferStatus.awaiting_review)
     ) or 0
+    # One episode, one problem (R22): a FAILED task whose finished video sits in the review queue
+    # (the crash-window state the reconciler heals hourly) is a REVIEW item, not a failure too —
+    # counting it in both made every badge read 2 for one action and the triage list it twice,
+    # with the failed row's Retry quietly publishing the unreviewed video. Buffer wins, the same
+    # tie-break the /episodes stage chips already apply.
+    failed = by_status.get(TaskStatus.FAILED, 0)
+    if failed and awaiting:
+        from sqlalchemy import tuple_
+
+        review_keys = _review_episode_keys(db, user_id)
+        if review_keys:
+            failed -= db.scalar(
+                select(func.count()).select_from(Task).where(
+                    Task.user_id == user_id, Task.status == TaskStatus.FAILED,
+                    tuple_(Task.campaign_id, Task.episode_number).in_(list(review_keys)))) or 0
     return {
         "published": by_status.get(TaskStatus.COMPLETED, 0),
         "working": sum(by_status.get(s, 0) for s in _WORKING_STATUSES),
         "awaiting_review": awaiting,
         # CANCELLED is excluded on purpose — an operator's own decision is not a failure (ADR-064).
-        "failed": by_status.get(TaskStatus.FAILED, 0),
+        "failed": max(failed, 0),
         "cancelled": by_status.get(TaskStatus.CANCELLED, 0),
     }
 
@@ -689,11 +704,17 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
     tasks = db.scalars(
         select(Task).where(Task.user_id == user.id).order_by(Task.id.desc()).limit(12)
     ).all()
-    # Triage inbox: the concrete items that need a human, most-recent first.
-    attention_failed = db.scalars(
-        select(Task).where(Task.user_id == user.id, Task.status == TaskStatus.FAILED)
-        .order_by(Task.updated_at.desc()).limit(8)
-    ).all()
+    # Triage inbox: the concrete items that need a human, most-recent first. An episode whose
+    # finished video waits in the review queue appears ONLY as a review row (R22): listing its
+    # stale FAILED task too showed one episode as two problems, and that row's Retry button
+    # published the unreviewed video while toasting "Retry queued.".
+    review_key_set = _review_episode_keys(db, user.id)
+    attention_failed = [
+        t for t in db.scalars(
+            select(Task).where(Task.user_id == user.id, Task.status == TaskStatus.FAILED)
+            .order_by(Task.updated_at.desc()).limit(16)).all()
+        if (t.campaign_id, t.episode_number) not in review_key_set
+    ][:8]
     attention_review = db.scalars(
         select(BufferPoolItem)
         .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
@@ -2178,7 +2199,11 @@ def approve_asset(db: DbDep, item=Depends(get_owned_buffer_item), return_to: str
         raise HTTPException(400, "Only items awaiting review can be approved")
     if not (item.video_path and os.path.exists(item.video_path)):
         return _action_redirect(return_to, "missing", "/assets?flash=missing")
-    video_worker.apply_approve(db, item)
+    try:
+        video_worker.apply_approve(db, item)
+    except video_worker.ReviewConflict as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc)) from exc
     return _action_redirect(return_to, "publish", "/assets")
 
 
@@ -2226,6 +2251,7 @@ def rerender_asset(db: DbDep, item=Depends(get_owned_buffer_item), return_to: st
     task.error_message = None
     task.progress_pct = 0
     task.retry_count += 1
+    task_queue.clear_progress(task.id)  # no ghost % carries into the re-queued render (F1)
     # Discard & re-render is a REROLL: drop the resume checkpoint so the render writes a fresh
     # script (a plain Retry keeps it and rebuilds the same episode — ADR-069).
     video_worker.drop_script_checkpoint(task)
@@ -2459,6 +2485,16 @@ def episode_view(request: Request, user: CurrentUser, db: DbDep, task_id: int,
         and buffer.video_path and os.path.exists(buffer.video_path))
     stage_index = _STAGE_INDEX.get(task.status.value)
     diagnosis = _diagnose_failure(task.error_message) if task.status == TaskStatus.FAILED else None
+    # The incident screen's fix (R22): a FAILED task above a live playable buffer means the RENDER
+    # actually finished and only a later step (status commit, upload) died — the banner must say
+    # so instead of promising a Retry button the buffer actions replace.
+    render_survived = task.status == TaskStatus.FAILED and previewable
+    # A ready buffer on a slot-driven auto-publish campaign goes out at the next slot NO MATTER
+    # what the failed banner implies — the one thing the operator must know before walking away.
+    cfg = (campaign.config_json or {}) if campaign else {}
+    will_auto_publish = bool(
+        buffer is not None and buffer.status == BufferStatus.ready and previewable
+        and cfg.get("auto_publish", True) and cfg.get("posting_slots"))
     # Retention drop-off markers: attribute the measured curve to the scene that lost viewers.
     curve = (task.stats_json or {}).get("retention_curve")
     scenes = (task.render_json or {}).get("scenes")
@@ -2471,8 +2507,11 @@ def episode_view(request: Request, user: CurrentUser, db: DbDep, task_id: int,
          "stages": _EPISODE_STAGES, "stage_index": stage_index,
          "retention_curve": curve, "retention_drops": retention_drops,
          "failed": task.status == TaskStatus.FAILED, "diagnosis": diagnosis,
+         "render_survived": render_survived, "will_auto_publish": will_auto_publish,
+         "status_to_stage": _STATUS_TO_STAGE,
          "cancelled": task.status == TaskStatus.CANCELLED,
-         "flash": flash if flash in ("publish", "rerender", "rejected", "missing", "qc_queued") else "",
+         "flash": flash if flash in ("publish", "rerender", "rejected", "missing", "qc_queued",
+                                     "review", "published") else "",
          "flash_reason": flash_reason[:200]},
     )
 
@@ -2905,33 +2944,53 @@ def api_search(user: CurrentUser, db: DbDep, q: str = ""):
 
 @app.post("/api/tasks/{task_id}/retry")
 def retry_task(task_id: int, user: CurrentUser, db: DbDep, return_to: str = Form("")):
-    """Retry a failed episode. If the rendered file still exists (e.g. the upload failed or the
-    item was awaiting review), only the publish step is retried — no re-render.
+    """Retry a failed episode — retrying the step that actually failed (ADR-085). An APPROVED
+    rendered file (`ready`) re-queues only the publish; a file still AWAITING REVIEW routes the
+    operator to the review controls instead (R22: Retry must never publish unreviewed content —
+    the dashboard triage button did exactly that, toasting "Retry queued." while it uploaded);
+    no surviving file re-renders.
 
     Returns JSON for the Task Logs poller (fetch, no `return_to`); a form POST from the Episode view
     passes `return_to` and gets a 303 back to that page instead."""
+    from workers.reconcile import reconcile_task_outcome
+
     task = db.get(Task, task_id)
     if task is None or task.user_id != user.id:
         raise HTTPException(404, "Task not found")
     # CANCELLED is retryable too: cancelling is a pause the operator can undo (ADR-064).
     if task.status not in (TaskStatus.FAILED, TaskStatus.CANCELLED):
         raise HTTPException(400, "Only failed or cancelled episodes can be retried")
+    was_cancelled = task.status == TaskStatus.CANCELLED
+    outcome = None if was_cancelled else reconcile_task_outcome(db, task)
+    if outcome == "published":
+        # The upload had already landed — retrying would post the episode twice (R22).
+        db.commit()
+        return _action_redirect(return_to, "published", "") if _episode_return(return_to) \
+            else {"ok": True, "mode": "published"}
+    if outcome == "review":
+        # The render is finished and waiting for a human — the honest "retry" is a review.
+        db.commit()
+        return _action_redirect(return_to, "review", "") if _episode_return(return_to) \
+            else {"ok": True, "mode": "review", "href": f"/episodes/{task.id}"}
+    task_queue.clear_progress(task.id)  # drop any ghost % from a crashed prior attempt (F1)
+    if outcome == "scheduled":
+        # Approved/pre-rendered file on disk → only the publish is retried (no re-render). The
+        # task stays SCHEDULED (set by reconcile): PENDING_QUEUE here inflated the render queue
+        # and read "Queued" over an episode that was actually uploading (R22).
+        buf = db.scalar(select(BufferPoolItem).where(
+            BufferPoolItem.campaign_id == task.campaign_id,
+            BufferPoolItem.episode_number == task.episode_number,
+            BufferPoolItem.status == BufferStatus.ready))
+        task.retry_count += 1
+        db.commit()
+        task.rq_job_id = task_queue.enqueue_publish(buf.id)
+        db.commit()
+        return _action_redirect(return_to, "publish", "") if _episode_return(return_to) \
+            else {"ok": True, "mode": "publish"}
     task.error_message = None
     task.retry_count += 1
     task.progress_pct = 0
     task.status = TaskStatus.PENDING_QUEUE
-    task_queue.clear_progress(task.id)  # drop any ghost % from a crashed prior attempt (F1)
-    buf = db.scalar(select(BufferPoolItem).where(
-        BufferPoolItem.campaign_id == task.campaign_id,
-        BufferPoolItem.episode_number == task.episode_number,
-        BufferPoolItem.status.in_([BufferStatus.ready, BufferStatus.awaiting_review]),
-    ))
-    if buf is not None and buf.video_path and os.path.exists(buf.video_path):
-        db.commit()
-        task_queue.enqueue_publish(buf.id)
-        # File still on disk → only the publish is retried (no re-render): say so.
-        return _action_redirect(return_to, "publish", "") if _episode_return(return_to) \
-            else {"ok": True, "mode": "publish"}
     db.commit()
     task.rq_job_id = video_worker.enqueue_task(task)   # kind-aware: compilations re-concat
     db.commit()
@@ -3299,10 +3358,15 @@ def _work_alerts(db, user) -> list[dict]:
         return (channel.channel_name if channel else ""), (campaign.topic_name if campaign else "")
 
     out = []
+    # One story per episode (R22): a FAILED row whose video waits in review is covered by the
+    # amber review alert — a red "failed" alert for the same episode contradicted it.
+    review_key_set = _review_episode_keys(db, user.id)
     for task in db.scalars(
             select(Task).where(Task.user_id == user.id, Task.status == TaskStatus.FAILED)
             .order_by(Task.finished_at.desc().nullslast(), Task.id.desc())
             .limit(_ALERT_FAILED_LIMIT)).all():
+        if (task.campaign_id, task.episode_number) in review_key_set:
+            continue
         campaign = campaigns.get(task.campaign_id)
         chan, camp = names(campaign)
         # Prefer the plain-language cause the episode page shows, so one failure reads the same

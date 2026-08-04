@@ -1742,6 +1742,64 @@ no log of its reasoning or decisions" (ADR-084).
   escalates); analytics passes persist mid-fetch token refreshes.
 - Verified: 662 tests (30 new across R20), ruff clean, docs guard green.
 
+## R21 — the triage row must offer the fix it recommends `DONE`
+
+Reported with a screenshot: a quality-gate failure in "Needs your attention" — copy saying *"details
+in the raw error … trim the blacklist in Settings"* next to a lone **Retry** button.
+
+- **Retry was the only clickable thing, again.** ADR-068 built `diagnose()` because a failure page
+  with just a Retry button was "a dead end when retrying was not the answer" — and the dashboard
+  triage row had quietly reproduced that dead end: it showed the classified cause and fix but
+  dropped the action link (`Review settings →`, `Fix the channel →`, …) the episode page renders.
+  The row whose own copy says the fix lives in Settings now links there, beside Retry (kept — the
+  copy invites it "when you disagree" with the judge, and a fresh script is exactly what a gate
+  Retry writes).
+- **Fix copy is now reader-anchored.** "(details in the raw error)" named an element the dashboard
+  never shows — and that even the episode page keeps collapsed. The quality-gate fix now points at
+  "the episode page under “What the render reported”"; the safety-filter fix names WHERE Discard &
+  re-render lives ("open the episode and…") instead of assuming the reader is already there. Rule
+  recorded in the SYSTEM_MAP row: a fix string may only point at things visible from every surface
+  that renders it.
+- Verified: 663 tests (1 new), ruff clean, docs guard green.
+
+## R22 — the failure-handling audit: status must never lie about finished work `DONE`
+
+Reported with three screenshots from production: episodes across channels all failing with "The
+worker stopped making progress"; one episode showing that **Failed** banner directly above its own
+finished, QC-10/10 video with an **Approve & publish** button; and Approve looping straight back to
+the same failed screen. A 36-agent audit of the render→QC→review→publish→retry state machine
+confirmed 29 findings behind those three symptoms (ADR-088). The fixes, grouped:
+
+- **Diagnosis tells the truth.** `core.failure` classifies the exception summary, never a stored
+  traceback's frame paths — the bare keyword "worker" matched `workers/video_worker.py` inside
+  every trace, so nearly every failure (upload errors, safety blocks, disk-full, network blips)
+  wore the same "worker stopped making progress" banner and the same wrong transient verdict.
+  New classes: rejected-in-review, YouTube `invalid_grant`, upload-interrupted, model-not-found,
+  buffer-aged-out; quota no longer steals "Max retries exceeded"/"rate limit" network errors.
+- **Finished work is never labeled FAILED.** `workers/reconcile.py` answers "did the work actually
+  finish?" before any failure writer (watchdog, boot recovery, reaper, retries) writes FAILED —
+  and an hourly self-heal repairs rows already stranded in the incident state. Render completion
+  and publish success each commit atomically, closing the crash windows that manufactured
+  "FAILED task + finished video" and "published on the platform, FAILED in the DB".
+- **Nothing publishes unreviewed, and approval survives failure.** `publish_task` accepts only
+  `ready` buffers; autopilot retry and the Retry button route an `awaiting_review` survivor back
+  to Review instead of uploading it; a failed upload keeps the buffer `ready` (approved) instead
+  of demoting it back into the review queue — the approve→fail→approve loop is gone, and
+  `publish_attempts` arms the platform duplicate check on every re-publish path.
+- **The worker stops eating its own kill signals.** Explicit timeouts on every Gemini text/vision
+  call (`AI_CALL_TIMEOUT_SECONDS`) + AI-phase heartbeats keep a slow-but-alive provider off the
+  watchdog's radar; `FactoryWorker`'s death penalty raises a `BaseException` no retry loop can
+  swallow; publish jobs answer to their own RQ timeout instead of the shorter render stall limit
+  that killed legal >55-minute uploads mid-transfer; the watchdog reads Redis through a bounded
+  connection so a wedged Redis can't hang the recovery thread.
+- **The UI tells one story.** A failed episode whose render survived says so (and that Approve /
+  Publish now retries only the upload); an episode is one problem in every counter, not two;
+  triage toasts say what the server actually did; cancelled episodes get their promised Retry
+  button; expiry ages approved items from approval (`ready_at`), spares in-flight publishes and
+  token-expired channels, and the live episode rows show terminal states instead of freezing.
+- Verified: 690 tests pass, 13 skipped (26 new in `tests/test_r22_recovery.py`, 2 reshaped to the
+  new contracts), ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

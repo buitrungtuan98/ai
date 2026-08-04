@@ -263,7 +263,12 @@ def test_review_mode_awaits_then_publishes(session, user, channel, monkeypatch, 
     buf = session.query(BufferPoolItem).filter_by(campaign_id=cam.id, episode_number=1).one()
     assert buf.status == BufferStatus.awaiting_review and video_file.exists()
 
-    # Approval path: publish_task uploads, completes, advances.
+    # Approval path: apply_approve flips the buffer to `ready` — the ONE gate publish_task now
+    # accepts (R22: an unapproved buffer must never upload) — then publish_task uploads,
+    # completes, advances.
+    video_worker.apply_approve(session, buf)
+    session.refresh(buf)
+    assert buf.status == BufferStatus.ready
     video_worker.publish_task(buf.id)
     session.refresh(t)
     session.refresh(buf)

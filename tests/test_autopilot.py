@@ -105,14 +105,25 @@ def _seed_ch(mode):
     return db, user, ch, camp
 
 
-def _review_item(db, ch, camp, ep, score, passed=True):
+def _review_item(db, ch, camp, ep, score, passed=True, with_file=True):
+    import tempfile
+
     from database.models import BufferPoolItem, Task
     from database.types import BufferStatus, TaskStatus
 
+    # A real file by default: apply_approve refuses a vanished video instead of publishing
+    # nothing (R22), so review items that should be approvable must exist on disk.
+    if with_file:
+        f = tempfile.NamedTemporaryFile(suffix=f"-ep{ep}.mp4", delete=False)
+        f.write(b"video-bytes")
+        f.close()
+        path = f.name
+    else:
+        path = f"/nonexistent/{ep}.mp4"
     t = Task(campaign_id=camp.id, user_id=ch.user_id, episode_number=ep,
              status=TaskStatus.AWAITING_REVIEW)
     b = BufferPoolItem(campaign_id=camp.id, channel_id=ch.id, episode_number=ep,
-                       video_path=f"/nonexistent/{ep}.mp4", status=BufferStatus.awaiting_review,
+                       video_path=path, status=BufferStatus.awaiting_review,
                        metadata_json={"qc": {"score": score, "passed": passed}})
     db.add_all([t, b])
     db.commit()

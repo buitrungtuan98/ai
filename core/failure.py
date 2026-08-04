@@ -11,18 +11,33 @@ trace.
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 
-# (match words, cause, fix, href, action, transient) — matched lowercase, first match wins, so keep
-# the specific classes (credential, quota) ahead of the generic network one: a "429 … timed out"
-# message must classify as quota, not as a connection blip. `transient` answers the autopilot's
-# question — can a plain retry of the SAME episode succeed? A missing key can't be retried into
-# existence, a spent quota is fixed by the reset (the scheduler already waits for it), and a safety
-# block is deterministic for the same script — only a reject/re-render (new script) clears it.
+# (match words, cause, fix, href, action, transient) — matched lowercase against the CLASSIFICATION
+# TEXT (see `_classification_text`: for a stored traceback that is the trailing exception summary,
+# never the frame lines — a path like `workers/video_worker.py` inside a trace used to match the
+# bare word "worker" and misdiagnose almost every stored failure as a worker stall, R22). First
+# match wins, so keep the specific classes (credential, quota) ahead of the generic network one: a
+# "429 … timed out" message must classify as quota, not as a connection blip. `transient` answers
+# the autopilot's question — can a plain retry of the SAME episode succeed? A missing key can't be
+# retried into existence, a spent quota is fixed by the reset (the scheduler already waits for it),
+# and a safety block is deterministic for the same script — only a reject/re-render (new script)
+# clears it. Purely-numeric words match on digit boundaries so an id/size can't false-positive.
 # Named so `quota_reset_since` can recognise its own class by identity, not by re-matching words.
-_QUOTA_WORDS = ("quota", "429", "rate limit", "resource_exhausted", "exceeded")
+# "exceeded"/"rate limit" are deliberately NOT quota words (R22): requests' canonical "Max retries
+# exceeded with url" and Graph's "rate limit / transient" are NETWORK-shaped — classifying them as
+# quota deferred perfectly retryable uploads to the next US-Pacific midnight.
+_QUOTA_WORDS = ("quota", "429", "resource_exhausted")
 
 PATTERNS: tuple[tuple[tuple[str, ...], str, str, str, str, bool], ...] = (
+    # A reviewer's decision comes first so free-text reject reasons ("intro timed out", "blocked
+    # shot") can never fall through to a provider class and contradict the operator's own call.
+    (("rejected in review",),
+     "Rejected in review",
+     "A reviewer (you or the auto-reviewer) rejected this render; the reason is recorded below and "
+     "already steers the next script. Use Discard & re-render on the episode page for a fresh take.",
+     "", "", False),
     # Pre-render quality gate (ADR-079). NOT transient: the autopilot's retry regenerates against
     # the same recent episodes with the same avoid-notes, so it would spend AI calls to fail the
     # same way — this one needs a human to adjust the topic, the blacklist, or judge the draft.
@@ -34,22 +49,35 @@ PATTERNS: tuple[tuple[tuple[str, ...], str, str, str, str, bool], ...] = (
      "shipped). Let the campaign publish a few more episodes, then approve a new compile proposal "
      "— retrying now would just count the same library again.",
      "/campaigns", "Open campaigns", False),
+    # Fix copy is read on surfaces that don't show the raw error (the dashboard triage row, R21),
+    # so it must point at things the reader can see from anywhere — "details in the raw error"
+    # named an element that only exists collapsed on the episode page.
     (("failed the quality gate",),
      "The script was judged too repetitive or generic to be worth rendering",
-     "Two drafts in a row failed the pre-render quality gate (details in the raw error) — the "
-     "campaign may be running out of fresh angles on this topic. Adjust the topic or persona, "
-     "trim the blacklist in Settings, or Retry for a fresh attempt when you disagree.",
+     "Two drafts in a row failed the pre-render quality gate — the campaign may be running out of "
+     "fresh angles on this topic. The judge's exact objections are on the episode page under "
+     "“What the render reported”. Adjust the topic or persona, trim the blacklist in Settings, or "
+     "Retry for a fresh attempt when you disagree.",
      "/settings", "Review settings", False),
     # Facebook's own OAuth wording, ahead of the generic key class because the FIX IS SOMEWHERE ELSE:
     # an API key lives on /credentials, a Page token lives on the channel. These phrases only ever
     # come from Graph. Before this, a dead Page token classified as a generic failure and the
     # autopilot burned its whole retry cap re-uploading with the same dead credential (ADR-072).
     (("error validating access token", "session has expired", "page access token", "oauthexception",
-      "oauth error"),
+      "oauth error", "expired access token"),
      "The Facebook Page token is no longer valid",
      "Facebook refused the Page Access Token — it expired, was revoked, or the Page's permissions "
      "changed. The channel is marked expired; open it and paste a fresh permanent Page Access Token, "
      "then retry this episode.", "/channels", "Fix the channel", False),
+    # YouTube's auth death has its own wording (google-auth RefreshError / the reconnect hint) and
+    # its own fix location — before this row it fell through to the stall class and the operator
+    # looped on Approve & publish against a dead credential (R22).
+    (("invalid_grant", "reconnect the account"),
+     "The YouTube connection is no longer valid",
+     "Google refused the stored refresh token — it expired or was revoked (an OAuth app left in "
+     "Testing status revokes tokens after 7 days). Reconnect the Google account on the Channels "
+     "page; rendered episodes are safe in the buffer and publish once it works again.",
+     "/channels", "Fix the channel", False),
     (("api key", "api_key", "invalid key", "unauthorized", "401", "403 forbidden"),
      "A provider rejected the key",
      "The AI or footage provider refused the credentials this render used. Check the key is present "
@@ -59,15 +87,39 @@ PATTERNS: tuple[tuple[tuple[str, ...], str, str, str, str, bool], ...] = (
      "The daily or per-minute allowance for the AI model is spent. It resets on its own — retry "
      "later, or put a bigger-quota model first in the model chain.", "/credentials", "Model chain",
      False),
-    # Ahead of the network class on purpose: the watchdog's and the reaper's own wording contains
-    # BOTH "stalled/worker" and "timeout" ("…no progress for N minutes, past this job's own
-    # timeout…"), and matching "timeout" first told the operator a provider was unreachable when the
-    # truth was that this box's worker had wedged. Same retry verdict either way, wrong explanation.
-    (("stalled", "wedged", "worker"),
+    # A retired/renamed model 404s deterministically (ai_engine fails FAST on it) — retrying is
+    # waste, and the remediation lives in the message this row now surfaces instead of hiding.
+    (("model not found", "update gemini_model"),
+     "The configured AI model was retired or renamed",
+     "Google no longer serves this model name. Pick a current model on the Credentials page "
+     "(model chain) or update GEMINI_MODEL in .env, then retry.",
+     "/credentials", "Model chain", False),
+    # Both stall rows sit ahead of the network class on purpose: their wording contains BOTH
+    # "no progress" and "timeout" ("…no progress for N minutes, past this job's own timeout…"),
+    # and matching "timeout" first told the operator a provider was unreachable when the truth was
+    # that this box's worker had wedged. Upload before render: the upload message contains
+    # "no progress for" too, and retrying an upload must not talk about re-drawing scenes.
+    (("upload stalled", "upload was interrupted"),
+     "An upload was interrupted",
+     "The worker stopped mid-upload. The video is already rendered and safe in the buffer — Retry "
+     "re-attempts the upload only (the platform is checked for a duplicate first); no re-render "
+     "is needed.", "/operations", "Worker status", True),
+    # Phrase-specific on purpose (R22): these are the watchdog's/reaper's/boot-recovery's OWN
+    # sentences. The old bare words ("worker") also lived inside every stored traceback's file
+    # paths, which shadowed every row below this one for every exception the worker recorded.
+    (("render stalled", "no progress for", "wedged", "worker crashed", "worker restarted",
+      "stopped making progress"),
      "The worker stopped making progress",
      "The render was abandoned because it stopped reporting progress. The worker recovers itself; "
      "check it is running, then retry this episode — it resumes from the scenes already drawn.",
      "/operations", "Worker status", True),
+    # The expiry sweeper threw finished work away. NOT transient: an automatic re-render would
+    # re-enter the same backlog that expired it and could loop the render slot forever.
+    (("expired before its posting slot", "aged out before it could publish"),
+     "A rendered episode aged out before it could publish",
+     "The finished video waited too long (for review, a posting slot, or worker capacity) and was "
+     "cleaned up. Retry re-renders it; if this repeats, add posting slots or lower the "
+     "render-ahead buffer.", "/calendar", "Calendar", False),
     (("no space", "disk", "enospc"),
      "The box ran out of disk",
      "Rendering needs working space. Old renders are cleaned automatically, but a stuck job can fill "
@@ -78,26 +130,57 @@ PATTERNS: tuple[tuple[tuple[str, ...], str, str, str, str, bool], ...] = (
      "One of the source clips or the audio track was unusable. A retry usually picks different "
      "footage and succeeds; if it repeats, try a different visual source on the campaign.",
      "", "", True),
-    (("timed out", "timeout", "connection", "network", "temporarily unavailable", "502", "503"),
+    # "rate limit"/"exceeded" moved here from the quota class (R22): per-minute throttles and
+    # requests' "Max retries exceeded with url" recover in minutes, not at the Pacific reset.
+    (("timed out", "timeout", "connection", "network", "temporarily unavailable", "rate limit",
+      "max retries exceeded", "502", "503"),
      "A provider was unreachable",
      "This is almost always transient — the render reached out and got nothing back. Retry it; an "
      "interrupted render resumes from the scenes it already finished.",
      "", "", True),
-    (("safety", "blocked", "policy", "profanity"),
+    (("safety", "blocked", "policy", "profanity", "gemini blocked", "prompt_feedback",
+      "recitation", "no candidates"),
      "The safety filter blocked the content",
-     "The generated script tripped the brand-safety filter. Discard & re-render writes a fresh "
-     "script (a plain Retry reuses the same one); if it keeps happening, soften the campaign's "
-     "topic or persona.", "", "", False),
+     "The generated script tripped the brand-safety filter. Open the episode and use Discard & "
+     "re-render — it writes a fresh script, where a plain Retry reuses the blocked one. If it "
+     "keeps happening, soften the campaign's topic or persona.", "", "", False),
 )
 
 
+def _classification_text(message: str) -> str:
+    """What to classify: the exception summary, not the scaffolding around it.
+
+    `_fail_task` stores full tracebacks, whose frame lines carry file paths and library names —
+    haystack noise that used to decide the class ("workers/video_worker.py" matched the bare word
+    "worker" on every stored failure, R22). A traceback's trailing non-indented block is exactly
+    the "ExcType: message" summary (multi-line exception text included); everything indented above
+    it is frames and source lines. Non-traceback messages classify whole, as before."""
+    if "Traceback (most recent call last)" not in message:
+        return message
+    lines = [ln for ln in message.splitlines() if ln.strip()]
+    tail: list[str] = []
+    for line in reversed(lines):
+        if line.startswith(" "):  # frame/source lines are indented; the summary block is not
+            break
+        tail.append(line)
+    return "\n".join(reversed(tail)) if tail else message
+
+
+def _word_hit(word: str, low: str) -> bool:
+    """Substring match, except purely-numeric words ("429", "503") match on digit boundaries so a
+    task id or byte size inside a message can never claim an HTTP-status class."""
+    if word.isdigit():
+        return re.search(rf"(?<!\d){re.escape(word)}(?!\d)", low) is not None
+    return word in low
+
+
 def _match(message: str):
-    """The first PATTERNS row whose words appear in `message` (lowercased), or None — the single
-    matching pass `diagnose`, `is_transient` and `quota_reset_since` all share (first match wins,
-    same as it always did)."""
-    low = message.lower()
+    """The first PATTERNS row whose words appear in the classification text (lowercased), or None —
+    the single matching pass `diagnose`, `is_transient` and `quota_reset_since` all share (first
+    match wins, same as it always did)."""
+    low = _classification_text(message).lower()
     for row in PATTERNS:
-        if any(w in low for w in row[0]):
+        if any(_word_hit(w, low) for w in row[0]):
             return row
     return None
 
@@ -132,6 +215,38 @@ def is_quota(message: str | None) -> bool:
         return False
     row = _match(message)
     return row is not None and row[0] is _QUOTA_WORDS
+
+
+# Causes that blame the box, not the campaign's content/config. The circuit breaker skips them:
+# a wedged worker or an expired buffer is not evidence that the campaign is broken (R22, and the
+# contract watchdog._notify_stall always claimed).
+_INFRA_CAUSES = frozenset({
+    "The worker stopped making progress",
+    "An upload was interrupted",
+    "A rendered episode aged out before it could publish",
+})
+
+
+def is_infrastructure(message: str | None) -> bool:
+    """Does this failure blame the machine rather than the episode? Unknown errors say no."""
+    if not message:
+        return False
+    row = _match(message)
+    return row is not None and row[1] in _INFRA_CAUSES
+
+
+def is_reject(message: str | None) -> bool:
+    """Was this FAILED row written by a review rejection (human or auto)?"""
+    return bool(message) and message.lower().startswith("rejected in review")
+
+
+def is_human_reject(message: str | None) -> bool:
+    """A HUMAN's rejection — the one decision no automatic retry may override. Structural, not
+    substring-anywhere: a human reason merely mentioning "auto-review" must not read as the bot's."""
+    if not is_reject(message):
+        return False
+    first = message.splitlines()[0].lower()
+    return "(auto-review)" not in first and not first.startswith("rejected in review: auto-review:")
 
 
 def quota_reset_since(message: str | None, failed_at: datetime | None,

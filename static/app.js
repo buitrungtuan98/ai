@@ -91,10 +91,20 @@
         (d.tasks || []).forEach(function (t) { byId[t.id] = t; });
         rows.forEach(function (row) {
           var t = byId[row.dataset.liveTask];
+          if (t) { applyTask(row, t); return; }
           // Absent from the live set = it left the working stages. Ask the server what it became
-          // rather than guessing, but only once per row.
-          if (t) applyTask(row, t);
-          else row.removeAttribute("data-live-task");
+          // rather than guessing, but only once per row (the attribute comes off first, so this
+          // never repeats). Without the ask, the one transition the live log exists to show —
+          // render → Failed/Published — was the one it froze on (R22).
+          var id = row.dataset.liveTask;
+          row.removeAttribute("data-live-task");
+          fetch("/api/tasks?q=" + encodeURIComponent(id), { headers: { Accept: "application/json" } })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+              var hit = (d.tasks || []).filter(function (x) { return String(x.id) === String(id); })[0];
+              if (hit) applyTask(row, hit);
+            })
+            .catch(function () { /* a reload remains the fallback */ });
         });
       })
       .catch(function () { /* transient — the next tick tries again */ })

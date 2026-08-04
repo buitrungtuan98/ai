@@ -69,6 +69,32 @@ def build_credentials(channel: Channel):
     return creds
 
 
+def token_definitely_dead(channel: Channel) -> bool:
+    """Verify before condemning (ADR-083 parity with facebook_service, R22): one cheap probe —
+    rebuild credentials and list the channel's own id (1 Data-API unit). Only a DEFINITE refusal
+    (revoked/expired refresh token, or no refresh token at all) retires the channel; a rate-limited,
+    quota-spent or unreachable Google is "not now", never "not this token"."""
+    from google.auth.exceptions import RefreshError
+    from googleapiclient.discovery import build
+
+    try:
+        creds = build_credentials(channel)
+        youtube = build("youtube", "v3", credentials=creds, cache_discovery=False)
+        youtube.channels().list(part="id", mine=True).execute()
+        return False
+    except RefreshError as exc:
+        dead = "invalid_grant" in str(exc).lower()
+        if not dead:
+            logger.warning("YouTube token probe got a non-terminal RefreshError for channel %s: %s",
+                           channel.id, exc)
+        return dead
+    except RuntimeError as exc:
+        return "reconnect the account" in str(exc)  # build_credentials' no-refresh-token case
+    except Exception:  # noqa: BLE001 — network/quota/unknown: never condemn on doubt
+        logger.warning("YouTube token probe inconclusive for channel %s", channel.id, exc_info=True)
+        return False
+
+
 def find_existing_upload(channel: Channel, title: str) -> str | None:
     """Did a previous attempt already upload this episode? (ADR-087 — parity with
     `facebook_service.find_existing_upload`.)

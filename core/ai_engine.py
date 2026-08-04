@@ -210,7 +210,11 @@ def _call_gemini(
             "response_mime_type": "application/json",
         },
     )
-    resp = gen_model.generate_content(prompt)
+    # Explicit per-attempt timeout (R22): without it the SDK's gapic layer allows ~600s per RPC,
+    # and a merely-slow Gemini brownout let the zero-progress AI phase outlive the stall limit —
+    # the watchdog then executed a perfectly alive worker ("stopped making progress", en masse).
+    resp = gen_model.generate_content(
+        prompt, request_options={"timeout": settings.AI_CALL_TIMEOUT_SECONDS})
 
     # Distinguish a safety block from a normal empty response.
     candidates = getattr(resp, "candidates", None) or []
@@ -1058,7 +1062,9 @@ def _call_gemini_vision(
         ext = os.path.splitext(audio_path)[1].lower()
         with open(audio_path, "rb") as f:
             parts.append({"mime_type": _AUDIO_MIME_BY_EXT.get(ext, "audio/aac"), "data": f.read()})
-    resp = gen_model.generate_content(parts)
+    # Bounded like the text leg (R22) — a hung vision call must fail, not wedge the worker.
+    resp = gen_model.generate_content(
+        parts, request_options={"timeout": settings.AI_CALL_TIMEOUT_SECONDS})
     return resp.text
 
 

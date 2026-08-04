@@ -2139,3 +2139,56 @@ a compilation is never auto-approved or auto-rejected, and its verdict line says
 checked. (5) The analytics collectors commit after each channel's fetch so a token refresh
 persists. (6) Expired buffers land in the autopilot feed (kind `expired`) — the machine discarding
 finished work is an event the operator sees.
+
+### ADR-088 — Status must never lie about finished work (the R22 failure-handling audit)
+
+**Context.** A production incident showed three symptoms at once: (1) episodes across channels all
+failing as "The worker stopped making progress"; (2) one episode rendering that Failed banner
+directly above its own finished, QC-10/10 video with a live "Approve & publish" button; (3)
+approving it looping straight back to the same failed screen. A full audit of the
+render→QC→review→publish→retry state machine (36 verification agents, 29 confirmed findings)
+traced all three to four architectural gaps: the failure CLASSIFIER matched substrings of stored
+tracebacks (the bare word "worker" appears in `workers/video_worker.py` inside every trace, so
+almost every exception classified as a transient worker stall, shadowing the disk/ffmpeg/network/
+safety rows entirely); the failure WRITERS (watchdog, boot recovery, reaper) judged a task by its
+status alone, while the pipeline commits its evidence (buffer row, published id) in EARLIER
+transactions than the status — every crash in between manufactured a lie; the RETRY paths treated
+"a buffer row exists" as "a publish failed", so recovery could upload videos that were parked for
+review or had failed QC, with zero sign-off; and the worker could not enforce its own timeout —
+Gemini calls carried the SDK's ~600s default against a zero-progress phase, RQ's SIGALRM raised an
+ordinary Exception that the pipeline's retry loops swallowed, and publish jobs were policed by a
+stall limit *below* their own job timeout, so legal >55-minute uploads were os._exit-killed
+mid-transfer and re-posted without the duplicate guard.
+
+**Decision.** Four invariants, each owned by one place:
+
+1. **Classify the exception, not the transcript.** `core.failure` extracts a stored traceback's
+   trailing exception summary before matching; stall/reject/expiry writers use phrase-specific
+   sentences the table matches exactly; numeric words match digit-bounded. Rows exist for every
+   writer in the codebase (rejected-in-review first, YouTube `invalid_grant`, upload-interrupted,
+   model-not-found, aged-out), and `is_infrastructure`/`is_human_reject` make the circuit breaker
+   and the autopilot read decisions structurally instead of by substring.
+2. **Reconcile before failing.** `workers/reconcile.py::reconcile_task_outcome` is the single
+   answer to "did the work actually finish?" — consulted by every failure writer, every retry
+   path, and an hourly self-heal pass that also re-issues lost publish jobs (approval records
+   durable intent in `publish_requested_at`). Completion and publish success each commit
+   atomically, so the windows the sweepers used to misread no longer exist. CANCELLED is never
+   reconciled: an operator's decision stands.
+3. **Approval is the only gate onto a platform.** `publish_task` accepts `ready` buffers only; a
+   failed upload keeps the buffer `ready` (it does not un-approve); anything `awaiting_review`
+   that recovery finds goes back to the review queue, never to the uploader. Every publish
+   attempt is persisted on the buffer (`publish_attempts`) before bytes move, arming the
+   platform-side duplicate check on every re-publish path — including the slot tick and catch-up,
+   which never increment `retry_count`.
+4. **The worker's kill signals are unswallowable and correctly scoped.** Every Gemini text/vision
+   call carries an explicit timeout; the AI phase heartbeats between steps; `FactoryWorker`'s
+   death penalty raises a `BaseException`; publish jobs write no stall-progress entry (their kill
+   authority is their own RQ timeout) and PUBLISHING is not stall-failable; the watchdog reads
+   Redis through a socket-bounded connection so it cannot hang alongside a wedged Redis.
+
+**Consequences.** The incident state is unrepresentable going forward and self-heals within the
+hour for rows already written (the operator's own DB). A campaign is only ever paused by the
+breaker for its own content failures. The cost is honest: recovery now sometimes *repairs* instead
+of *failing*, so "reaped" counts drop and the autopilot feed gains a `reconciled` kind; expiry
+spares approved items aging in review (`ready_at`), items with a queued upload, and channels
+waiting on a fresh token — inventory can therefore live longer than the flat 72h, by design.

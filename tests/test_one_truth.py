@@ -43,9 +43,18 @@ def _task(session, campaign, user, episode, **kw):
     return t
 
 
-def _buffer(session, campaign, channel, episode, status, path="/no/v.mp4"):
+def _buffer(session, campaign, channel, episode, status, path=None):
+    import tempfile
+
     from database.models import BufferPoolItem
 
+    # A real file by default (R22): apply_approve and the retry paths verify the video exists on
+    # disk before acting on it. Pass an explicit path to model a vanished file.
+    if path is None:
+        f = tempfile.NamedTemporaryFile(suffix=f"-ep{episode}.mp4", delete=False)
+        f.write(b"video-bytes")
+        f.close()
+        path = f.name
     b = BufferPoolItem(campaign_id=campaign.id, channel_id=channel.id, episode_number=episode,
                        video_path=path, status=status, metadata_json={"title": f"Ep {episode}"})
     session.add(b)

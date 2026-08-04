@@ -85,6 +85,7 @@ _COLUMN_UPGRADES: dict[str, dict[str, str]] = {
     },
     "buffer_pool": {
         "publish_at": "DATETIME",  # per-episode publish-time override (ADR-059)
+        "ready_at": "DATETIME",    # when the item became publishable — expiry ages from this (R22)
     },
     "channel_snapshots": {
         "watch_minutes_365d": "INTEGER",  # YPP's real currency (ADR-080)

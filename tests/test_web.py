@@ -340,9 +340,10 @@ def test_episode_timeline_completed_vs_in_progress(client):
     assert "tl-step now" in client.get(f"/episodes/{lid}").text         # rendering = current step
 
 
-def test_retry_publish_vs_render_flash(client, tmp_path):
-    """Retrying a failed episode whose file still exists re-publishes (flash=publish); with no file
-    it re-renders (flash=rerender). The Episode view banner must match the actual action."""
+def test_retry_publish_vs_review_vs_render_flash(client, tmp_path):
+    """Retry retries the step that actually failed — and NEVER publishes unreviewed content (R22).
+    An APPROVED (`ready`) file re-publishes (flash=publish); a file still AWAITING REVIEW routes to
+    the review controls (flash=review) instead of uploading; no file re-renders (flash=rerender)."""
     from database.db_session import SessionLocal
     from database.models import BufferPoolItem, Campaign, Task
     from database.types import BufferStatus, TaskStatus
@@ -350,26 +351,37 @@ def test_retry_publish_vs_render_flash(client, tmp_path):
     _seed_campaign(client)
     db = SessionLocal()
     cam = db.query(Campaign).order_by(Campaign.id.desc()).first()
-    vid = tmp_path / "v.mp4"
-    vid.write_bytes(b"x" * 16)
+    vid_ok, vid_rev = tmp_path / "ok.mp4", tmp_path / "rev.mp4"
+    vid_ok.write_bytes(b"x" * 16)
+    vid_rev.write_bytes(b"x" * 16)
     t_pub = Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=1, status=TaskStatus.FAILED)
-    t_ren = Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=2, status=TaskStatus.FAILED)
-    db.add_all([t_pub, t_ren])
+    t_rev = Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=2, status=TaskStatus.FAILED)
+    t_ren = Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=3, status=TaskStatus.FAILED)
+    db.add_all([t_pub, t_rev, t_ren])
     db.commit()
-    db.refresh(t_pub)
-    db.refresh(t_ren)
+    for t in (t_pub, t_rev, t_ren):
+        db.refresh(t)
     db.add(BufferPoolItem(campaign_id=cam.id, channel_id=cam.channel_id, episode_number=1,
-                          video_path=str(vid), status=BufferStatus.awaiting_review, metadata_json={}))
+                          video_path=str(vid_ok), status=BufferStatus.ready, metadata_json={}))
+    db.add(BufferPoolItem(campaign_id=cam.id, channel_id=cam.channel_id, episode_number=2,
+                          video_path=str(vid_rev), status=BufferStatus.awaiting_review,
+                          metadata_json={}))
     db.commit()
-    pid, rid = t_pub.id, t_ren.id
+    pid, vid_id, rid = t_pub.id, t_rev.id, t_ren.id
     db.close()
 
     r1 = client.post(f"/api/tasks/{pid}/retry", data={"return_to": f"/episodes/{pid}"},
                      follow_redirects=False)
-    assert r1.headers["location"] == f"/episodes/{pid}?flash=publish"   # file exists → re-publish
-    r2 = client.post(f"/api/tasks/{rid}/retry", data={"return_to": f"/episodes/{rid}"},
+    assert r1.headers["location"] == f"/episodes/{pid}?flash=publish"   # approved file → re-publish
+    r2 = client.post(f"/api/tasks/{vid_id}/retry", data={"return_to": f"/episodes/{vid_id}"},
                      follow_redirects=False)
-    assert r2.headers["location"] == f"/episodes/{rid}?flash=rerender"  # no file → re-render
+    assert r2.headers["location"] == f"/episodes/{vid_id}?flash=review"  # unreviewed → to review
+    db = SessionLocal()
+    assert db.get(Task, vid_id).status == TaskStatus.AWAITING_REVIEW    # honest stage, no upload
+    db.close()
+    r3 = client.post(f"/api/tasks/{rid}/retry", data={"return_to": f"/episodes/{rid}"},
+                     follow_redirects=False)
+    assert r3.headers["location"] == f"/episodes/{rid}?flash=rerender"  # no file → re-render
 
 
 def test_scope_switcher_and_scoped_nav(client):
@@ -692,6 +704,36 @@ def test_review_and_track_entry_points_go_to_episode(client):
     perf = client.get(f"/campaigns/{cam_id}/performance").text        # legacy URL → hub Overview
     assert f'href="/campaigns/{cam_id}/episodes"' in perf              # hub Episodes tab
     assert f'href="/tasks?campaign={cam_id}"' not in perf              # old Tasks tab removed
+
+
+def test_triage_failed_row_links_the_classified_fix_not_just_retry(client):
+    """The dashboard triage row renders the diagnosis's action link exactly like the episode page
+    (ADR-068, R21): a quality-gate failure whose copy says "trim the blacklist in Settings" must
+    offer that path, not leave Retry as the only clickable thing — retrying is what the classifier
+    says won't help. Retry stays, because the operator may disagree with the judge."""
+    from database.db_session import SessionLocal
+    from database.models import Task
+    from database.types import TaskStatus
+
+    cam = _seed_campaign(client)
+    db = SessionLocal()
+    t = Task(campaign_id=cam.id, user_id=cam.user_id, episode_number=7,
+             status=TaskStatus.FAILED,
+             error_message="Script failed the quality gate twice: hook nearly identical to Ep 5")
+    db.add(t)
+    db.commit()
+    db.refresh(t)
+    tid = t.id
+    db.close()
+
+    body = client.get("/").text
+    assert f'href="/episodes/{tid}"' in body                    # row still links the episode
+    assert "Review settings →" in body                          # …and now the classified fix too
+    assert f'data-task="{tid}"' in body                         # Retry kept for "when you disagree"
+    # The fix copy points at something the reader can find from here — not "the raw error",
+    # which this page never shows.
+    assert "details in the raw error" not in body
+    assert "What the render reported" in body
 
 
 def test_ownership_guard_404(client):
