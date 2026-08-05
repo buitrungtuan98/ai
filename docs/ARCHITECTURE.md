@@ -2192,3 +2192,96 @@ breaker for its own content failures. The cost is honest: recovery now sometimes
 of *failing*, so "reaped" counts drop and the autopilot feed gains a `reconciled` kind; expiry
 spares approved items aging in review (`ready_at`), items with a queued upload, and channels
 waiting on a fresh token — inventory can therefore live longer than the flat 72h, by design.
+
+### ADR-089 — A gate that can be passed, and a failure that recovers when the brief changes
+
+**Context.** Three episodes failed in production for three different reasons that all read as the
+same unhelpful sentence, and one of them could never have succeeded.
+
+*Ep 5* was refused with "script judge scored it 7/10" while the episode page said the script was
+"too repetitive or generic" and advised trimming a blacklist. Neither claim was true. The AI script
+judge (ADR-079, C2) shared the channel's video-QC reject threshold "one scale, one discipline" — and
+that channel was tightened to *Reject at QC ≤ 7* for finished video, so every script needed 8/10. A
+good draft scores 7 with two style notes, so draft one was refused, the single regenerate was
+refused, and the episode failed — reproducibly, on every episode of that channel, while the form
+that set the dial said only "auto-reject score (/10)" and described reviewing *videos*.
+
+*Ep 9* was refused twice at 4/10 for its opening ("vague phrases like 'chuyện cũ mình kể nhau
+nghe'") and its closing ("clichés like 'lòng mình chùng xuống'") — the campaign's own signature
+catchphrases, which `compose_system_prompt` **orders** every episode to open and close with. The
+judge was never told they were mandated, so it scored down the two lines the writer was forbidden to
+drop: a gate with no passing move. The same blind spot inflated the deterministic similarity score,
+which counted mandated phrases as self-repetition (measured on the module: two genuinely different
+scripts score 0.00; the same pair carrying one catchphrase pair scores 0.24 at ~65 words and 0.49 at
+quote length — a hair under the 0.50 block). And because `compose_system_prompt` keeps only the
+first 10 avoid-notes while the gate's objections were *appended*, a campaign that had already
+accumulated 10 reject reasons regenerated from a prompt identical to the one that had just failed.
+
+*A Facebook publish* failed with "(#200) Subject does not have permission to post videos on this
+target, due to lack of pages_manage_posts permission" and was advised to Retry. The token was alive —
+`/me` verified it, and re-verification kept passing — it simply had no permission to post, which no
+retry can grant. The message carries none of the OAuth words `core.failure` looks for, and an
+unmatched message defaults to `transient=True`, so the autopilot retried it and the slot scheduler
+re-published it at every posting slot, failing identically each time. Underneath: the connect-time
+check verified the token's *identity* and never its *capability*, so a read-only token saved as
+"● Active" and the truth surfaced weeks later, on the first upload.
+
+Behind all three, one structural gap. The gate fails an episode on the honest grounds that a human
+must change something, so `core.failure` marks it non-transient and every automatic path leaves it
+alone. Then the human changes something — and nothing connected the two. No record said which brief
+an episode had died under, so a rewritten topic or persona left every gate-failed episode dead under
+a brief that no longer existed, recoverable only if the operator remembered which ones to Retry.
+Two more consequences of the same silence: the decision journey (ADR-084) was written only on the
+success path, so a gate-failed episode reported "How this render was judged (1 decision)" having
+made four; and a judge refusal was logged as "Script gate", which is what let a style note read as
+repetition.
+
+**Decision.** Four rules.
+
+1. **Video strictness and scriptwriting strictness are not one dial.**
+   `autopilot.script_judge_reject_max` clamps the script judge to its own ceiling
+   (`SCRIPT_JUDGE_REJECT_MAX = 4`): a channel looser than the default keeps its own value, a
+   stricter one is capped. The Channels form now says the dial also gates scripts, and the failure
+   copy for a judge refusal names it — split from the repetition class, which points at the campaign
+   instead. Neither class advises the blacklist any more: it only ever produces warnings and can
+   never block, so that advice could not work.
+2. **Mandated branding is not evidence of anything.** `core/creative_brief.active_catchphrases` is
+   the single definition of "which catchphrases are forced", shared by generation, the similarity
+   gate (`check_script(strip_phrases=…)`, which removes them from both sides before comparing, and
+   from the cliché scan) and the judge (`judge_script(required_phrases=…)`, told explicitly not to
+   score them down). Gate objections are *prepended* to the avoid-notes so the 10-note cap can no
+   longer drop the one piece of feedback written for the draft that just failed, and a duplicate-title
+   issue quotes the title it duplicates — the model only ever sees synopses, so naming an episode
+   number asked it to avoid something it could not look up.
+3. **A brief has a version, an edit is an event, and an edit revives what the gate refused.**
+   `core/creative_brief.py` hashes the settings that actually reach the scriptwriter — per field, so
+   "what changed?" is answerable without copying the operator's persona or system prompt into a
+   second table, and so an unrelated edit (music volume, caption theme) is not mistaken for a new
+   brief. The refusing brief is recorded on the Task (`render_json["gate_failure"]`), campaign and
+   threshold edits write a `config_edit` audit row, and `scheduler.retry_after_brief_edits` re-queues
+   gate-failed episodes whose brief has moved — telling the regenerating prompt that it moved, so
+   stale avoid-notes cannot steer it back. It sits **outside** the autopilot pass and its retry
+   budget on purpose: the trigger is the operator's own edit, not a machine judgment, so it also
+   serves channels that drive everything by hand (hydration already renders new episodes for them).
+   Exactly one attempt per brief version — the fingerprint that bought it is stamped on the record —
+   and it never publishes.
+4. **Say what actually happened.** `_fail_task` persists the attempt's journey, judge refusals are
+   attributed to "Script judge", the episode page stops printing "fix the cause, then Retry" over a
+   failure no retry can clear (`retry_helps`), and an episode already on its way back says so
+   (`brief_edited`). Capability is verified with identity: `verification.missing_post_permission`
+   asks Graph's own `debug_token` whether a Page token may post, three-state like its sibling (an
+   absent scope list is not evidence of no permissions), and a confirmed missing scope is refused at
+   save time. A live-but-unpostable token now also retires the channel — still only after
+   re-verification (ADR-083) — because the alternative is a factory spending its one render slot on
+   episodes that cannot be published (ADR-076).
+
+**Consequences.** A channel can no longer be configured into being unable to render, and a campaign
+with catchphrases can no longer face an unpassable gate. `Task.render_json` gains a `gate_failure`
+key (dropped by the success path, which rewrites the column wholesale) and the audit feed gains
+`requeued` and `config_edit` kinds. The cost is honest: an edit to a running campaign can now spend
+render time on its own — bounded to one attempt per version per episode, never a publish — and
+`retry_after_brief_edits` only reaches ACTIVE campaigns, so an episode whose campaign was already
+closed by ADR-087 still needs the operator's Retry (the episode page tells them it will use the new
+brief). User-level settings (the slop blacklist) count toward the brief version but write no audit
+row: `AutopilotAction` is channel-scoped, and inventing a channel for a user-wide edit would be a
+worse lie than the missing row.

@@ -38,7 +38,17 @@
        video whose actions were Approve/Publish — the incident's exact contradiction. #}
     ⛔ <b>A later step failed after this render finished.</b>
     The video below is complete and playable — no re-render is needed.
+    {# Two different things are true here and both have to be said (ADR-089): the VIDEO is fine, and
+       the CAUSE may be one that re-uploading cannot clear (a Page token missing pages_manage_posts
+       refuses every attempt identically). Promising only "Publish now" sent operators round a loop
+       the scheduler was already running for them at every posting slot. #}
+    {% if not retry_helps and diagnosis %}
+    <p class="mt-sm"><b>{{ diagnosis.cause }}.</b> {{ diagnosis.fix }}
+      {% if diagnosis.action %}<a href="{{ diagnosis.href }}">{{ diagnosis.action }} →</a>{% endif %}</p>
+    <p class="mt-sm">Uploading again before that is fixed fails the same way — the video keeps waiting, nothing is lost.</p>
+    {% else %}
     {% if buffer.status.value == 'awaiting_review' %}Review it and use <b>Approve &amp; publish</b>; that retries only the publish step.{% else %}Use <b>Publish now</b> to retry only the upload.{% endif %}
+    {% endif %}
     <b>Re-render / Reject</b> below still discard it if the video itself is wrong.
     {% if task.error_message %}
     <details class="mt-sm"><summary class="hint">What the failed step reported</summary>
@@ -53,8 +63,15 @@
       <p class="meta mono-wrap">{{ task.error_message }}</p></details>
     {% endif %}
     {% endif %}
+    {% if brief_edited %}
+    {# The gate refused this script under a brief the operator has since edited, so the tick is
+       already re-queueing it (ADR-089) — without this the page still read "failed, adjust the topic"
+       about work that was on its way back. #}
+    <p class="mt-sm">⚙ <b>You changed this campaign since it failed</b> ({{ brief_edited }}). It is queued for a fresh draft written from the current brief — <b>Retry</b> starts it now instead of waiting for the next tick.</p>
+    {% endif %}
     {% if will_auto_publish %}
-    <p class="mt-sm">📅 <b>Heads up:</b> this rendered video is still queued for the campaign's next posting slot — it publishes on its own unless you discard it.</p>
+    <p class="mt-sm">📅 <b>Heads up:</b> this rendered video is still queued for the campaign's next posting slot —
+      {% if retry_helps %}it publishes on its own unless you discard it.{% else %}each slot will retry the upload and hit the same refusal until the cause above is fixed; nothing is lost while it waits.{% endif %}</p>
     {% endif %}
   </div>
   {% elif cancelled %}

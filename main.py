@@ -42,7 +42,7 @@ from auth.dependencies import (
     get_owned_campaign,
     get_owned_channel,
 )
-from core import autopilot, failure, monetize, retention, timezones
+from core import autopilot, creative_brief, failure, monetize, retention, timezones
 from core.config import settings
 from core.tts import QUOTE_VOICES, VOICE_CHOICES
 from core.video_factory import COLOR_GRADE_CHOICES
@@ -1271,8 +1271,17 @@ def set_channel_autopilot(channel=Depends(get_owned_channel), db=Depends(get_db)
         if "approve_min" in review and "reject_max" in review:
             review["approve_min"] = min(10, max(review["approve_min"], review["reject_max"] + 1))
         cfg["review"] = review
+    was = autopilot.script_judge_reject_max(channel)
     channel.autopilot_json = cfg
     db.commit()
+    # The reject threshold also gates pre-render SCRIPTS (clamped, ADR-089). Logging the change is
+    # what lets the tick re-queue episodes whose script this dial refused — and what tells the
+    # operator afterwards that moving it was the reason they started rendering again.
+    if autopilot.script_judge_reject_max(channel) != was:
+        autopilot.log_action(db, channel, "config_edit",
+                             f"Script-judge reject threshold for {channel.channel_name} is now "
+                             f"≤{autopilot.script_judge_reject_max(channel)}/10 (was ≤{was}/10).",
+                             evidence={"changed": ["judge_threshold"]})
     return RedirectResponse("/channels?flash=autopilot", status_code=303)
 
 
@@ -1803,11 +1812,23 @@ def update_campaign(user: CurrentUser, db: DbDep, campaign=Depends(get_owned_cam
     channel = db.get(Channel, form["channel_id"])
     if channel is None or channel.user_id != user.id:
         return JSONResponse({"error": "channel not found"}, status_code=404)
+    # What the brief looked like BEFORE this save (ADR-089). An edit is the event the whole
+    # config-aware recovery hangs off: the tick re-queues gate-failed episodes when it sees the
+    # brief has moved, and this row is how the operator can tell afterwards which edit did it.
+    before = creative_brief.key_digests(campaign, channel, user)
     campaign.topic_name = form["topic_name"]
     campaign.channel_id = form["channel_id"]
     campaign.total_episodes = form["total_episodes"]
     campaign.config_json = form["config"]
     db.commit()
+    edited = creative_brief.changed(before, creative_brief.key_digests(campaign, channel, user))
+    if edited:
+        # Digests only — the persona and system prompt are the operator's own words and do not need
+        # a second copy in the audit table to answer "what changed".
+        autopilot.log_action(db, channel, "config_edit",
+                             f"Edited the creative brief of “{campaign.topic_name}”: "
+                             f"{creative_brief.describe(edited)}.",
+                             campaign_id=campaign.id, evidence={"changed": edited})
     return RedirectResponse(f"/campaigns/{campaign.id}", status_code=303)  # back to the hub Overview
 
 
@@ -2495,6 +2516,18 @@ def episode_view(request: Request, user: CurrentUser, db: DbDep, task_id: int,
     will_auto_publish = bool(
         buffer is not None and buffer.status == BufferStatus.ready and previewable
         and cfg.get("auto_publish", True) and cfg.get("posting_slots"))
+    # Can a retry of this exact failure plausibly work? (ADR-089) The "no re-render needed, just
+    # Publish now" banner is right about the video and was silent about the cause: a Page token
+    # without pages_manage_posts fails identically at every attempt, so "Retry" was advice that
+    # could not work, repeated by the slot scheduler every posting slot.
+    retry_helps = failure.is_transient(task.error_message) if task.status == TaskStatus.FAILED \
+        else True
+    # A gate-refused episode whose brief has since been edited is already on its way back (the tick
+    # re-queues it) — say so instead of leaving the operator to wonder if it is stuck for good.
+    brief_edited = ""
+    if task.status == TaskStatus.FAILED and campaign is not None:
+        _edited = creative_brief.edited_since_gate_failure(task, campaign, channel, user)
+        brief_edited = creative_brief.describe(_edited) if _edited else ""
     # Retention drop-off markers: attribute the measured curve to the scene that lost viewers.
     curve = (task.stats_json or {}).get("retention_curve")
     scenes = (task.render_json or {}).get("scenes")
@@ -2508,6 +2541,7 @@ def episode_view(request: Request, user: CurrentUser, db: DbDep, task_id: int,
          "retention_curve": curve, "retention_drops": retention_drops,
          "failed": task.status == TaskStatus.FAILED, "diagnosis": diagnosis,
          "render_survived": render_survived, "will_auto_publish": will_auto_publish,
+         "retry_helps": retry_helps, "brief_edited": brief_edited,
          "status_to_stage": _STATUS_TO_STAGE,
          "cancelled": task.status == TaskStatus.CANCELLED,
          "flash": flash if flash in ("publish", "rerender", "rejected", "missing", "qc_queued",

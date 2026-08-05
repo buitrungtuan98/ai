@@ -250,7 +250,11 @@
           <div class="grid cols-2">
             {% call ui.field('Run every (hours)', hint='1–24') %}<input name="interval_hours" type="number" min="1" max="24" value="{{ a.get('interval_hours', 3) }}">{% endcall %}
             {% call ui.field('Approve at QC ≥', hint='auto-publish score (/10)') %}<input name="approve_min" type="number" min="1" max="10" value="{{ rv.get('approve_min', 7) }}">{% endcall %}
-            {% call ui.field('Reject at QC ≤', hint='auto-reject score (/10)') %}<input name="reject_max" type="number" min="0" max="9" value="{{ rv.get('reject_max', 4) }}">{% endcall %}
+            {# This dial has a second job the form never mentioned (ADR-089): it also gates SCRIPTS
+               before they render. Clamped at 4 there now, so a channel tightened for finished video
+               can no longer make scriptwriting impossible — but the operator still deserves to know
+               the two are connected. #}
+            {% call ui.field('Reject at QC ≤', hint='auto-reject score (/10) · also rejects scripts, capped at 4') %}<input name="reject_max" type="number" min="0" max="9" value="{{ rv.get('reject_max', 4) }}">{% endcall %}
           </div>
           <button class="btn sm" type="submit">Save autopilot</button>
         </form>

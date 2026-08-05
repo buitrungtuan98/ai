@@ -119,15 +119,19 @@ def test_the_check_asks_me_not_the_public_page(monkeypatch, real_check):
     from services import verification
 
     seen = {}
+    urls = []
 
     def spy(url, **kw):
-        seen["url"] = url
-        seen["fields"] = (kw.get("params") or {}).get("fields", "")
-        seen["metadata"] = (kw.get("params") or {}).get("metadata")
+        urls.append(url)
+        if url.endswith("/me"):
+            seen["url"] = url
+            seen["fields"] = (kw.get("params") or {}).get("fields", "")
+            seen["metadata"] = (kw.get("params") or {}).get("metadata")
         return FakeResp(200, _page())
 
     monkeypatch.setattr(requests, "get", spy)
     verification.check_facebook_page("1234567890", "t")
+    assert urls[0].endswith("/me")               # identity is settled FIRST, on /me
     assert seen["url"].endswith("/me")
     # NOT `category` (ADR-077): naming a Page-only field makes Graph refuse the whole request for a
     # non-Page token, which is how the operator ended up reading about a field they never asked for.

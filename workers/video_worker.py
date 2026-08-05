@@ -19,7 +19,7 @@ from functools import partial
 
 from sqlalchemy import func, select
 
-from core import failure, slop_gate, video_factory
+from core import creative_brief, failure, slop_gate, video_factory
 from core import vibe as vibe_mod
 from core.ai_engine import VideoScript, generate_image, generate_script
 from core.config import settings
@@ -436,12 +436,38 @@ def _judge_script_safe(user, channel, cfg, fp: dict, api_key: str, model: str):
             logger.info("Script judge skipped — AI budget reserve reached")
             return None
         from core.ai_engine import judge_script
+        from core.creative_brief import active_catchphrases
 
         return judge_script(fp["narration"], fp["title"], api_key=api_key,
-                            language=cfg.get("language", "en"), model=model)
+                            language=cfg.get("language", "en"), model=model,
+                            # The judge must know which lines the writer was ORDERED to include,
+                            # or it scores down branding no regenerate is allowed to drop (ADR-089).
+                            required_phrases=active_catchphrases(cfg))
     except Exception:  # noqa: BLE001 — no verdict beats no factory
         logger.warning("Script judge unavailable — proceeding without a verdict", exc_info=True)
         return None
+
+
+def _remember_gate_failure(db, task: Task, campaign, channel, user, issues: list[str]) -> None:
+    """Record which brief version the quality gate refused (ADR-089), so an operator edit can
+    un-strand this episode by itself.
+
+    Committed rather than left pending because `_fail_task` rolls the session back before it writes
+    the failure. The resume checkpoint is dropped on the way out: a Retry of a gate-refused episode
+    must write a NEW script, and a stale `script` key would make it faithfully rebuild the refused
+    one (the guarantee ADR-079 states in words and this write keeps in code)."""
+    try:
+        digests = creative_brief.key_digests(campaign, channel, user)
+        rj = {k: v for k, v in (task.render_json or {}).items() if k != "script"}
+        rj["gate_failure"] = {"brief": digests,
+                              "fingerprint": creative_brief.fingerprint(digests),
+                              "issues": issues[:5],
+                              "at": datetime.utcnow().isoformat()}
+        task.render_json = rj
+        db.commit()
+    except Exception:  # noqa: BLE001 — bookkeeping must never replace the real failure
+        db.rollback()
+        logger.warning("Could not record the gate failure for task %s", task.id, exc_info=True)
 
 
 def _recent_fingerprints(db, campaign, before_episode: int) -> list[dict]:
@@ -662,6 +688,13 @@ def _mark_channel_expired(db, campaign: Campaign, exc: Exception) -> bool:
     if not auth_shaped:
         low = str(exc).lower()
         auth_shaped = "invalid_grant" in low or "reconnect the account" in low
+        # A live token that may not POST is a credential problem too (ADR-089). Graph answers that
+        # one with code #200, not an OAuthException, so it read as an ordinary publish failure: the
+        # channel stayed "● Active" and the factory kept spending its single render slot on episodes
+        # that could never be published — the exact waste ADR-076 stops for a dead token. The
+        # re-verification below keeps it honest; it retires the channel only when Graph itself
+        # reports the scope missing.
+        auth_shaped = auth_shaped or "pages_manage_posts" in low
     if not auth_shaped:
         return False
     channel = db.get(Channel, campaign.channel_id)
@@ -686,10 +719,18 @@ def _mark_channel_expired(db, campaign: Campaign, exc: Exception) -> bool:
     return True
 
 
-def _fail_task(db, task: Task, user: User, campaign: Campaign, exc: Exception, job: str) -> None:
+def _fail_task(db, task: Task, user: User, campaign: Campaign, exc: Exception, job: str,
+               journey: list[dict] | None = None) -> None:
     from services.facebook_service import scrub
 
     db.rollback()
+    # The decisions this attempt made before it died (ADR-089). They were built in a local list and
+    # only written on the SUCCESS path, so a failed render kept its one-line "Render — failed" and
+    # threw away the reasoning: a gate-failed episode showed "How this render was judged (1
+    # decision)" when four judgments had actually been made. The rollback above is why they arrive
+    # here as an argument rather than as uncommitted state.
+    for entry in journey or []:
+        _append_journey(task, entry.get("step", "?"), entry.get("note", ""))
     task.status = TaskStatus.FAILED
     task.finished_at = datetime.utcnow()
     # Scrubbed before storing: this string is rendered on the episode page and in the alert bell, and
@@ -943,6 +984,10 @@ def render_task(task_id: int) -> None:
     # Loaded inside the try so a transient DB error here can't escape the finally (which closes the
     # session and clears progress) — otherwise the task would strand and the session would leak.
     campaign = channel = user = None
+    # The decision journey (ADR-084): every judgment made about this episode, in order, in plain
+    # words. Declared out here so the failure path can persist what THIS attempt decided (ADR-089) —
+    # inside the try it was unreachable from `except` when the crash came early.
+    journey: list[dict] = []
     try:
         campaign = db.get(Campaign, task.campaign_id)
         channel = db.get(Channel, campaign.channel_id)
@@ -1018,10 +1063,6 @@ def render_task(task_id: int) -> None:
             except Exception:  # noqa: BLE001 — an unreadable checkpoint just regenerates
                 logger.warning("Task %s: persisted script did not validate — regenerating", task.id)
         slop_warnings: list[str] = []
-        # The decision journey (ADR-084): every judgment made about this episode, in order, in
-        # plain words — persisted on the Task so the episode page can answer "why is it in this
-        # state" without the operator reading worker logs.
-        journey: list[dict] = []
         if script is not None:
             journey.append({"step": "Script", "note": "resumed from the interrupted attempt's checkpoint"})
         if script is None:
@@ -1032,6 +1073,17 @@ def render_task(task_id: int) -> None:
             cliches = slop_gate.merged_cliches((user.settings_json or {}).get("slop_blacklist"))
             avoid_notes = list(learning.get("reject_reasons") or []) + \
                 list((learning.get("flop_notes") or []))
+            # Lines this campaign FORCES into every episode. One definition feeds three consumers
+            # (generation, the similarity gate, the AI judge) — see `core.creative_brief`.
+            catchphrases = creative_brief.active_catchphrases(cfg)
+            # A retry AFTER the operator edited the brief must not be steered by notes written
+            # against the old one (ADR-089): "avoid mentioning the temple" outlives the topic that
+            # made it true, and silently re-creates the draft the gate just refused.
+            edited = creative_brief.edited_since_gate_failure(task, campaign, channel, user)
+            if edited:
+                avoid_notes = [f"the campaign brief CHANGED after that draft "
+                               f"({creative_brief.describe(edited)}) — follow the CURRENT brief; "
+                               "the notes below may refer to elements that are gone"] + avoid_notes
             gate = None
             for _gen_attempt in (1, 2):
                 script = generate_script(
@@ -1046,9 +1098,12 @@ def render_task(task_id: int) -> None:
                     persona=cfg.get("persona"),
                     style_examples=cfg.get("style_examples"),
                     # Per-campaign on/off: the text stays saved, but only applied when its flag is on
-                    # (default on for pre-flag campaigns — unchanged behaviour).
-                    catchphrase_open=(cfg.get("catchphrase_open") if cfg.get("catchphrase_open_on", True) else None),
-                    catchphrase_close=(cfg.get("catchphrase_close") if cfg.get("catchphrase_close_on", True) else None),
+                    # (default on for pre-flag campaigns — unchanged behaviour). `creative_brief`
+                    # owns that rule now, so the gate and the judge cannot disagree with generation.
+                    catchphrase_open=(cfg.get("catchphrase_open")
+                                      if cfg.get("catchphrase_open_on", True) else None),
+                    catchphrase_close=(cfg.get("catchphrase_close")
+                                       if cfg.get("catchphrase_close_on", True) else None),
                     continuity=cfg.get("continuity", "none"),
                     previous_synopses=previous,
                     playbook=learning.get("playbook"),
@@ -1068,15 +1123,20 @@ def render_task(task_id: int) -> None:
                 set_progress(task_id, 5 + _gen_attempt)
                 fp = slop_gate.script_fingerprint(script)
                 gate = slop_gate.check_script(fp["narration"], fp["title"], recent=recent,
-                                              cliches=cliches, content_style=content_style)
+                                              cliches=cliches, content_style=content_style,
+                                              strip_phrases=catchphrases)
+                # WHO refused it, for the journey (ADR-089): the deterministic gate judges
+                # repetition and the AI judge judges the writing. Logging both as "Script gate" is
+                # what let the episode page report a 7/10 style note as "too repetitive".
+                blocked_by = "Script gate"
                 if not gate.blocked:
                     journey.append({"step": "Script gate",
                                     "note": ("warnings: " + "; ".join(gate.issues))
                                     if gate.issues else "clean"})
                     # C2 (ADR-079): the AI judge shares the ONE regenerate budget with the
-                    # deterministic gate and the channel's reject threshold with the vision QC —
-                    # one scale, one discipline. Fail-open: a judge outage is "no verdict", never
-                    # a stalled factory (the deterministic gate has already run).
+                    # deterministic gate. It no longer shares the channel's video-QC threshold —
+                    # see ADR-089. Fail-open: a judge outage is "no verdict", never a stalled
+                    # factory (the deterministic gate has already run).
                     verdict = _judge_script_safe(user, channel, cfg, fp, gemini_key, gemini_model)
                     set_progress(task_id, 5 + _gen_attempt + 0.5)  # judge done — still alive
                     if verdict is None:
@@ -1084,20 +1144,35 @@ def render_task(task_id: int) -> None:
                         break
                     from core import autopilot as _ap
 
-                    _approve_min, reject_max = _ap.review_thresholds(channel)
-                    if verdict.score > reject_max:
+                    # NOT the channel's video-QC threshold as-is (ADR-089): clamped to the script
+                    # judge's own ceiling, so tightening review of finished VIDEO cannot make
+                    # scriptwriting impossible.
+                    judge_max = _ap.script_judge_reject_max(channel)
+                    if verdict.score > judge_max:
                         journey.append({"step": "Script judge", "note": f"{verdict.score}/10"
                                         + ("; " + "; ".join(verdict.issues) if verdict.issues else "")})
                         break
                     gate = slop_gate.GateReport(
-                        "block", [f"script judge scored it {verdict.score}/10"] + verdict.issues)
-                journey.append({"step": "Script gate", "note": "BLOCKED — regenerating once: "
+                        "block", [f"script judge scored it {verdict.score}/10 "
+                                  f"(this channel rejects {judge_max}/10 or below)"]
+                        + verdict.issues)
+                    blocked_by = "Script judge"
+                journey.append({"step": blocked_by, "note": "BLOCKED — regenerating once: "
                                 + "; ".join(gate.issues)})
                 logger.info("Task %s: script blocked by the quality gate (%s) — regenerating once",
                             task.id, "; ".join(gate.issues))
-                avoid_notes = avoid_notes + [f"your previous draft was rejected: {i}"
-                                             for i in gate.issues]
+                # PREPENDED, not appended (ADR-089): `compose_system_prompt` keeps only the first 10
+                # avoid-notes, and a long-running campaign already carries 10 (rejects + flop notes)
+                # — so the gate's own objections, the one feedback written for THIS draft, were
+                # silently dropped and the regenerate ran on a prompt identical to the draft that
+                # had just failed.
+                avoid_notes = [f"your previous draft was rejected: {i}" for i in gate.issues] \
+                    + avoid_notes
             if gate is not None and gate.blocked:
+                # Record WHY and under WHICH brief before failing (ADR-089): the journey is this
+                # attempt's reasoning, and the brief version is what lets a later config edit
+                # un-strand this episode automatically instead of waiting for a manual Retry.
+                _remember_gate_failure(db, task, campaign, channel, user, gate.issues)
                 # Deliberately NOT persisted as a checkpoint: a Retry must write a fresh script,
                 # not faithfully resume the one the gate just refused twice.
                 raise RuntimeError("Script failed the quality gate twice: "
@@ -1339,7 +1414,7 @@ def render_task(task_id: int) -> None:
 
     except Exception as exc:  # noqa: BLE001 — record, alert, and continue the queue
         if campaign is not None and user is not None:
-            _fail_task(db, task, user, campaign, exc, "render_task")
+            _fail_task(db, task, user, campaign, exc, "render_task", journey=journey)
         else:  # failed before the campaign/user loaded — mark FAILED without the Telegram path
             db.rollback()
             task.status = TaskStatus.FAILED
