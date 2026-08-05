@@ -371,12 +371,25 @@ _JUDGE_SYSTEM = (
 
 
 def judge_script(narration: str, title: str, *, api_key: str, language: str = "en",
-                 model: str = DEFAULT_MODEL) -> ScriptVerdict:
+                 model: str = DEFAULT_MODEL,
+                 required_phrases: tuple[str, ...] | list[str] = ()) -> ScriptVerdict:
     """One structured judging call over the narration text. Raises on AI failure — the caller
     treats that as 'no verdict' (fail-open): the deterministic gate has already run, and a judge
-    outage must not stop the factory."""
+    outage must not stop the factory.
+
+    `required_phrases` are the campaign's catchphrases — lines the scriptwriter is ORDERED to open
+    and close with. Told nothing about them, the judge read the mandated opening as a weak hook and
+    the mandated closing as filler, scored the draft down for both, and the regenerate could not fix
+    either without disobeying its own system prompt: a gate with no passing move (ADR-089)."""
+    branding = ""
+    if required_phrases:
+        branding = ("\n\nREQUIRED BRANDING — this channel forces these exact lines into every "
+                    "episode and the writer may not remove them. They are deliberate: judge the "
+                    "writing around them, never score them down and never ask for their removal.\n"
+                    + "\n".join(f'- "{p}"' for p in required_phrases))
     return generate_structured(
-        prompt=(f"Language: {language}\nTitle: {title}\n\nSCRIPT (narration):\n{narration[:6000]}"),
+        prompt=(f"Language: {language}\nTitle: {title}{branding}\n\n"
+                f"SCRIPT (narration):\n{narration[:6000]}"),
         schema=ScriptVerdict, api_key=api_key, system_prompt=_JUDGE_SYSTEM,
         model=model, temperature=0.2, max_output_tokens=1024)
 

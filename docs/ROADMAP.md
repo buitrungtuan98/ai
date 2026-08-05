@@ -1800,6 +1800,44 @@ confirmed 29 findings behind those three symptoms (ADR-088). The fixes, grouped:
 - Verified: 690 tests pass, 13 skipped (26 new in `tests/test_r22_recovery.py`, 2 reshaped to the
   new contracts), ruff clean, docs guard green.
 
+## R23 — a gate that can be passed, and a failure that recovers when the brief changes `DONE`
+
+Reported from production as three failed episodes: one refused at **7/10** while the page called it
+"too repetitive or generic" and told the operator to trim a blacklist; one refused twice at 4/10 for
+the campaign's own mandated catchphrases; and a Facebook publish refused for a missing
+`pages_manage_posts` permission while the page advised Retry and the slot scheduler retried it every
+slot. Root-caused to a shared threshold, a blind judge, and a classifier whose "a human must change
+something" was never followed by "…and they did" (ADR-089).
+
+- **The script judge has its own bar.** `autopilot.script_judge_reject_max` clamps it to ≤4; the
+  channel's *Reject at QC ≤* dial (tightened for finished video) can no longer demand 8/10 from every
+  script and make a channel unable to render. The Channels form now admits the dial gates scripts
+  too, and the failure copy splits: a judge refusal points at the threshold on /channels, a
+  repetition block at the topic on /campaigns. Neither advises the blacklist, which only ever warns.
+- **Mandated branding is not repetition and not the judge's business.**
+  `core/creative_brief.active_catchphrases` is the one definition, shared by generation, the
+  similarity gate (`strip_phrases` — removed from both sides before comparing, and from the cliché
+  scan) and the judge (`required_phrases` — told not to score them down). Gate objections are
+  prepended to the avoid-notes so the 10-note cap can no longer drop the feedback written for the
+  draft that just failed, and a duplicate-title issue quotes the title it duplicates.
+- **An edit revives what the gate refused.** `core/creative_brief.py` versions the settings that
+  reach the scriptwriter (per-field digests — never the operator's persona/prompt text); the refusing
+  version is recorded on the Task; campaign and threshold edits write a `config_edit` audit row; and
+  `scheduler.retry_after_brief_edits` re-queues gate-failed episodes whose brief has moved, telling
+  the new draft that it moved. Outside the autopilot budget (the trigger is the operator's own edit,
+  so hand-driven channels get it too), one attempt per brief version, never a publish.
+- **The page says what happened.** A failed attempt keeps its decision journey (an episode that made
+  four judgments no longer reports "1 decision"), a judge refusal is attributed to the judge rather
+  than the repetition gate, "fix the cause, then Retry" is not printed over failures no retry can
+  clear, and an episode already on its way back says so.
+- **A Facebook token is checked for what it can DO.** `verification.missing_post_permission` asks
+  Graph's `debug_token` whether the token may post and refuses a read-only one at save time
+  (three-state: an absent scope list is not evidence); #200 gets its own non-transient class, and a
+  live-but-unpostable token retires the channel after re-verification instead of failing quietly at
+  every slot.
+- Verified: 713 tests pass, 13 skipped (23 new in `tests/test_r23_gate_recovery.py`, 3 reshaped to
+  the new copy/contract), ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

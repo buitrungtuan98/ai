@@ -12,9 +12,14 @@ each channel's niche and audience.
 """
 from __future__ import annotations
 
+import logging
+from datetime import datetime
+
 from sqlalchemy import select
 
-from database.models import Campaign, Task
+from database.models import AutopilotAction, Campaign, Task
+
+logger = logging.getLogger(__name__)
 
 # Minimum measured episodes before a verdict is trustworthy — below this a campaign is "too early".
 MIN_MEASURED = 3
@@ -98,6 +103,26 @@ def classify_campaigns(db, campaigns) -> dict[int, dict]:
             for c in campaigns}
 
 
+def log_action(db, channel, kind: str, summary: str, *, campaign_id: int | None = None,
+               evidence: dict | None = None) -> None:
+    """Record ONE decision as a done AutopilotAction — the operator-visible audit trail.
+
+    Lives here, not in the scheduler, because the web layer writes to it too (ADR-089): a campaign
+    edit is exactly the kind of "what changed and when" the retry sweep's log entries refer back to,
+    and two writers with two definitions is how the drift this codebase keeps fixing starts. Status
+    'done' keeps these out of the proposal-idempotency logic. Fail-open: a logging error never breaks
+    the caller."""
+    try:
+        db.add(AutopilotAction(
+            user_id=channel.user_id, channel_id=channel.id, campaign_id=campaign_id,
+            kind=kind, summary=summary[:300], evidence=evidence or {}, params={},
+            status="done", resolved_at=datetime.utcnow()))
+        db.commit()
+    except Exception:  # noqa: BLE001 — the audit log is a nicety, never a gate
+        db.rollback()
+        logger.debug("autopilot action log failed", exc_info=True)
+
+
 # ── Autopilot config (per-channel, stored in Channel.autopilot_json) ─────────
 MODES = ("off", "copilot", "autopilot")
 DEFAULT_INTERVAL_HOURS = 3
@@ -132,6 +157,23 @@ def review_thresholds(channel) -> tuple[int, int]:
     lo = max(0, min(lo, 10))
     hi = max(lo + 1, min(hi, 10))  # approve threshold always strictly above the reject threshold
     return hi, lo
+
+
+# The pre-render SCRIPT judge's own ceiling (ADR-089). It used to read `review_thresholds` and use
+# the channel's video-QC reject threshold as-is — "one scale, one discipline" (ADR-079 C2). One
+# scale, two very different costs: a channel tightened for finished VIDEO ("Reject at QC ≤ 7")
+# silently demanded 8/10 from every script, and a good draft scores 7 with two style notes, so that
+# channel could not render at all — draft blocked, the single regenerate blocked, episode failed,
+# every time, with the operator reading "too repetitive or generic" about a script nobody thought
+# was either. Video strictness and scriptwriting strictness are not one dial. A channel LOOSER than
+# the default keeps its own value; a stricter one is clamped to the default here.
+SCRIPT_JUDGE_REJECT_MAX = 4
+
+
+def script_judge_reject_max(channel) -> int:
+    """The score at/below which a pre-render script is rejected — never stricter than the default."""
+    _approve_min, reject_max = review_thresholds(channel)
+    return min(reject_max, SCRIPT_JUDGE_REJECT_MAX)
 
 
 def review_decision(qc: dict | None, approve_min: int, reject_max: int) -> tuple[str, str]:

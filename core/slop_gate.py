@@ -69,6 +69,25 @@ def similarity(a: str, b: str) -> float:
     return len(ga & gb) / len(ga | gb)
 
 
+def without_phrases(text: str, phrases: tuple[str, ...] = ()) -> str:
+    """`normalize(text)` with `phrases` removed — the comparison space for a script whose opening and
+    closing lines are FORCED branding (ADR-089).
+
+    A campaign with signature catchphrases makes every episode start and end with the same sentence,
+    on purpose, and the scriptwriter is not allowed to drop them. Counting those shared words as
+    self-repetition added a constant to every similarity score that no regeneration could remove:
+    measured on this module, two genuinely different scripts score 0.00, and the same pair carrying
+    one catchphrase pair scores 0.24 at ~65 words and 0.49 at quote length — a hair under the 0.50
+    block, so the gate was one short episode away from being unpassable. `normalize` is idempotent,
+    so the output of this function is safe to hand to `similarity`."""
+    out = normalize(text)
+    for phrase in phrases:
+        needle = normalize(phrase)
+        if needle:
+            out = out.replace(needle, " ")
+    return re.sub(r"\s+", " ", out).strip()
+
+
 def first_sentence(text: str) -> str:
     m = re.split(r"(?<=[.!?…])\s+", (text or "").strip(), maxsplit=1)
     return m[0] if m else ""
@@ -92,15 +111,23 @@ def merged_cliches(extra: str | None) -> tuple[str, ...]:
 
 def check_script(narration: str, title: str, *, recent: list[dict],
                  cliches: tuple[str, ...] = DEFAULT_CLICHES,
-                 content_style: str = "story") -> GateReport:
+                 content_style: str = "story",
+                 strip_phrases: tuple[str, ...] = ()) -> GateReport:
     """Judge one script against this campaign's recent episodes. `recent` = [{narration, title,
     episode}] newest-last; entries may be partial (old tasks predate the stored fingerprint) —
     missing data narrows the check, it never fails it.
 
     Quote mode keeps the self-repetition and title checks (a re-generated poem is still a repeat)
-    but skips the cliché/hook heuristics — they are tuned for narrated story pacing."""
+    but skips the cliché/hook heuristics — they are tuned for narrated story pacing.
+
+    `strip_phrases` are lines the campaign FORCES into every episode (its catchphrases): they are
+    removed from both sides before anything is compared, because repetition the operator mandated is
+    not the repetition this gate exists to catch (ADR-089)."""
     issues: list[str] = []
     verdict = "ok"
+    # Compared in the phrase-stripped space; `normalize` is idempotent, so this is also what the
+    # cliché scan reads (a catchphrase must not be able to trip the operator's own blacklist).
+    narration_cmp = without_phrases(narration, strip_phrases)
 
     def worst(v: str) -> None:
         nonlocal verdict
@@ -113,7 +140,7 @@ def check_script(narration: str, title: str, *, recent: list[dict],
         prev_narration = prev.get("narration") or ""
         if not prev_narration:
             continue
-        sim = similarity(narration, prev_narration)
+        sim = similarity(narration_cmp, without_phrases(prev_narration, strip_phrases))
         if sim >= BLOCK_SIMILARITY:
             issues.append(f"nearly repeats episode {prev.get('episode', '?')} "
                           f"({round(sim * 100)}% of its phrasing) — write a genuinely new episode")
@@ -129,13 +156,18 @@ def check_script(narration: str, title: str, *, recent: list[dict],
     if wanted:
         for prev in recent:
             if normalize(prev.get("title") or "") == wanted:
-                issues.append(f"title duplicates episode {prev.get('episode', '?')} — "
-                              "platforms read repeated titles as spam")
+                # The title itself is quoted back (ADR-089): the regenerating model never sees the
+                # earlier episodes' titles, only their synopses, so "title duplicates episode 12"
+                # asked it to avoid something it could not look up — and the most natural title for
+                # a topic is exactly the one it just picked.
+                issues.append(f"title duplicates episode {prev.get('episode', '?')} "
+                              f"(“{(prev.get('title') or '').strip()[:80]}”) — platforms read "
+                              "repeated titles as spam; title this episode differently")
                 worst("block")
                 break
 
     if content_style != "quote":
-        norm_narration = normalize(narration)
+        norm_narration = narration_cmp
         # 3. Cliché filler.
         hits = [c for c in cliches if c in norm_narration]
         if len(hits) >= CLICHE_WARN_COUNT:

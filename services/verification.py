@@ -205,6 +205,41 @@ def _not_a_page(node: str, name: str = "") -> PageCheck:
     return PageCheck(False, f"{head}{who} {how}")
 
 
+def missing_post_permission(token: str) -> bool | None:
+    """Does Graph's own token debug say this token cannot PUBLISH to a Page? Three-state, like the
+    check it belongs to: True definitely cannot · False can · None Graph did not say (ADR-089).
+
+    Identity is not capability, and this file only ever checked identity. `/me` proves the token
+    belongs to the Page; it says nothing about what the token may DO — and a token minted without
+    `pages_manage_posts` reads the Page's name and avatar perfectly. So a channel saved as "● Active",
+    passed every re-verification, and then refused every publish with "(#200) … lack of
+    pages_manage_posts permission" — first discovered weeks later, on the first upload, by which time
+    the operator had rendered episodes waiting for a slot that could never accept them.
+
+    A missing scope IS a definite refusal (unlike a network hiccup): this token cannot do the one job
+    the channel exists for, and saying so while the operator is still holding the Graph Explorer is
+    worth more than a verified-looking channel that fails at publish time. Never raises."""
+    try:
+        import requests
+
+        from services.facebook_service import GRAPH
+
+        resp = requests.get(f"{GRAPH}/debug_token",
+                            params={"input_token": token, "access_token": token}, timeout=TIMEOUT)
+        if resp.status_code != 200:
+            return None
+        scopes = ((resp.json() or {}).get("data") or {}).get("scopes")
+        # Only an ACTUAL list of granted scopes is evidence. An app whose debug endpoint answers
+        # without `scopes` (system-user tokens do) must not be read as "no permissions".
+        if not isinstance(scopes, list) or not scopes:
+            return None
+        return "pages_manage_posts" not in scopes
+    except Exception as exc:  # noqa: BLE001 — no verdict beats a wrong one
+        # The type only: the request URL carries the token, so the exception text must never be logged.
+        logger.warning("Facebook token scope check failed: %s", type(exc).__name__)
+        return None
+
+
 def check_facebook_page(page_id: str, token: str) -> PageCheck:
     """Is this really a Page Access Token for this Page? THREE-state on purpose (ADR-068/072):
     `True` verified · `False` definitely rejected · `None` could not tell.
@@ -273,6 +308,14 @@ def check_facebook_page(page_id: str, token: str) -> PageCheck:
             if wanted.isdigit() and got_id and wanted != got_id:
                 return PageCheck(False, f"This token belongs to the Page “{name}” (id {got_id}), "
                                         f"not to the Page id you entered ({wanted}).")
+            # Right Page, right kind of token — now the only question left that a publish would
+            # have answered painfully later: may it actually post? (ADR-089)
+            if missing_post_permission(token) is True:
+                return PageCheck(False, f"This is a Page token for “{name or got_id or wanted}”, but "
+                                        "it was generated WITHOUT the pages_manage_posts permission "
+                                        "— it can read the Page and cannot publish to it, so every "
+                                        "upload would be refused. Generate it again with "
+                                        "pages_manage_posts ticked; the steps are below.")
             pic = (((data.get("picture") or {}).get("data") or {}).get("url")) or None
             return PageCheck(True, f"Verified: {name or got_id or wanted}.",
                              page_id=got_id or wanted, name=name or None, picture=pic)

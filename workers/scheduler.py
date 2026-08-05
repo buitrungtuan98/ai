@@ -26,7 +26,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 
-from core import failure
+from core import autopilot, creative_brief, failure
 # One dismissal-cooldown definition for every proposer (ADR-086) — the council shares it too.
 from core.autopilot import REPROPOSE_AFTER_DAYS
 from core.cleanup import sweep_orphans
@@ -792,18 +792,11 @@ AUTOPILOT_LOG_RETENTION_DAYS = 90  # prune the operational decision log beyond t
 
 def _log_action(db, channel, kind: str, summary: str, *,
                 campaign_id: int | None = None, evidence: dict | None = None) -> None:
-    """Record ONE autonomous operational decision (approve/reject/escalate/retry/catch-up) as a
-    done AutopilotAction so the operator can see what autopilot did and WHY. Status 'done' keeps
-    these out of the proposal-idempotency logic. Fail-open: a logging error never breaks the pass."""
-    try:
-        db.add(AutopilotAction(
-            user_id=channel.user_id, channel_id=channel.id, campaign_id=campaign_id,
-            kind=kind, summary=summary[:300], evidence=evidence or {}, params={},
-            status="done", resolved_at=datetime.utcnow()))
-        db.commit()
-    except Exception:  # noqa: BLE001 — the audit log is a nicety, never a gate
-        db.rollback()
-        logger.debug("autopilot action log failed", exc_info=True)
+    """Record ONE autonomous operational decision (approve/reject/escalate/retry/catch-up) so the
+    operator can see what autopilot did and WHY. The writer itself lives in `core.autopilot` — the
+    web layer logs campaign edits to the same trail (ADR-089) and there must be one definition."""
+    autopilot.log_action(db, channel, kind, summary,
+                         campaign_id=campaign_id, evidence=evidence)
 
 
 def prune_autopilot_log(db, now: datetime | None = None) -> int:
@@ -1033,6 +1026,75 @@ def autopilot_retry_channel(db, channel) -> int:
                     campaign_id=t.campaign_id,
                     evidence={"episode": t.episode_number, "attempt": t.auto_retry_count})
     return retried
+
+
+# ── Config-aware recovery: an operator's edit un-strands a gate-failed episode (ADR-089) ──
+def retry_after_brief_edits(db, *, enqueue=None) -> int:
+    """Re-queue gate-failed episodes whose campaign's creative brief has been EDITED since.
+
+    The pre-render gate fails an episode on honest grounds — two drafts refused means a human has to
+    change something (ADR-079) — so `core.failure` marks it non-transient and every automatic retry
+    path leaves it alone. Then the human DOES change something: a new topic angle, a rewritten
+    persona, a catchphrase retired. Nothing connected the two. The episode stayed FAILED under a
+    brief that no longer existed, and the only way back was for the operator to remember which
+    episodes had died and press Retry on each.
+
+    Deliberately OUTSIDE the autopilot pass and its budget: the trigger is not a machine judgment
+    that might be wrong, it is the operator's own edit — and re-rendering is what an active campaign
+    does anyway (hydration renders new episodes with autopilot off too). It never publishes. ONE
+    attempt per brief VERSION, with the fingerprint that bought it stamped on the record, so a tick
+    every minute cannot re-render the same episode while the operator sits still.
+    """
+    enqueue = enqueue or video_worker.enqueue_task
+    requeued = 0
+    for t in db.scalars(
+            select(Task).join(Campaign, Task.campaign_id == Campaign.id)
+            .where(Task.status == TaskStatus.FAILED,
+                   Campaign.status == CampaignStatus.active)).all():
+        record = (t.render_json or {}).get("gate_failure") or {}
+        if not record.get("brief"):
+            continue
+        # Structurally impossible today (a rendered episode's success path rewrites render_json and
+        # drops this record, so a human can only ever reject an episode that has none) — asserted
+        # anyway, because "a human's rejection is the one decision no automatic retry may override"
+        # must not depend on a coincidence of write ordering.
+        if failure.is_human_reject(t.error_message or ""):
+            continue
+        try:
+            campaign = db.get(Campaign, t.campaign_id)
+            channel = db.get(Channel, campaign.channel_id)
+            # A channel that cannot publish must not spend the single render slot (ADR-076).
+            if channel is None or not _channel_can_act(db, channel):
+                continue
+            digests = creative_brief.key_digests(campaign, channel, db.get(User, t.user_id))
+            fingerprint = creative_brief.fingerprint(digests)
+            if fingerprint in (record.get("fingerprint"), record.get("requeued_for")):
+                continue  # the same brief, or this exact edit already bought its retry
+            edited = creative_brief.changed(record["brief"], digests)
+            if not edited:
+                continue
+            rj = dict(t.render_json or {})
+            rj["gate_failure"] = {**record, "requeued_for": fingerprint}
+            t.render_json = rj
+            t.status = TaskStatus.PENDING_QUEUE
+            t.error_message = None
+            t.progress_pct = 0
+            t.retry_count += 1   # the operator's visible count: this IS another attempt
+            db.commit()
+            task_queue.clear_progress(t.id)  # no ghost % from the refused attempt (F1)
+            t.rq_job_id = enqueue(t)
+            db.commit()
+            requeued += 1
+            _log_action(db, channel, "requeued",
+                        f"Re-queued Ep {t.episode_number} — the campaign brief changed after its "
+                        f"script was refused ({creative_brief.describe(edited)}), so the next draft "
+                        "is written from the current brief.",
+                        campaign_id=t.campaign_id,
+                        evidence={"episode": t.episode_number, "changed": edited})
+        except Exception:  # noqa: BLE001 — one bad row must not stop the sweep
+            logger.warning("brief-edit retry failed for task %s", t.id, exc_info=True)
+            db.rollback()
+    return requeued
 
 
 def _published_today(db, campaign_id: int, now_local: datetime, tz_name: str | None) -> int:
@@ -1711,6 +1773,15 @@ def periodic_tick(db=None, now: datetime | None = None) -> dict:
             except Exception:  # noqa: BLE001 — keep processing the remaining campaigns
                 logger.warning("Tick failed for campaign %s", campaign.id, exc_info=True)
                 db.rollback()
+
+        # An operator edit to a campaign's brief revives the episodes its gate refused (ADR-089).
+        # Outside the autopilot pass on purpose: the decision was the human's, so it applies to
+        # channels that drive everything by hand too. Re-renders only — it never publishes.
+        try:
+            summary["brief_retries"] = retry_after_brief_edits(db)
+        except Exception:  # noqa: BLE001
+            logger.warning("Brief-edit retry sweep failed", exc_info=True)
+            db.rollback()
 
         # Autopilot: enabled channels manage themselves (review/reject/retry/catch-up). Per-channel
         # cadence is guarded inside the pass; a failure here must not stop the tick.

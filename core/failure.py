@@ -49,16 +49,43 @@ PATTERNS: tuple[tuple[tuple[str, ...], str, str, str, str, bool], ...] = (
      "shipped). Let the campaign publish a few more episodes, then approve a new compile proposal "
      "— retrying now would just count the same library again.",
      "/campaigns", "Open campaigns", False),
+    # The AI judge's rejection, ahead of the deterministic gate's because the two need DIFFERENT
+    # advice and only this one names a threshold the operator can move (ADR-089). Sending a judge
+    # rejection to the gate's copy told an operator whose script was fine ("7/10, two style notes")
+    # that it was "too repetitive or generic" and to go trim a blacklist that cannot block anything.
+    (("script judge scored it",),
+     "The AI script judge scored two drafts below this channel's bar",
+     "This is a judgement about the WRITING, not about repetition: the exact objections are on the "
+     "episode page under “What the render reported”. If the channel's “Reject at QC ≤” is set high, "
+     "lower it — that dial also gates scripts. Otherwise soften the topic or persona, turn the "
+     "script judge off for this campaign, or Retry for a fresh draft when you disagree.",
+     "/channels", "Channel settings", False),
     # Fix copy is read on surfaces that don't show the raw error (the dashboard triage row, R21),
     # so it must point at things the reader can see from anywhere — "details in the raw error"
     # named an element that only exists collapsed on the episode page.
     (("failed the quality gate",),
-     "The script was judged too repetitive or generic to be worth rendering",
-     "Two drafts in a row failed the pre-render quality gate — the campaign may be running out of "
-     "fresh angles on this topic. The judge's exact objections are on the episode page under "
-     "“What the render reported”. Adjust the topic or persona, trim the blacklist in Settings, or "
-     "Retry for a fresh attempt when you disagree.",
-     "/settings", "Review settings", False),
+     "The script repeated an earlier episode too closely to be worth rendering",
+     "Two drafts in a row reused a recent episode's phrasing or its exact title — the campaign may "
+     "be running out of fresh angles on this topic. What matched is on the episode page under “What "
+     "the render reported”. Adjust the topic or persona so the next draft covers new ground; editing "
+     "the campaign re-queues this episode by itself.",
+     "/campaigns", "Open campaigns", False),
+    # A Page token that is ALIVE but was minted without `pages_manage_posts` (Graph error #200).
+    # Its own class because every other reading of it is wrong (ADR-089): the token is not expired,
+    # so re-verification passes and the channel is never retired; the error carries none of the OAuth
+    # words above; and an unmatched message defaults to transient=True, so this — a permission that
+    # no amount of waiting grants — was retried by the autopilot and re-published at every posting
+    # slot, failing identically each time while the page advised "fix the cause, then Retry".
+    # Graph's OWN wording only, deliberately narrow: "insufficient permission" is what YouTube says
+    # for an unrelated 403, and this row's fix talks about Page tokens.
+    (("pages_manage_posts", "does not have permission to post",
+      "subject does not have permission"),
+     "The Facebook Page token cannot post to this Page",
+     "Facebook accepted this token for reading the Page but it was generated without the "
+     "pages_manage_posts permission, so publishing is refused — retrying cannot grant it. Generate a "
+     "new Page Access Token with pages_manage_posts, pages_read_engagement and pages_show_list, "
+     "paste it on the Channels page, then use Publish now: the rendered video is safe and needs no "
+     "re-render.", "/channels", "Fix the channel", False),
     # Facebook's own OAuth wording, ahead of the generic key class because the FIX IS SOMEWHERE ELSE:
     # an API key lives on /credentials, a Page token lives on the channel. These phrases only ever
     # come from Graph. Before this, a dead Page token classified as a generic failure and the

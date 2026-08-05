@@ -136,7 +136,11 @@ def test_blocked_twice_fails_honestly_with_avoid_notes(session, user, channel, m
     assert not (t.render_json or {}).get("script")                # no slop checkpoint to resume
     assert failure.is_transient(t.error_message) is False         # autopilot leaves it to a human
     d = failure.diagnose(t.error_message)
-    assert d and d["href"] == "/settings"
+    # A deterministic block is about REPETITION, and its fix lives on the campaign (ADR-089). It used
+    # to send the operator to Settings to "trim the blacklist" — a list that only ever raises
+    # warnings and can never block, so the one piece of advice offered could not work.
+    assert d and d["href"] == "/campaigns"
+    assert "blacklist" not in d["fix"]
 
 
 def test_warnings_ride_into_review_metadata_and_fingerprint_persists(session, user, channel,
