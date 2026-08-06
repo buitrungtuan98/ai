@@ -216,6 +216,30 @@ All days unchecked = every day. Rendering still runs ahead daily, and day-gated 
 kept up to ~a week before expiring (instead of the default 72h) so an episode can wait for its
 publish day.
 
+## "Nothing is being rendered" — the four reasons
+Rendering runs ahead to the campaign's **buffer size**, and pauses for exactly one of four reasons.
+The dashboard runway tile and the alert bell name which one; the worker log says the same thing.
+
+1. **Waiting for your review.** The buffer is full of rendered episodes nobody has approved or
+   rejected. The alert links to Review; one decision restarts the pipeline. This is the common one,
+   and it looks identical to a broken renderer if you only read the ready-buffer count — which is
+   why the tile says *waiting on your approval* rather than *nothing rendered*.
+2. **Buffer full.** The target depth of episodes is already on its way to a slot. Nothing is wrong.
+3. **Daily cap reached.** The campaign's `max_per_day` is spent; it resumes at its local midnight.
+4. **Nothing left to plan.** Every episode up to `total_episodes` exists. Extend the campaign to
+   make more.
+
+Want a deeper review queue (you approve in weekly batches)? Raise the campaign's **buffer size** —
+it is the same dial for both "how far ahead do we render" and "how many may wait for you".
+
+## Where did the time go? (per-episode timeline)
+The episode page dates every stage under the lifecycle rail, on the campaign's own clock: **Queued**
+(the render job was enqueued) → **Render started** (the worker picked it up — the gap from Queued is
+your worker backlog) → **Render finished** → **Reviewed** (blank when no gate ran) → **Scheduled**
+(the slot it is due to take, shown dimmed with `(due)` because it has not happened yet) →
+**Published**. Episodes made before this shipped show what their rows still hold and leave the rest
+blank rather than guessing.
+
 ## Making the content feel human (persona guide)
 The per-campaign **Persona** section is the single biggest quality lever. What works:
 1. **Persona**: a specific character — region, age, mood, speech habits ("người miền Tây, thân mật,

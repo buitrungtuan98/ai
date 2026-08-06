@@ -2362,3 +2362,77 @@ The cost is that "Approve" no longer publishes for slot-scheduled campaigns, whi
 muscle memory for anyone relying on the old behaviour. `Publish now` — which already existed for
 `ready` items — is the deliberate escape hatch, and every approve surface names the new time rather
 than leaving the operator to discover it. Campaigns with no posting slots are untouched.
+
+### ADR-091 — A blocked buffer is not an empty one, and every stage keeps its own timestamp
+
+**Status.** Accepted (R25).
+
+**Context.** Two reports from the same box, a day after ADR-090 shipped: the factory had *stopped
+producing videos* although the buffer was visibly short, and there was no way to tell when anything
+had happened to an episode — queued, rendered, reviewed, due out, actually live.
+
+They turned out to be one failure wearing two hats. The machine knew things about itself that no
+surface could say.
+
+The stall was reproducible in six lines. `hydrate_campaign` measured the buffer as "every Task that
+is not COMPLETED / FAILED / CANCELLED", which lumps together two states that have nothing in common:
+an episode still rendering or waiting for its posting slot **arrives on its own**, while an episode
+parked for a human **arrives only if somebody decides**. On an auto-publish campaign, where a park
+is the exception (Auto-QC held the render back, ADR-084), each parked episode quietly took a place
+in the runway: two parked left room for one render instead of three, and three stopped the campaign
+dead — permanently, because nothing expires an `awaiting_review` item. Meanwhile every surface that
+reports on the buffer counts only `ready` rows, so the dashboard read "campaigns with nothing
+rendered — those slots will be missed" and the slot alert sent the operator to Operations to debug a
+render worker that was idle exactly as designed. The one honest number, "3 episodes are waiting for
+your decision", was in the database and on no page.
+
+The missing timestamps were the reason the stall took a code read to diagnose rather than a glance.
+`Task.finished_at` is the *terminal* stamp — whichever step ends the episode writes it — so a slot
+publish overwrites the render's own finish hours later and the render time is simply gone. No stage
+had a recorded time at all: the lifecycle rail could say WHERE an episode was and never WHEN it got
+there, which is precisely the question "is this thing moving?" reduces to.
+
+**Decision.**
+
+1. **`video_worker.buffer_state` is the one measurement of the render buffer**, and it counts
+   `flowing` and `parked` separately. Hydration consumes it, and so does every surface that reports
+   on it, so a page can no longer disagree with the scheduler about what the factory is doing.
+2. **What counts against the review cap depends on the gate, and only the gate.** On a review-first
+   campaign every render parks, so work still in flight is a parked episode that has not landed yet
+   and counts too — total in-flight stays at the buffer size, exactly the depth those campaigns
+   already ran at. On an auto-publish campaign only the genuinely parked episodes count, and they
+   act as a **stop** (`parked >= cap` pauses rendering) rather than a per-render tax on a runway
+   they are not part of. This is the line the bug lived on.
+3. **The cap is the buffer size — one dial, not two.** An operator who reviews in weekly batches
+   raises the campaign's buffer size and gets a deeper review queue with it. A second number would
+   be a second thing to discover, and the first one already means "how deep should the pipeline be".
+4. **Every idle tick has a named reason** (`review` · `full` · `daily_cap` · `planned_out`), logged
+   and read by the UI. The slot-risk alert and the dashboard runway tile now distinguish *starved*
+   (the render pipeline is the place to look) from *waiting on your approval* (one click away),
+   because those two identical-looking states are fixed by opposite actions.
+5. **Three write-once columns** — `Task.rendered_at`, `reviewed_at`, `published_at` — each stamped
+   by the step that owns it and never rewritten. `finished_at` keeps its terminal meaning; nothing
+   that reads it changes. `published_at` rides the same single commit as the published id and the
+   consumed buffer row (R22), so "we said it published" can never outlive "it published".
+6. **`core/timeline.py` is the one reader.** It composes the stamped moments with the two that were
+   never columns — the enqueue, and the slot an episode is still waiting for — into one ordered list
+   on the campaign's own timezone. The projected slot comes from `approved_publish_time` /
+   `upcoming_slots` (ADR-090), recomputed on every read rather than stored, so the page and the
+   Approve button cannot promise different times. A future time is marked `estimated` and rendered
+   dimmed and labelled `(due)`: a forecast must never be printed like a record.
+
+**Consequences.** A handful of QC-parked episodes can no longer strangle an auto-publish campaign,
+and when the factory does pause it says which of four things it is waiting for — in the log, in the
+bell, and on the dashboard. Review-first campaigns are unchanged in depth by construction, which is
+what makes this safe to ship on top of ADR-090.
+
+The behaviour that deliberately did **not** change: a full review queue still stops rendering. An
+operator who owes three decisions does not need a fourth video, and on a one-render-at-a-time box
+the alternative is spending the only render slot on inventory nobody has looked at. What was wrong
+was never the pause — it was pausing in silence and then blaming the renderer.
+
+The timeline's back-compatibility is a fallback, not a fiction: rows written before this ADR have
+only `finished_at`, which means "published" on a COMPLETED task and "rendered" on any other, and a
+consumed buffer row still remembers the publish instant in `consumed_at`. A stage with no
+recoverable time reports as blank rather than borrowing a neighbour's — one value must never appear
+twice under two labels, which is the failure mode this ADR exists to end.

@@ -1878,6 +1878,44 @@ up.
 - Verified: 729 tests pass, 13 skipped (15 new in `tests/test_approve_schedule.py`, 2 reshaped to the
   new contract), ruff clean, docs guard green.
 
+## R25 — a blocked buffer is not an empty one, and an episode keeps its clock `DONE`
+
+Reported from production, a day after R24: **no new videos are being created even though the buffer
+is short**, and **there is no way to see an episode's timings** — when it was queued, rendered,
+reviewed, scheduled to go out, and actually published. One cause behind both (ADR-091): the machine
+knew things about itself that no surface could say.
+
+- **The stall, reproduced.** `hydrate_campaign` counted every non-terminal Task as buffer depth, so
+  an episode parked for a human was indistinguishable from one on its way to a slot. On an
+  auto-publish campaign each Auto-QC park quietly took a place in the runway — two parked left room
+  for one render instead of three, three stopped the campaign for good (nothing expires an
+  `awaiting_review` item) — while the dashboard, counting only `ready` rows, reported an empty
+  buffer and pointed at the render worker.
+- **One measurement, two numbers.** `video_worker.buffer_state` counts `flowing` (reaches a slot
+  unaided) apart from `parked` (blocked on a decision); hydration and every reporting surface read
+  the same call. On a **review-first** campaign in-flight work counts against the review cap too, so
+  total in-flight stays at the buffer size — those campaigns are unchanged by construction. On an
+  **auto-publish** campaign parked strays act as a stop, not as a tax on a runway they were never
+  part of. The cap is the buffer size: one dial, raised by anyone who reviews in weekly batches.
+- **Every idle tick names itself** (`review` · `full` · `daily_cap` · `planned_out`). The slot-risk
+  alert stops printing "nothing is rendered yet" over rendered episodes and links to Review; the
+  dashboard runway tile splits *starved* from *waiting on your approval*. Same count, opposite fix.
+- **The clock.** `Task.rendered_at` / `reviewed_at` / `published_at` are written once by the step
+  that owns them — `finished_at` is the terminal stamp and a publish overwrites the render's own
+  finish, which is why the render time used to vanish the moment an episode went live.
+  `published_at` rides the same single commit as the published id and the consumed buffer row (R22).
+- **One reader.** `core/timeline.py` composes those stamps with the enqueue and the projected
+  posting slot into one ordered list on the campaign's own timezone, straight from
+  `approved_publish_time` / `upcoming_slots` so the page and the Approve button cannot disagree. A
+  future time is dimmed and labelled `(due)`; a pre-R25 row falls back to what it still holds and
+  reports an unrecoverable stage as blank rather than borrowing a neighbour's timestamp.
+- **Deliberately unchanged:** a full review queue still pauses rendering. An operator who owes three
+  decisions does not need a fourth video, and this box renders one at a time. The bug was pausing in
+  silence and blaming the renderer, not pausing.
+- Verified: 748 tests pass, 13 skipped (19 new in `tests/test_r25_buffer_clock.py`), ruff clean,
+  docs guard green.
+
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

@@ -90,15 +90,32 @@
     {% endfor %}
   </ol>
   {% endif %}
+  {# ── When each stage actually happened (ADR-091). The rail above says WHERE this episode is; this
+       says WHEN it got there, on the campaign's own clock — the one the posting slots were set in.
+       A future time is labelled as such rather than printed like a fact. #}
+  <table class="tl-clock mt-sm">
+    <tbody>
+      {% for m in milestones %}
+      <tr class="{{ 'done' if m.done else ('due' if m.at else 'todo') }}">
+        <th scope="row">{{ m.label }}</th>
+        <td class="mono">
+          {%- if m.local -%}
+          {{ m.local.strftime('%Y-%m-%d %H:%M') }}{% if m.estimated %} <span class="hint">(due)</span>{% endif %}
+          {%- else -%}<span class="muted">—</span>{%- endif -%}
+        </td>
+        <td class="meta">{{ m.note if m.at or m.note else '' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
   <p class="hint mt-sm">
-    {% if task.ab_variant %}Variant {{ task.ab_variant }} · {% endif %}
-    {% if task.retry_count %}{{ task.retry_count }} retr{{ 'y' if task.retry_count == 1 else 'ies' }} · {% endif %}
-    {% if task.started_at %}started {{ task.started_at.strftime('%Y-%m-%d %H:%M') }} UTC{% endif %}
-    {# Full date on both ends (R22): render-day-1 + publish-fail-day-2 used to read
-       "started 08-01 13:02 · finished 09:14" — apparently finishing before it started. #}
-    {% if task.finished_at %} · finished {{ task.finished_at.strftime('%Y-%m-%d %H:%M') }} UTC{% endif %}
+    Times in {{ timeline_tz }}.
+    {% if task.ab_variant %} Variant {{ task.ab_variant }} ·{% endif %}
+    {% if task.retry_count %} {{ task.retry_count }} retr{{ 'y' if task.retry_count == 1 else 'ies' }} ·{% endif %}
     {% set rsec = (task.render_json or {}).get('render_seconds') %}
-    {% if rsec %} · render took {{ (rsec // 60)|int }}m{% endif %}
+    {# The true render wall-time, not finished−started: for a slot-scheduled episode the latter
+       counts the hours it spent waiting for its slot. #}
+    {% if rsec %} render took {{ (rsec // 60)|int }}m {{ (rsec % 60)|int }}s{% endif %}
   </p>
   {# ── Decision journey (ADR-084): every judgment the machine made about this render, in order —
        gate, judge, QC per attempt — so "why did this park/publish?" is answerable from this page. #}
