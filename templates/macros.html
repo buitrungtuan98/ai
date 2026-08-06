@@ -176,11 +176,15 @@
 <div class="facts">
   <span class="fact">{{ '▬ Long 16:9' if fmt == 'long' else '▮ Short 9:16' }}</span>
   <span class="fact">{{ cfg.get('language', 'en')|upper }}</span>
+  {#- Gate and clock are independent facts (ADR-090). Showing only "Review-first" hid the operator's
+      own posting schedule on every card, which is half of why an approval landing instantly was a
+      surprise: nothing on screen ever said the campaign had a 21:00 slot at all. -#}
   {%- if not cfg.get('auto_publish', true) %}
   <span class="fact">👁 Review-first</span>
-  {%- elif slots %}
+  {%- endif %}
+  {%- if slots %}
   <span class="fact">🗓 {{ slots|join(', ') }} · {{ days|map('capitalize')|join(',') if days else 'Daily' }}</span>
-  {%- else %}
+  {%- elif cfg.get('auto_publish', true) %}
   <span class="fact">⚡ Continuous</span>
   {%- endif %}
 </div>
@@ -199,9 +203,12 @@
 <p class="nownext muted">✓ Campaign complete.</p>
 {% elif op and op.next_slot %}
 {% if op.ready %}<p class="nownext">⏭ Next post {{ op.next_slot.when }} · {{ op.ready }} ready</p>
+{# Rendered-but-unapproved is a different problem from an empty buffer and has a different fix, so
+   it gets its own line instead of "buffer empty" pointing at the render queue (ADR-090). #}
+{% elif op and op.awaiting_review %}<p class="nownext">👁 {{ op.awaiting_review }} awaiting your ✓ — next slot {{ op.next_slot.when }} needs one approved</p>
 {% else %}<p class="nownext bad">⚠ Buffer empty — next slot ({{ op.next_slot.when }}) will be missed</p>{% endif %}
 {% elif not cfg.get('auto_publish', true) %}
-<p class="nownext">👁 Review-first — {{ (op.ready + op.awaiting_review) if op else 0 }} in buffer</p>
+<p class="nownext">👁 Review-first — {{ (op.ready + op.awaiting_review) if op else 0 }} in buffer, publishing on approval</p>
 {% else %}
 <p class="nownext">⚡ Continuous — publishes as it renders</p>
 {% endif %}

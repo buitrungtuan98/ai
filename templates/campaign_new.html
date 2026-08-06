@@ -302,7 +302,8 @@
           <option value="review" {{ 'selected' if not cfg.get('auto_publish', true) }}>Review first — I preview &amp; approve each video</option>
         </select>
         <p class="hint">Review mode parks each rendered video in the Review queue with an in-browser
-          player — nothing reaches the channel until you approve it.
+          player — nothing reaches the channel until you approve it. Approving is a green light, not
+          a “post now”: with posting slots set below, an approved episode waits for its slot.
           {% if first_campaign %}<b>Your first campaign starts in Review mode</b> so you see what the
           factory makes before anything is published. Switch to auto-publish whenever you're happy —
           on this form, or for all future campaigns in <a href="/settings">Settings</a>.{% endif %}</p>
@@ -316,7 +317,8 @@
       </div>
       <div class="form-row"><label>Posting time slots (comma-separated HH:MM) — exactly one pre-rendered video publishes per slot</label>
         <input name="posting_slots" placeholder="21:00" value="{{ cfg.get('posting_slots', [])|join(', ') }}">
-        <p class="hint">Empty = publish immediately after each render (continuous mode).</p></div>
+        <p class="hint">Empty = publish as soon as each episode is ready (right after render, or right
+          after your approval in Review mode). These slots apply in both publishing modes.</p></div>
       <div class="form-row"><label>Publish days (all unchecked = every day)</label>
         <div class="check-grid">
           {% for d, label in [('mon','Mon'), ('tue','Tue'), ('wed','Wed'), ('thu','Thu'), ('fri','Fri'), ('sat','Sat'), ('sun','Sun')] %}
@@ -567,14 +569,16 @@
     const mm = g("music_mode");
     parts.push(mm === "auto" ? "auto music" : (mm === "file" ? "your music" : "no music"));
     const slots = g("posting_slots");
+    const review = g("publish_mode") === "review";
     if (slots) {
       const days = Array.prototype.filter.call(form.querySelectorAll('[name="posting_days"]'), (c) => c.checked).map((c) => c.value);
       parts.push("posts " + slots + (days.length ? " on " + days.join("/") : " daily"));
     } else {
-      parts.push("publishes continuously");
+      // No slots means the gate IS the clock: it goes out the moment it becomes publishable.
+      parts.push(review ? "publishes on approval" : "publishes continuously");
     }
     if (g("voice_delivery") === "soft") parts.push("🌙 soft, confiding read");
-    parts.push(g("publish_mode") === "review" ? "review first" : "auto-publish");
+    parts.push(review ? "review first" : "auto-publish");
     idText.textContent = parts.filter(Boolean).join(" · ");
   }
   updateIdentity();

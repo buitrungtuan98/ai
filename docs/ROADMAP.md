@@ -1838,6 +1838,46 @@ something" was never followed by "…and they did" (ADR-089).
 - Verified: 713 tests pass, 13 skipped (23 new in `tests/test_r23_gate_recovery.py`, 3 reshaped to
   the new copy/contract), ruff clean, docs guard green.
 
+## R24 — approving a review render is a gate, not a publish trigger `DONE`
+
+Reported from production: a campaign set to **Review first** with a **21:00** posting slot published
+the moment its Approve button was clicked. Root cause was one boolean answering two questions
+(ADR-090) — `auto_publish` carried both "does a human approve?" and "who owns the timing?", so
+choosing review silently deleted the operator's own schedule and left the click as the only thing
+that could publish. The follow-up question shaped the fix as much as the report did: campaigns post
+on **days**, not only times, so a batch of approvals must spread across those days rather than pile
+up.
+
+- **One definition of who owns the clock.** `scheduler.slot_scheduled(cfg)` = "this campaign has
+  posting slots", full stop, and `scheduler.upcoming_slots` is the one projection of when it next
+  posts. The publish path, the reconciler, the render path, the calendar, the publish list and the
+  approve path all read them, so the time an operator is promised is the time the scheduler uses.
+- **Approve schedules; it no longer uploads.** `apply_approve` releases the buffer row to `ready`
+  and stops there when slots exist — the slot scheduler publishes it, on a posting day, one episode
+  per slot. `approved_publish_time` answers "and when is that", counting the episodes already in the
+  queue so five approvals report five different days instead of five copies of "next". A campaign
+  with **no** slots is unchanged: approval is the release, because there is no clock to wait for.
+- **The pairing that makes it hold.** A slot-scheduled approval no longer writes
+  `publish_requested_at`; without that, the hourly "lost publish job" repair would re-issue every
+  approved episode within the hour and publish it early anyway. `catch_up_due` keeps its
+  `auto_publish` gate deliberately — it exists to rescue a slot the *machine* missed, and in review
+  mode the miss is the human's, so firing there would restore the reported bug. Compilations keep
+  publishing on approval (ADR-085 puts them outside the slot schedule; their sentinel episode
+  numbers sort last, so queueing one would strand it and eat a regular episode's slot).
+- **It reaches auto campaigns too.** A QC-parked episode on an auto-publish slotted campaign used to
+  publish the moment it was approved, skipping its own slot; it now waits for it, which is what
+  ADR-011 always said. The autopilot's audit line stops claiming a publish that has not happened.
+- **The schedule is visible again.** Review-first campaigns were dropped from the calendar grid, the
+  publish list, the next-slot chip and the empty-buffer alert, so an operator could configure 21:00
+  and find no page that agreed it existed. They now appear everywhere, unapproved renders draw as
+  `pending` cells on the slots they would take, and campaign cards show the gate **and** the
+  schedule rather than only "Review-first".
+- **The buttons say what they do.** "Approve & publish" becomes "Approve — publish at the next slot"
+  where a slot exists, the confirmation names the date and time, and the campaign form no longer
+  implies posting slots are an auto-publish-only feature.
+- Verified: 729 tests pass, 13 skipped (15 new in `tests/test_approve_schedule.py`, 2 reshaped to the
+  new contract), ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

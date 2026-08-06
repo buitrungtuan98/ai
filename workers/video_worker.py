@@ -383,8 +383,14 @@ _WORKING_TASK_STATUSES = (TaskStatus.PENDING_QUEUE, TaskStatus.AI_GENERATION,
 
 
 def apply_approve(db, item) -> None:
-    """Approve a review render: it leaves the review queue immediately and its publish job is queued.
+    """Approve a review render: it leaves the review queue immediately and joins the publish path.
     DRY: the /assets approve route and `core.autopilot`'s reviewer both go through here.
+
+    Approval is a GATE, not a publish trigger (ADR-090). Where the campaign has posting slots, this
+    hands the episode to the slot scheduler — it goes out at the campaign's next slot, on one of its
+    posting days, and a batch of approvals spreads one-per-slot instead of landing all at once.
+    Only a campaign with NO slots publishes on the spot, because there is no clock to wait for.
+    Returns nothing; `approved_publish_time` answers "and when will that be".
 
     Both state changes matter (ADR-064). The buffer row moves `awaiting_review` → `ready`, so the
     review queue, its counters and the Review page all drop it the moment it is approved — leaving it
@@ -403,13 +409,19 @@ def apply_approve(db, item) -> None:
     if task is not None and task.status in _WORKING_TASK_STATUSES:
         raise ReviewConflict("A render or publish for this episode is already in flight — "
                              "let it finish first.")
+    campaign = db.get(Campaign, item.campaign_id)
+    when = approved_publish_time(db, campaign, item)
+    slotted = when is not None
     now = datetime.utcnow()
     item.status = BufferStatus.ready
     item.ready_at = now  # the expiry sweep ages a reviewed item from its approval, not its render
-    # Durable publish intent (R22): the enqueue below can be lost (crash/redeploy between commit and
-    # enqueue, Redis flush) — this marker lets the hourly reconciler re-issue the job instead of the
-    # approved episode silently aging out in SCHEDULED.
-    item.metadata_json = {**(item.metadata_json or {}), "publish_requested_at": now.isoformat()}
+    if not slotted:
+        # Durable publish intent (R22): the enqueue below can be lost (crash/redeploy between commit
+        # and enqueue, Redis flush) — this marker lets the hourly reconciler re-issue the job instead
+        # of the approved episode silently aging out in SCHEDULED. A slot-scheduled approval must NOT
+        # carry it: there is no job to lose, and the reconciler reads the marker as "re-issue now",
+        # which would publish the episode within the hour and undo its schedule (ADR-090).
+        item.metadata_json = {**(item.metadata_json or {}), "publish_requested_at": now.isoformat()}
     if task is not None:
         if task.status == TaskStatus.FAILED:
             # This approve IS the retry of the failed step — count it, which also arms the
@@ -417,9 +429,46 @@ def apply_approve(db, item) -> None:
             task.retry_count += 1
         task.status = TaskStatus.SCHEDULED  # the publish job drives it to PUBLISHING → COMPLETED
         task.error_message = None
-        _append_journey(task, "Review", "approved — publish queued")
+        _append_journey(task, "Review", "approved — publishes "
+                        + (when.strftime("%a %d/%m %H:%M") if slotted else "now — publish queued"))
     db.commit()
-    enqueue_publish(item.id)
+    if not slotted:
+        enqueue_publish(item.id)
+
+
+def approved_publish_time(db, campaign, item):
+    """When an episode approved right now will actually publish — its own slot, in the campaign's
+    timezone — or None if approving it publishes it straight away.
+
+    It is the Nth free slot, where N counts the episodes ALREADY waiting in this campaign's slot
+    queue: the same "lowest episode first, one per slot" rule the scheduler publishes by and the
+    calendar draws (ADR-090). Approving five episodes in one sitting therefore reports five
+    different times rather than promising all five the next slot.
+
+    None — publish on approval — in three cases, and `apply_approve` keys off exactly this:
+      * the campaign has no posting slots, so there is no clock to wait for;
+      * the item is a COMPILATION, which is extra content deliberately outside the slot schedule
+        (ADR-085) — parking one in the queue would both delay it indefinitely (sentinel episode
+        numbers sort last) and eat a slot the next regular episode was waiting for;
+      * no slot could be computed at all (unparseable `posting_slots`). Releasing beats stranding an
+        approved episode forever on a schedule that cannot produce a time.
+    """
+    from core.compilation import COMPILATION_EPISODE_BASE
+    from workers.scheduler import upcoming_slots
+
+    if campaign is None or (item.episode_number or 0) >= COMPILATION_EPISODE_BASE:
+        return None
+    ahead = db.scalar(
+        select(func.count()).select_from(BufferPoolItem)
+        .where(BufferPoolItem.campaign_id == campaign.id,
+               BufferPoolItem.status == BufferStatus.ready,
+               # An episode moved to its own time has left the slot queue (ADR-059), so it neither
+               # occupies a slot nor pushes this one back. Compilations were never in it.
+               BufferPoolItem.publish_at.is_(None),
+               BufferPoolItem.episode_number < COMPILATION_EPISODE_BASE,
+               BufferPoolItem.id != item.id)) or 0
+    slots = upcoming_slots(campaign, ahead + 1)
+    return slots[ahead] if len(slots) > ahead else None
 
 
 def _judge_script_safe(user, channel, cfg, fp: dict, api_key: str, model: str):
@@ -988,15 +1037,18 @@ def render_task(task_id: int) -> None:
     # words. Declared out here so the failure path can persist what THIS attempt decided (ADR-089) —
     # inside the try it was unreachable from `except` when the crash came early.
     journey: list[dict] = []
+    from workers.scheduler import slot_scheduled   # local: scheduler imports this module
     try:
         campaign = db.get(Campaign, task.campaign_id)
         channel = db.get(Channel, campaign.channel_id)
         user = db.get(User, task.user_id)
         cfg = campaign.config_json or {}
         auto_publish = bool(cfg.get("auto_publish", True))
-        # With posting slots configured, auto mode renders ahead into the buffer and the scheduler
-        # publishes exactly one episode per slot (ADR-011). Without slots: publish right after render.
-        slot_scheduled = auto_publish and bool(cfg.get("posting_slots"))
+        # With posting slots configured the campaign renders ahead into the buffer and the scheduler
+        # publishes exactly one episode per slot (ADR-011); with none, publish right after render.
+        # `auto_publish` is deliberately NOT part of this question (ADR-090) — it decides whether a
+        # human approves first, and a review render takes the `parked_for_review` branch regardless.
+        slot_timed = slot_scheduled(cfg)
         # Auto-QC gate (ADR-013): vision-vet footage during render + judge the finished master.
         # Default ON; every check fails open, so a vision-API outage never blocks an episode.
         auto_qc = cfg.get("auto_qc", "on") != "off"
@@ -1370,14 +1422,14 @@ def render_task(task_id: int) -> None:
             task.finished_at = now
             task.status = TaskStatus.AWAITING_REVIEW
             task.progress_pct = 90
-        elif slot_scheduled:
+        elif slot_timed:
             # Pre-rendered and parked; the scheduler publishes it at the next posting slot.
             task.finished_at = now
             task.status = TaskStatus.SCHEDULED
             task.progress_pct = 90
         db.commit()
         db.refresh(buf)
-        if parked_for_review or slot_scheduled:
+        if parked_for_review or slot_timed:
             set_progress(task.id, 90)
 
         if qc_failed:
@@ -1391,7 +1443,7 @@ def render_task(task_id: int) -> None:
         elif not auto_publish:
             _notify(user, f"🎬 Episode {task.episode_number} of '{campaign.topic_name}' is rendered "
                           "and waiting for your review in the Asset Pool.")
-        elif not slot_scheduled:
+        elif not slot_timed:
             try:
                 _publish_buffer(db, task, buf, campaign, channel, user)
             except ChannelExpired as exc:

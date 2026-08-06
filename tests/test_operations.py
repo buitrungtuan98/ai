@@ -548,11 +548,15 @@ def test_an_override_reaches_a_campaign_with_no_slots_at_all(session, user, chan
     assert sch.publish_due_campaign(session, camp, enqueue=queued.append) == due.id
 
 
-def test_a_review_first_campaign_never_auto_publishes_an_override(session, user, channel):
+def test_a_review_first_override_fires_once_approved_and_never_before(session, user, channel):
+    """ADR-090: on a review-first campaign the operator's own publish time is honoured — but only
+    for an episode they have approved. `ready` is what approval produces, so the status IS the gate;
+    the old `auto_publish` check here meant a time an operator deliberately set was silently
+    dropped."""
     from datetime import datetime, timedelta
 
     from database.models import Campaign
-    from database.types import CampaignStatus
+    from database.types import BufferStatus, CampaignStatus
     from workers import scheduler as sch
 
     camp = Campaign(user_id=user.id, channel_id=channel.id, topic_name="Manual", total_episodes=9,
@@ -560,11 +564,18 @@ def test_a_review_first_campaign_never_auto_publishes_an_override(session, user,
     session.add(camp)
     session.commit()
     session.refresh(camp)
-    _ready(session, camp, channel, 1, publish_at=datetime.utcnow() - timedelta(minutes=1))
+    parked = _ready(session, camp, channel, 1, publish_at=datetime.utcnow() - timedelta(minutes=1))
+    parked.status = BufferStatus.awaiting_review     # its time passed, but nobody approved it
+    session.commit()
 
     queued = []
     assert sch.publish_due_campaign(session, camp, enqueue=queued.append) is None
     assert queued == []
+
+    parked.status = BufferStatus.ready               # …now approved
+    session.commit()
+    assert sch.publish_due_campaign(session, camp, enqueue=queued.append) == parked.id
+    assert queued == [parked.id]
 
 
 def test_catchup_skips_a_rescheduled_episode(session, user, channel):

@@ -12,7 +12,12 @@
 {% call ui.page_head('Review', 'Pre-rendered episodes waiting for approval — watch each one before it publishes.') %}{% endcall %}
 {{ ui.stage_tabs(stage_counts, 'review', scope_channel.id if scope_channel else None) }}
 
-{% if flash == 'publish' %}
+{% if flash == 'scheduled' %}
+{% call ui.banner('success') %}✓ <b>Approved{% if flash_reason %} — publishes {{ flash_reason }}{% endif %}.</b>
+  It joins the campaign's posting slots on its own posting days, one episode per slot, so approving
+  several in a row spreads them out instead of posting them all now. See them on the
+  <a href="/calendar?view=list">calendar</a>, or use <b>Publish now</b> on the card to skip the wait.{% endcall %}
+{% elif flash == 'publish' %}
 {% call ui.banner('success') %}⏳ <b>Publish queued.</b> The episode uploads as soon as the worker is free (one job at a
   time — a render in progress runs first). This card flips to <i>Published</i> with the video link
   once it's live.{% endcall %}
@@ -106,8 +111,12 @@
       </div>
     </details>
     {% endif %}
+    {# The button must name what it actually does. With posting slots, approving SCHEDULES — it no
+       longer uploads on the spot (ADR-090) — and calling that "Approve & publish" is what made the
+       operator's own 21:00 slot feel ignored. #}
+    {% set _slots = (camp.config_json or {}).get('posting_slots') if camp else None %}
     <div class="row-actions mt">
-      <form method="post" action="/assets/{{ i.id }}/approve"><button class="btn sm" type="submit">✓ Approve &amp; publish</button></form>
+      <form method="post" action="/assets/{{ i.id }}/approve"><button class="btn sm" type="submit">{{ '✓ Approve — publish at the next slot' if _slots else '✓ Approve &amp; publish' }}</button></form>
       {% if qc and qc.get('unavailable') %}
       <form method="post" action="/assets/{{ i.id }}/run-qc">
         <button class="btn ghost sm" type="submit">↻ Run QC now</button></form>
@@ -116,6 +125,12 @@
             data-confirm="Delete this render of {{ camp.topic_name if camp else 'C' ~ i.campaign_id }} · Ep {{ i.episode_number }} and render it again from scratch? The current video file is removed." data-confirm-verb="Discard &amp; re-render">
         <button class="btn ghost sm" type="submit">🗑 Re-render</button></form>
     </div>
+    {% if _slots %}
+    <p class="hint">Approving queues it for {{ _slots|join(', ') }}{% if (camp.config_json or {}).get('posting_days') %}
+      on {{ (camp.config_json or {}).get('posting_days')|map('capitalize')|join('/') }}{% endif %} —
+      one episode per slot, so approving several spreads them out.
+      <a href="/calendar?view=list">See the exact times →</a></p>
+    {% endif %}
     <form method="post" action="/assets/{{ i.id }}/reject" class="mt"
           data-confirm="Reject {{ camp.topic_name if camp else 'C' ~ i.campaign_id }} · Ep {{ i.episode_number }}? The video file is deleted and your reason becomes a permanent avoid-note for this campaign." data-confirm-verb="Reject">
       <div class="field-inline">

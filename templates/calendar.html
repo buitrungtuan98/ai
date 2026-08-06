@@ -21,6 +21,7 @@
   'resched_cleared': ('info', 'Custom time removed — this episode rejoins the campaign’s normal posting slots.'),
   'resched_bad': ('danger', 'That date and time could not be read — nothing was changed.'),
   'publish': ('success', 'Publish queued — it uploads as soon as the worker is free.'),
+  'scheduled': ('success', 'Approved — it now holds a posting slot on this calendar instead of publishing straight away.'),
   'missing': ('danger', 'That episode’s video file is no longer on disk — re-render it before publishing.'),
 } %}
 {% if flash in _flash %}
@@ -62,7 +63,11 @@
             {% set rw = 'none' if row.ready == 0 else ('low' if row.ready <= 1 else 'ok') %}
             <span class="runway {{ rw }}"><span class="dot2 {{ 'bad' if rw == 'none' else 'ok' }}"></span>{{ row.ready }} ready</span>
             {% if row.own_time %}<br><span class="hint">incl. {{ row.own_time }} at your own time</span>{% endif %}
-            {% if row.ready == 0 %}<br><a class="hint text-bad" href="/episodes?status=queued">⚠ buffer empty →</a>{% endif %}
+            {% if row.pending %}<br><a class="hint" href="/assets">👁 {{ row.pending }} awaiting your ✓ →</a>{% endif %}
+            {# "Buffer empty" is a rendering problem and sends the operator to the render queue. With
+               videos already waiting on approval the buffer is not empty and that link is the wrong
+               fix, so the line above stands in its place (ADR-090). #}
+            {% if row.ready == 0 and not row.pending %}<br><a class="hint text-bad" href="/episodes?status=queued">⚠ buffer empty →</a>{% endif %}
             {% if row.slot_move %}<br><a class="hint" href="/autopilot" title="The council proposes moving this posting slot — review it on the Autopilot page">🕑 proposed: {{ row.slot_move.frm }} → <b>{{ row.slot_move.to }}</b></a>{% endif %}
           </td>
           {% for day in row.cells %}
@@ -71,6 +76,7 @@
             {% for cell in day.slots %}
             <div class="slot {{ cell.state }}">
               {% if cell.state == 'filled' %}● {{ cell.t }} <span class="cal-ep">Ep {{ cell.ep }}</span>
+              {% elif cell.state == 'pending' %}<a href="/assets" title="Ep {{ cell.ep }} is rendered and takes this slot once you approve it">◐ {{ cell.t }} <span class="cal-ep">Ep {{ cell.ep }} ✓?</span></a>
               {% elif cell.state == 'own' %}✏ {{ cell.t }} <span class="cal-ep">Ep {{ cell.ep }}</span>
               {% elif cell.state == 'missed' %}○ {{ cell.t }}
               {% else %}{{ cell.t }}{% endif %}
@@ -86,6 +92,7 @@
   </div>
   <p class="hint mt-sm">
     <b class="slot-key filled">●</b> will publish (the next buffered episode) ·
+    <b class="slot-key pending">◐</b> rendered, <b>takes this slot once you approve it</b> ·
     <b class="slot-key own">✏</b> a time you set — it ignores the slots ·
     <b class="slot-key missed">○</b> slot with an empty buffer — <b>will be missed</b> ·
     <b>—</b> weekday gate. The current day's column is highlighted; past slots are dimmed. Projections assume
@@ -99,8 +106,10 @@
 <div class="card mt">
   <h3>Not slot-scheduled</h3>
   {% for row in unslotted %}
-  <p class="meta"><a href="/campaigns/{{ row.campaign.id }}">{{ row.campaign.topic_name }}</a> — {{ 'Review mode: episodes wait in the Review queue for your approval'
-    if row.mode == 'review' else 'Continuous mode: publishes immediately after each render' }}.</p>
+  <p class="meta"><a href="/campaigns/{{ row.campaign.id }}">{{ row.campaign.topic_name }}</a> —
+    {% if row.gated %}Review mode with no posting slots: each episode publishes as soon as you approve it.
+      <a href="/campaigns/{{ row.campaign.id }}/edit">Add posting slots</a> to have approvals go out at a set time instead.
+    {% else %}Continuous mode: publishes immediately after each render.{% endif %}</p>
   {% endfor %}
 </div>
 {% endif %}
@@ -128,7 +137,9 @@
           <td data-label="Channel">{{ r.channel.channel_name if r.channel else '—' }}
             {% if r.channel %}<div class="meta"><span class="platform {{ r.channel.platform.value }}">{{ r.channel.platform.value }}</span></div>{% endif %}</td>
           <td data-label="Publishes">
-            {% if r.when_label %}<b>{{ r.when_label }}</b><div class="meta">{{ r.tz }}</div>
+            {% if r.when_label and r.state == 'review' %}<b>{{ r.when_label }}</b>
+              <div class="meta">if you approve it first · {{ r.tz }}</div>
+            {% elif r.when_label %}<b>{{ r.when_label }}</b><div class="meta">{{ r.tz }}</div>
             {% elif r.state == 'review' %}<span class="meta">After you approve it</span>
             {% else %}<span class="meta">At the next tick</span>{% endif %}</td>
           <td data-label="State">{{ ui.pill(_pstate[r.state][0], _pstate[r.state][1]) }}</td>

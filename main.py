@@ -437,8 +437,12 @@ def _buffer_counts(db, user_id: int) -> dict:
 
 
 def _campaigns_with_empty_buffer(db, user_id: int) -> int:
-    """Active auto-publish campaigns with posting slots and NOTHING rendered — each one is a slot
-    that will be missed. The dashboard leads with this instead of an average that averages it away."""
+    """Active slotted campaigns with nothing READY to go out — each one is a slot that will be
+    missed. The dashboard leads with this instead of an average that averages it away.
+
+    Review-first campaigns count too (ADR-090): their slots are real, so a slot with nothing approved
+    behind it is just as missed as one with nothing rendered. An episode sitting in the review queue
+    does not cover the slot — only approving it does."""
     ready_by_camp = dict(db.execute(
         select(BufferPoolItem.campaign_id, func.count())
         .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
@@ -448,8 +452,7 @@ def _campaigns_with_empty_buffer(db, user_id: int) -> int:
     for c in db.scalars(select(Campaign).where(
             Campaign.user_id == user_id, Campaign.status == CampaignStatus.active)).all():
         cfg = c.config_json or {}
-        if cfg.get("auto_publish", True) and (cfg.get("posting_slots") or []) \
-                and not ready_by_camp.get(c.id):
+        if (cfg.get("posting_slots") or []) and not ready_by_camp.get(c.id):
             n += 1
     return n
 
@@ -549,44 +552,21 @@ def _to_campaign_tz(naive_utc, campaign):
 
 
 def _upcoming_slots(campaign, count: int = 1, now=None) -> list:
-    """The next `count` posting-slot datetimes for an auto-publish campaign, in its own timezone
-    (weekday gate applied). Empty for continuous / review-first / slot-less campaigns.
+    """The next `count` posting-slot datetimes for a campaign, in its own timezone (weekday gate
+    applied). Empty only for continuous / slot-less campaigns.
 
-    ONE definition of "when will this campaign post next", so the dashboard's next-slot chip and the
-    Operations publish queue's per-episode projection can never disagree."""
-    from datetime import timedelta
+    The rule itself lives in `workers.scheduler.upcoming_slots` (ADR-090) so the worker's approve
+    path promises the same time the scheduler will publish at. It used to return [] for review-first
+    campaigns, which is how an operator's posting slots could be accepted by the form and then
+    vanish from the calendar, the next-slot chip and the publish queue all at once."""
+    from workers.scheduler import upcoming_slots
 
-    from workers.scheduler import WEEKDAY_KEYS, local_now
-
-    cfg = campaign.config_json or {}
-    if not cfg.get("auto_publish", True):
-        return []
-    slots = sorted(cfg.get("posting_slots") or [])
-    if not slots:
-        return []
-    allowed = cfg.get("posting_days") or []
-    now_local = now or local_now(cfg.get("timezone"))
-    out = []
-    for dd in range(0, 60):  # a horizon long enough for any weekday-gated pattern
-        day = now_local + timedelta(days=dd)
-        if allowed and WEEKDAY_KEYS[day.weekday()] not in allowed:
-            continue
-        for s in slots:
-            try:
-                hh, mm = (int(x) for x in s.split(":"))
-            except ValueError:
-                continue
-            cand = day.replace(hour=hh, minute=mm, second=0, microsecond=0)
-            if cand > now_local:
-                out.append(cand)
-                if len(out) >= count:
-                    return out
-    return out
+    return upcoming_slots(campaign, count, now)
 
 
 def _next_slot(campaign) -> dict | None:
-    """The soonest upcoming posting slot for ONE active auto-publish campaign, in its own timezone.
-    Returns {in_hours, slot, when} or None (continuous / review / no slots / no upcoming day)."""
+    """The soonest upcoming posting slot for ONE active campaign, in its own timezone.
+    Returns {in_hours, slot, when} or None (continuous / no slots / no upcoming day)."""
     from workers.scheduler import local_now
 
     upcoming = _upcoming_slots(campaign, 1)
@@ -2106,7 +2086,8 @@ def assets_page(request: Request, user: CurrentUser, db: DbDep,
          "page": page, "pages": pages, "scope_qs": scope_qs,
          "stage_counts": _episode_stage_counts(db, user, campaign=campaign, channel=channel),
          # Post-action feedback (whitelisted — never echo arbitrary input back into the page).
-         "flash": flash if flash in ("publish", "rerender", "rejected", "missing", "qc_queued") else "",
+         "flash": flash if flash in ("publish", "scheduled", "rerender", "rejected", "missing",
+                                     "qc_queued") else "",
          "flash_reason": flash_reason[:200]},
     )
 
@@ -2220,12 +2201,24 @@ def approve_asset(db: DbDep, item=Depends(get_owned_buffer_item), return_to: str
         raise HTTPException(400, "Only items awaiting review can be approved")
     if not (item.video_path and os.path.exists(item.video_path)):
         return _action_redirect(return_to, "missing", "/assets?flash=missing")
+    campaign = db.get(Campaign, item.campaign_id)
+    # Read BEFORE approving: afterwards this item is itself in the ready queue and would count
+    # itself, reporting the slot after the one it actually takes.
+    when = video_worker.approved_publish_time(db, campaign, item)
     try:
         video_worker.apply_approve(db, item)
     except video_worker.ReviewConflict as exc:
         db.rollback()
         raise HTTPException(409, str(exc)) from exc
-    return _action_redirect(return_to, "publish", "/assets")
+    # Approving a slotted campaign's episode SCHEDULES it; saying "publish queued" there would be the
+    # same lie the old behaviour told, only backwards (ADR-090). The time travels with the flash so
+    # the confirmation names it — the operator should never have to go and look it up.
+    if not (campaign.config_json or {}).get("posting_slots"):
+        return _action_redirect(return_to, "publish", "/assets?flash=publish")
+    at = when.strftime("%a %d/%m %H:%M") if when else ""
+    return _action_redirect(return_to, "scheduled",
+                            "/assets?flash=scheduled" + (f"&flash_reason={quote(at)}" if at else ""),
+                            flash_reason=at)
 
 
 @app.post("/assets/{item_id}/publish-now")
@@ -2510,12 +2503,13 @@ def episode_view(request: Request, user: CurrentUser, db: DbDep, task_id: int,
     # actually finished and only a later step (status commit, upload) died — the banner must say
     # so instead of promising a Retry button the buffer actions replace.
     render_survived = task.status == TaskStatus.FAILED and previewable
-    # A ready buffer on a slot-driven auto-publish campaign goes out at the next slot NO MATTER
-    # what the failed banner implies — the one thing the operator must know before walking away.
+    # A ready buffer on a slot-driven campaign goes out at the next slot NO MATTER what the failed
+    # banner implies — the one thing the operator must know before walking away. Review-first
+    # campaigns included: `ready` there means already approved, so it is just as much on its way.
     cfg = (campaign.config_json or {}) if campaign else {}
-    will_auto_publish = bool(
+    will_publish_at_slot = bool(
         buffer is not None and buffer.status == BufferStatus.ready and previewable
-        and cfg.get("auto_publish", True) and cfg.get("posting_slots"))
+        and cfg.get("posting_slots"))
     # Can a retry of this exact failure plausibly work? (ADR-089) The "no re-render needed, just
     # Publish now" banner is right about the video and was silent about the cause: a Page token
     # without pages_manage_posts fails identically at every attempt, so "Retry" was advice that
@@ -2540,12 +2534,12 @@ def episode_view(request: Request, user: CurrentUser, db: DbDep, task_id: int,
          "stages": _EPISODE_STAGES, "stage_index": stage_index,
          "retention_curve": curve, "retention_drops": retention_drops,
          "failed": task.status == TaskStatus.FAILED, "diagnosis": diagnosis,
-         "render_survived": render_survived, "will_auto_publish": will_auto_publish,
+         "render_survived": render_survived, "will_publish_at_slot": will_publish_at_slot,
          "retry_helps": retry_helps, "brief_edited": brief_edited,
          "status_to_stage": _STATUS_TO_STAGE,
          "cancelled": task.status == TaskStatus.CANCELLED,
-         "flash": flash if flash in ("publish", "rerender", "rejected", "missing", "qc_queued",
-                                     "review", "published") else "",
+         "flash": flash if flash in ("publish", "scheduled", "rerender", "rejected", "missing",
+                                     "qc_queued", "review", "published") else "",
          "flash_reason": flash_reason[:200]},
     )
 
@@ -2659,7 +2653,8 @@ def reset_learning(db: DbDep, campaign=Depends(get_owned_campaign)):
 
 # ── Content calendar ─────────────────────────────────────────────────────────
 def _calendar_row_cells(campaign: Campaign, ready_eps: list[int], overrides=None,
-                        week: int = 0, days: int = 7) -> list[dict] | None:
+                        week: int = 0, days: int = 7,
+                        review_eps: list[int] | None = None) -> list[dict] | None:
     """Week-planner cells: per day, per slot, what will HAPPEN — not just the time.
 
     The slot→episode assignment comes from the SHARED `_upcoming_slots` (ADR-067). This function used
@@ -2670,7 +2665,11 @@ def _calendar_row_cells(campaign: Campaign, ready_eps: list[int], overrides=None
     `overrides` are (local datetime, episode) pairs for episodes an operator moved to their own time.
     They no longer compete for a slot, so they are drawn in their own day cell marked `own` instead of
     silently vanishing from the only page whose job is "what publishes when".
-    Returns per-day {gate, slots:[{t,state,ep}]} or None (non-slotted).
+
+    `review_eps` are rendered episodes still awaiting approval. They queue BEHIND the approved ones
+    and draw as `pending` (ADR-090), because "Wed 21:00 — Ep 7, needs your ✓" is the honest cell: the
+    slot is neither safely filled nor doomed to be missed, and which it becomes is the operator's
+    call. Returns per-day {gate, slots:[{t,state,ep}]} or None (non-slotted).
     """
     from datetime import timedelta
 
@@ -2678,11 +2677,14 @@ def _calendar_row_cells(campaign: Campaign, ready_eps: list[int], overrides=None
 
     cfg = campaign.config_json or {}
     slots = sorted(cfg.get("posting_slots") or [])
-    if not slots or not cfg.get("auto_publish", True):
-        return None
+    if not slots:
+        return None   # no schedule to draw; review-first campaigns DO have one (ADR-090)
     # ONE definition of "which episode lands in which slot": the next N free slots, lowest-numbered
-    # episode first — exactly what the scheduler does and what the publish list shows.
-    assigned = dict(zip(_upcoming_slots(campaign, len(ready_eps)), ready_eps))
+    # episode first — exactly what the scheduler does and what the publish list shows. Approved
+    # episodes hold the front of that queue; unapproved ones take the slots after them.
+    queue = ([("filled", ep) for ep in ready_eps]
+             + [("pending", ep) for ep in (review_eps or [])])
+    assigned = dict(zip(_upcoming_slots(campaign, len(queue)), queue))
     own_by_slot: dict = {}
     for when, ep in (overrides or []):
         own_by_slot.setdefault(when.replace(second=0, microsecond=0), ep)
@@ -2711,7 +2713,8 @@ def _calendar_row_cells(campaign: Campaign, ready_eps: list[int], overrides=None
             if slot_dt < now_l:
                 cells.append({"t": s, "state": "past", "ep": None})
             elif slot_dt in assigned:
-                cells.append({"t": s, "state": "filled", "ep": assigned[slot_dt]})
+                state, ep = assigned[slot_dt]
+                cells.append({"t": s, "state": state, "ep": ep})
             else:
                 cells.append({"t": s, "state": "missed", "ep": None})
         cells.sort(key=lambda c: c["t"])
@@ -2726,6 +2729,7 @@ def calendar_page(request: Request, user: CurrentUser, db: DbDep, week: int = 0,
     actionable list (`?view=list`, which absorbed the Operations publish-queue tab)."""
     from datetime import timedelta
 
+    from core.compilation import COMPILATION_EPISODE_BASE
     from workers.scheduler import local_now
 
     week = max(-8, min(week, 12))  # bound the navigation to a sane range
@@ -2745,6 +2749,22 @@ def calendar_page(request: Request, user: CurrentUser, db: DbDep, week: int = 0,
                    BufferPoolItem.publish_at.is_(None))
             .order_by(BufferPoolItem.episode_number)).all():
         ready_by_camp.setdefault(cid, []).append(epn)
+    # Rendered but not yet approved. They are drawn on the grid behind the approved ones (ADR-090):
+    # a review-first campaign's week used to render as a row of empty "will be missed" circles even
+    # when every one of those slots had a finished video sitting one click away.
+    review_by_camp: dict[int, list[int]] = {}
+    for cid, epn in db.execute(
+            select(BufferPoolItem.campaign_id, BufferPoolItem.episode_number)
+            .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
+            .where(Campaign.user_id == user.id,
+                   BufferPoolItem.status == BufferStatus.awaiting_review,
+                   # A compilation publishes on approval, outside the slot schedule (ADR-085), so it
+                   # must not be drawn claiming one — and it ALWAYS parks for review, which without
+                   # this filter would put a pending chip on a slot no compilation will ever take.
+                   BufferPoolItem.episode_number < COMPILATION_EPISODE_BASE,
+                   BufferPoolItem.publish_at.is_(None))
+            .order_by(BufferPoolItem.episode_number)).all():
+        review_by_camp.setdefault(cid, []).append(epn)
     # Episodes an operator moved to their own time: they no longer compete for a slot, but they ARE
     # still going out, so the grid draws them and the runway counts them (ADR-067).
     override_by_camp: dict[int, list] = {}
@@ -2771,17 +2791,24 @@ def calendar_page(request: Request, user: CurrentUser, db: DbDep, week: int = 0,
     slotted, unslotted = [], []
     for c in campaigns:
         overrides = override_by_camp.get(c.id, [])
-        cells = _calendar_row_cells(c, ready_by_camp.get(c.id, []), overrides, week=week)
+        ccfg = c.config_json or {}
+        cells = _calendar_row_cells(c, ready_by_camp.get(c.id, []), overrides, week=week,
+                                    review_eps=review_by_camp.get(c.id, []))
         entry = {"campaign": c,
                  "slot_move": slot_moves.get(c.id),
                  # Everything rendered and waiting — slot-bound AND own-time. Counting only the
                  # slot-bound ones made the calendar disagree with the hub after a reschedule.
                  "ready": len(ready_by_camp.get(c.id, [])) + len(overrides),
+                 "pending": len(review_by_camp.get(c.id, [])),
                  "own_time": len(overrides),
                  "channel": chan_by_id.get(c.channel_id),
-                 "fmt": (c.config_json or {}).get("video_format", "short"),
-                 "tz": (c.config_json or {}).get("timezone") or settings.TIMEZONE,
-                 "mode": "review" if not (c.config_json or {}).get("auto_publish", True) else "continuous"}
+                 "fmt": ccfg.get("video_format", "short"),
+                 "tz": ccfg.get("timezone") or settings.TIMEZONE,
+                 # Two independent facts, not one enum (ADR-090): whether a human gates the output,
+                 # and whether a schedule times it. Collapsing them is what hid the schedule of every
+                 # review-first campaign on the page whose whole job is showing schedules.
+                 "gated": not ccfg.get("auto_publish", True),
+                 "mode": "slotted" if ccfg.get("posting_slots") else "continuous"}
         if cells is not None:
             entry["cells"] = cells
             slotted.append(entry)
@@ -3112,8 +3139,12 @@ def _ops_publish_rows(db, user_id: int) -> list[dict]:
 
     Three states an operator must be able to tell apart: `override` (a time they set — ADR-059),
     `slot` (projected onto the campaign's next free slots, lowest episode first, exactly the rule the
-    scheduler follows), and `review` (waiting for approval, so no time exists yet). `missing` flags a
-    row whose file left the disk, because Publish now would fail on it."""
+    scheduler follows), and `review` (waiting for approval). `missing` flags a row whose file left
+    the disk, because Publish now would fail on it.
+
+    A `review` row on a slotted campaign now carries a time too (ADR-090) — the slot it would take if
+    approved now, queued BEHIND everything already approved. That is what makes a batch of pending
+    approvals legible: five waiting episodes read as five different days, not five copies of "next"."""
     items = db.scalars(
         select(BufferPoolItem)
         .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
@@ -3126,30 +3157,31 @@ def _ops_publish_rows(db, user_id: int) -> list[dict]:
         select(Campaign).where(Campaign.user_id == user_id)).all()}
     channels = {c.id: c for c in db.scalars(
         select(Channel).where(Channel.user_id == user_id)).all()}
-    # Project slot times per campaign: only un-overridden ready items queue for slots, so the Nth
-    # such episode lands in the Nth upcoming slot.
-    slot_queue: dict[int, list] = {}
+    # Project slot times per campaign. Approved (`ready`) episodes hold the front of the queue — the
+    # scheduler publishes the lowest-numbered ready one at each slot — and still-unapproved episodes
+    # queue behind them in episode order, which is where they will land if approved in time.
+    from core.compilation import COMPILATION_EPISODE_BASE
+
+    slot_at: dict[int, object] = {}          # buffer item id → its projected slot datetime
     for cid, campaign in campaigns.items():
-        waiting = [i for i in items if i.campaign_id == cid
-                   and i.status == BufferStatus.ready and i.publish_at is None]
-        if waiting:
-            slot_queue[cid] = _upcoming_slots(campaign, len(waiting))
-    slot_cursor: dict[int, int] = {}
+        # Compilations are extra content outside the slot schedule (ADR-085) — they publish on
+        # approval and must not be drawn taking a slot the next regular episode is waiting for.
+        mine = [i for i in items if i.campaign_id == cid and i.publish_at is None
+                and i.episode_number < COMPILATION_EPISODE_BASE]
+        queue = ([i for i in mine if i.status == BufferStatus.ready]
+                 + [i for i in mine if i.status == BufferStatus.awaiting_review])
+        for item, when in zip(queue, _upcoming_slots(campaign, len(queue))):
+            slot_at[item.id] = when
     rows = []
     for item in items:
         campaign = campaigns.get(item.campaign_id)
-        when, state = None, "review"
+        when, state = slot_at.get(item.id), "review"
         if item.status == BufferStatus.awaiting_review:
-            state = "review"
+            state = "review"      # `when` is conditional on approval — the template says so
         elif item.publish_at is not None:
             # Stored naive UTC → the campaign's own clock, so every row below is comparable.
             when, state = _to_campaign_tz(item.publish_at, campaign), "override"
         else:
-            taken = slot_cursor.get(item.campaign_id, 0)
-            upcoming = slot_queue.get(item.campaign_id) or []
-            if taken < len(upcoming):
-                when = upcoming[taken]
-            slot_cursor[item.campaign_id] = taken + 1
             # No slots configured → continuous mode already published at render time, so anything
             # still ready here is simply waiting for the next tick.
             state = "slot" if when is not None else "now"

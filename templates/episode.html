@@ -7,7 +7,9 @@
 {% if channel and campaign %}
 {% endif %}
 
-{% if flash == 'publish' %}
+{% if flash == 'scheduled' %}
+{% call ui.banner('success') %}✓ <b>Approved{% if flash_reason %} — publishes {{ flash_reason }}{% endif %}.</b> It goes out at the campaign's posting slot, not now. <b>Publish now</b> below skips the wait.{% endcall %}
+{% elif flash == 'publish' %}
 {% call ui.banner('success') %}⏳ <b>Publish queued.</b> This episode uploads as soon as the worker is free. It flips to <i>Published</i> with a link once it's live.{% endcall %}
 {% elif flash == 'rerender' %}
 {% call ui.banner() %}⏳ <b>Re-render queued.</b> A fresh render starts as soon as the worker is free.{% endcall %}
@@ -47,7 +49,7 @@
       {% if diagnosis.action %}<a href="{{ diagnosis.href }}">{{ diagnosis.action }} →</a>{% endif %}</p>
     <p class="mt-sm">Uploading again before that is fixed fails the same way — the video keeps waiting, nothing is lost.</p>
     {% else %}
-    {% if buffer.status.value == 'awaiting_review' %}Review it and use <b>Approve &amp; publish</b>; that retries only the publish step.{% else %}Use <b>Publish now</b> to retry only the upload.{% endif %}
+    {% if buffer.status.value == 'awaiting_review' %}Review it and <b>Approve</b>; that retries only the publish step.{% else %}Use <b>Publish now</b> to retry only the upload.{% endif %}
     {% endif %}
     <b>Re-render / Reject</b> below still discard it if the video itself is wrong.
     {% if task.error_message %}
@@ -69,7 +71,7 @@
        about work that was on its way back. #}
     <p class="mt-sm">⚙ <b>You changed this campaign since it failed</b> ({{ brief_edited }}). It is queued for a fresh draft written from the current brief — <b>Retry</b> starts it now instead of waiting for the next tick.</p>
     {% endif %}
-    {% if will_auto_publish %}
+    {% if will_publish_at_slot %}
     <p class="mt-sm">📅 <b>Heads up:</b> this rendered video is still queued for the campaign's next posting slot —
       {% if retry_helps %}it publishes on its own unless you discard it.{% else %}each slot will retry the upload and hit the same refusal until the cause above is fixed; nothing is lost while it waits.{% endif %}</p>
     {% endif %}
@@ -154,10 +156,12 @@
       <p class="hint mt">⏸ This episode was cancelled; the render below still exists.</p>
       {% endif %}
       {% if buffer and buffer.status.value == 'awaiting_review' %}
+      {# With posting slots, approving schedules rather than uploads (ADR-090) — the label says which. #}
+      {% set _slots = (campaign.config_json or {}).get('posting_slots') if campaign else None %}
       <div class="row-actions mt">
         <form method="post" action="/assets/{{ buffer.id }}/approve">
           <input type="hidden" name="return_to" value="/episodes/{{ task.id }}">
-          <button class="btn sm" type="submit">✓ Approve &amp; publish</button></form>
+          <button class="btn sm" type="submit">{{ '✓ Approve — publish at the next slot' if _slots else '✓ Approve &amp; publish' }}</button></form>
         <form method="post" action="/assets/{{ buffer.id }}/rerender"
               data-confirm="Delete this render of Ep {{ task.episode_number }}{% if campaign %} — {{ campaign.topic_name }}{% endif %} and render it again from scratch? The current video file is removed." data-confirm-verb="Discard &amp; re-render">
           <input type="hidden" name="return_to" value="/episodes/{{ task.id }}">
@@ -171,6 +175,10 @@
           <button class="btn danger sm nowrap" type="submit">✕ Reject</button>
         </div>
       </form>
+      {% if _slots %}
+      <p class="hint">Approving hands it to the campaign's posting slots ({{ _slots|join(', ') }}{% if (campaign.config_json or {}).get('posting_days') %}
+        on {{ (campaign.config_json or {}).get('posting_days')|map('capitalize')|join('/') }}{% endif %}) — one episode per slot, not an immediate upload.</p>
+      {% endif %}
       {% elif buffer and buffer.status.value == 'ready' %}
       <div class="row-actions mt">
         <form method="post" action="/assets/{{ buffer.id }}/publish-now"

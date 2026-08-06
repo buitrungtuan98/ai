@@ -367,9 +367,14 @@ tbody tr:last-child td { border-bottom: none; }
 .slot.filled { color: var(--st-working); font-weight: var(--fw-medium); }
 .slot.missed { color: var(--st-review); font-weight: var(--fw-medium); }
 .slot.past { color: var(--text-subtle); }
+/* Rendered but unapproved: this slot has a video behind it and needs one click, so it must not read
+   like a filled slot NOR like a missed one (ADR-090). Dashed underline = "waiting on you". */
+.slot.pending a { color: var(--st-review); font-weight: var(--fw-medium);
+  text-decoration: underline dashed; text-underline-offset: 2px; }
 .cal-ep { color: var(--muted); font-size: var(--fs-xs); }
 .slot-key.filled { color: var(--st-working); }
 .slot-key.missed { color: var(--st-review); }
+.slot-key.pending { color: var(--st-review); }
 
 /* Per-episode reschedule disclosure (Operations → Publish queue). The summary IS the button, so the
    default marker is removed; the panel drops below the row's action cluster. */
