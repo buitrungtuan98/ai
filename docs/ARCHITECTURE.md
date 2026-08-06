@@ -2285,3 +2285,80 @@ closed by ADR-087 still needs the operator's Retry (the episode page tells them 
 brief). User-level settings (the slop blacklist) count toward the brief version but write no audit
 row: `AutopilotAction` is channel-scoped, and inventing a channel for a user-wide edit would be a
 worse lie than the missing row.
+
+### ADR-090 — Approval is a gate, not a publish trigger
+**Status:** accepted · supersedes the timing half of ADR-064 · refines ADR-011, ADR-059, ADR-067
+
+**Context.** A campaign configured **Review first** with a **21:00** posting slot published the
+instant its Approve button was clicked. The operator had set both fields on the same form; the form
+accepted both; the identity line even read back *"posts 21:00 daily · review first"*. Only one of
+those was honoured.
+
+The cause was not the approve handler. `auto_publish` was a single boolean carrying two independent
+questions:
+
+1. **Does a human approve before this may publish?** (a gate)
+2. **Who decides when it goes out — the schedule, or the moment it becomes publishable?** (a clock)
+
+Storing both in one flag meant that answering "review" to the first also answered "not the schedule"
+to the second. `publish_due_campaign` bailed on `auto_publish=False`, so the slot scheduler never
+looked at the campaign again, and the approve click was the only remaining code path that could
+publish. The instant upload was not a decision anyone made — it was what was left.
+
+The same conflation had spread outward. `_upcoming_slots` returned `[]` for review campaigns, so the
+calendar grid, the publish list, the dashboard's next-slot chip and the empty-buffer alert all
+silently dropped them; `due_override_item` ignored an exact `publish_at` an operator had set by hand;
+and the campaign card printed "Review-first" *instead of* the schedule, so no screen in the product
+ever admitted the 21:00 slot existed.
+
+**Decision.** Split the two questions and give each one owner.
+
+1. **`scheduler.slot_scheduled(cfg)` is the clock**, and it reads exactly one thing: does the
+   campaign have posting slots? `auto_publish` is not consulted. `scheduler.upcoming_slots` is the
+   matching projection — the next N slot datetimes in the campaign's timezone with the weekday gate
+   applied — and the publish path, render path, calendar, publish list and approve path all read it,
+   so no surface can disagree about when a campaign posts next.
+2. **`auto_publish` is only the gate.** It decides whether a render parks as `awaiting_review`. A
+   reviewed episode reaching `ready` means a human approved it; from there it is indistinguishable
+   from an auto-published one and takes its slot the same way. `publish_task` already accepts only
+   `ready` (R22), so the human gate is enforced by status rather than by a second timing rule.
+3. **`apply_approve` schedules rather than uploads** when slots exist, and `approved_publish_time`
+   reports which slot it took — counting the episodes already queued, so a batch of approvals maps
+   onto successive slots on successive posting days instead of promising all of them "next". With no
+   slots configured, approval still publishes immediately: there is no clock to wait for, and that
+   is the honest meaning of an empty schedule.
+4. **Three deliberate carve-outs.** A slot-scheduled approval does **not** write
+   `publish_requested_at`: that marker means "a publish job was issued and may have been lost", and
+   the hourly reconciler acts on it — writing it here would re-issue every approved episode within
+   the hour and publish it early, defeating the whole change. And `catch_up_due` keeps its
+   `auto_publish` check: it publishes *off-schedule* to rescue a slot the machine missed for want of
+   a render, whereas in review mode a missed slot means the human had not approved yet — firing there
+   would publish at the moment of approval, which is precisely the reported bug. Finally,
+   **compilations keep publishing on approval**: ADR-085 puts them outside the slot schedule, they
+   always park for review, and their sentinel episode numbers sort last — so queueing one would both
+   strand it behind every regular episode and eat a slot that was not its to take. The single
+   predicate is `approved_publish_time(...) is None` ⇒ publish now, which also covers a campaign
+   whose `posting_slots` cannot be parsed: releasing beats stranding an approved episode on a
+   schedule that can never produce a time.
+
+**Consequences.** The operator's schedule now means what it says in both publishing modes, and the
+approve click is reversible in the way a human expects: it says "this is good", not "post it now".
+Approving several episodes spreads them one per slot across the campaign's own posting days rather
+than emptying the queue at once. Review-first campaigns appear on every scheduling surface, with
+unapproved renders drawn as `pending` cells on the slots they would claim — a slot with a finished
+video behind it is neither safely filled nor doomed to be missed, and saying so is the only honest
+cell. The empty-buffer alert now counts review campaigns, which is a real behaviour change: a review
+campaign with nothing approved *will* miss its slot, and the dashboard says so rather than staying
+quiet because the campaign was exempt from the schedule it had configured.
+
+One change reaches beyond review mode: an episode an **auto-publish** campaign parked for review —
+because Auto-QC failed it or could not run (ADR-084) — used to publish the instant it was approved,
+slot schedule and all. It now takes its slot like every other episode, which is what ADR-011 said
+all along ("exactly ONE pre-rendered episode per slot"); the autopilot's own approvals go the same
+way and its audit line says "queued for its posting slot" rather than claiming a publish that has
+not happened.
+
+The cost is that "Approve" no longer publishes for slot-scheduled campaigns, which is a change in
+muscle memory for anyone relying on the old behaviour. `Publish now` — which already existed for
+`ready` items — is the deliberate escape hatch, and every approve surface names the new time rather
+than leaving the operator to discover it. Campaigns with no posting slots are untouched.

@@ -3,10 +3,14 @@
 Runs as a daemon thread inside the worker process (KISS: no extra container). The tick only enqueues
 jobs and sweeps files — it never renders — so the single-render guarantee is untouched.
 
-Cadence model (ADR-011): rendering runs EAGERLY (keep every active campaign's buffer full), while
-publishing is what posting slots control — exactly ONE pre-rendered episode is published per slot,
-in the campaign's timezone. Campaigns without slots publish immediately after render (continuous
-mode); review-mode campaigns publish only on operator approval.
+Cadence model (ADR-011, ADR-090): rendering runs EAGERLY (keep every active campaign's buffer
+full), while posting slots control publishing — exactly ONE pre-rendered episode is published per
+slot, in the campaign's timezone, on its posting days. Campaigns without slots publish immediately
+after render (continuous mode).
+
+Review mode (`auto_publish=False`) is a GATE, not a trigger: it decides whether a human must approve
+before an episode may publish, never when it publishes. An approved episode joins the same slot
+queue as an auto-published one — see `slot_scheduled`.
 
 Responsibilities each tick:
   * sweep orphaned temp media (crash survivors) and relieve disk pressure,
@@ -61,6 +65,48 @@ def is_posting_day(days: list[str], now: datetime) -> bool:
     if not days:
         return True
     return WEEKDAY_KEYS[now.weekday()] in days
+
+
+def slot_scheduled(cfg: dict) -> bool:
+    """True when a posting schedule owns this campaign's publish TIMING (ADR-090).
+
+    THE definition, because `auto_publish` answers a different question — whether a human approves
+    first — and the two were stored in one boolean. Overloading it meant "Review first" silently
+    disabled the schedule: the operator's own posting slots were dropped, the campaign vanished from
+    the calendar, and the approve click became the only thing left that could publish. Approval is a
+    gate; slots are the clock. A campaign with no slots has no clock and publishes at render time."""
+    return bool(cfg.get("posting_slots"))
+
+
+def upcoming_slots(campaign, count: int = 1, now: datetime | None = None) -> list[datetime]:
+    """The next `count` posting-slot datetimes for a campaign, in its own timezone, weekday gate
+    applied. Empty for continuous / slot-less campaigns.
+
+    ONE definition of "when will this campaign post next" (ADR-067), shared by the dashboard's
+    next-slot chip, the calendar grid, the publish list and the approve path — so the time an
+    operator is promised on approval is the same time the scheduler will actually use."""
+    cfg = campaign.config_json or {}
+    slots = sorted(cfg.get("posting_slots") or [])
+    if not slots:
+        return []
+    allowed = cfg.get("posting_days") or []
+    now_local = now or local_now(cfg.get("timezone"))
+    out: list[datetime] = []
+    for dd in range(0, 60):  # a horizon long enough for any weekday-gated pattern
+        day = now_local + timedelta(days=dd)
+        if allowed and WEEKDAY_KEYS[day.weekday()] not in allowed:
+            continue
+        for s in slots:
+            try:
+                hh, mm = (int(x) for x in s.split(":"))
+            except ValueError:
+                continue
+            cand = day.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if cand > now_local:
+                out.append(cand)
+                if len(out) >= count:
+                    return out
+    return out
 
 
 def is_within_slot(slots: list[str], now: datetime, tolerance_min: int | None = None) -> bool:
@@ -275,9 +321,9 @@ def due_override_item(db, campaign: Campaign, now_utc: datetime | None = None):
 
     An override REPLACES the slot schedule for that one episode, so it deliberately skips the
     posting-day / slot-window / one-per-slot gates: the operator named an exact time and that time
-    is now. It still respects `auto_publish` — a review-first campaign publishes on approval only."""
-    if not (campaign.config_json or {}).get("auto_publish", True):
-        return None
+    is now. Review mode needs no gate here (ADR-090): only `ready` items are eligible, and in review
+    mode an episode reaches `ready` only by being approved. The old `auto_publish` check meant an
+    operator could set an exact publish time on an approved episode and have it silently ignored."""
     now_utc = now_utc or datetime.utcnow()
     return db.scalar(
         select(BufferPoolItem)
@@ -294,7 +340,12 @@ def publish_due_campaign(db, campaign: Campaign, now: datetime | None = None,
                          enqueue=None) -> int | None:
     """Publish exactly ONE buffer item if something is due: an operator-rescheduled episode whose
     time has come, else the next ready episode when the campaign's posting slot is current (in the
-    campaign's own timezone). Returns the buffer id queued, or None."""
+    campaign's own timezone). Returns the buffer id queued, or None.
+
+    Review-first campaigns are served here too (ADR-090). Only `ready` items are eligible and only
+    approval makes a reviewed episode `ready`, so the human gate is already enforced by the time
+    this runs — and five episodes approved in one sitting go out one per slot, on the campaign's own
+    posting days, instead of all five landing the moment they were approved."""
     cfg = campaign.config_json or {}
     enqueue = enqueue or task_queue.enqueue_publish
     # A per-episode override outranks the slot schedule and works even for a campaign with no slots
@@ -306,8 +357,8 @@ def publish_due_campaign(db, campaign: Campaign, now: datetime | None = None,
                     campaign.id, override.episode_number)
         return override.id
     slots = cfg.get("posting_slots") or []
-    if not slots or not cfg.get("auto_publish", True):
-        return None  # continuous mode publishes at render time; review mode publishes on approval
+    if not slot_scheduled(cfg):
+        return None  # no slots: continuous mode already published at render time
     now = now or local_now(cfg.get("timezone"))
     if not is_posting_day(cfg.get("posting_days") or [], now):
         return None  # weekday-gated campaign: today is not a publish day
@@ -763,8 +814,11 @@ def reconcile_stranded_episodes(db, now: datetime | None = None) -> dict:
             continue  # waiting on a fresh token — this pass fires the tick after it is pasted
         campaign = db.get(Campaign, t.campaign_id)
         cfg = (campaign.config_json or {}) if campaign else {}
-        slot_managed = bool(cfg.get("auto_publish", True)) and bool(cfg.get("posting_slots"))
-        if slot_managed and not (buf.metadata_json or {}).get("publish_requested_at"):
+        # `publish_requested_at` means "a publish job was issued for this item and may have been
+        # lost". `apply_approve` writes it ONLY when it enqueues, so a slot-scheduled approval never
+        # carries one and this pass leaves it to its slot (ADR-090) — without that pairing, every
+        # approved episode would be re-issued here within the hour and publish early anyway.
+        if slot_scheduled(cfg) and not (buf.metadata_json or {}).get("publish_requested_at"):
             continue  # the slot scheduler owns this one — nothing was lost
         if buf.publish_at is not None and buf.publish_at > now:
             continue  # the operator parked it for a future time on purpose
@@ -878,7 +932,14 @@ def autopilot_review_channel(db, channel, mode: str, approve_min: int, reject_ma
                             campaign_id=item.campaign_id, evidence={"episode": ep})
                 continue
             counts["approved"] += 1
-            _log_action(db, channel, "approved", f"Approved & published Ep {ep}: {reason}.",
+            # Say which of the two things actually happened (ADR-090) — on a slotted campaign this
+            # approval scheduled the episode; the log claiming it published would be a false record
+            # of an irreversible act.
+            item_camp = db.get(Campaign, item.campaign_id)
+            landed = ("queued for its posting slot"
+                      if item_camp is not None and slot_scheduled(item_camp.config_json or {})
+                      else "published")
+            _log_action(db, channel, "approved", f"Approved & {landed} Ep {ep}: {reason}.",
                         campaign_id=item.campaign_id, evidence={"episode": ep, "qc_score": score})
         else:  # copilot approve-eligible, or a borderline/verdict-less item → leave + hint
             had_hint = bool((item.metadata_json or {}).get("ap_hint"))
@@ -1128,6 +1189,11 @@ def catch_up_due(db, campaign: Campaign, now: datetime | None = None):
     recently-published guard, and only when fewer posts went out today than slots have already
     passed. Returns the item or None. Bounds bursting to ≤1 per pass per campaign."""
     cfg = campaign.config_json or {}
+    # The ONE place `auto_publish` still gates timing, and deliberately (ADR-090). Catch-up publishes
+    # OFF-schedule to rescue a slot the machine missed because nothing was rendered yet. In review
+    # mode the slot was missed because the human had not approved yet — so firing here would publish
+    # the moment they approve, which is exactly the behaviour ADR-090 removes. A reviewed episode
+    # waits for a real slot; an operator who wants it out sooner has "Publish now".
     if not cfg.get("auto_publish", True):
         return None
     slots = sorted(cfg.get("posting_slots") or [])

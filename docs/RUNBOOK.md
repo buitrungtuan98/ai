@@ -57,15 +57,30 @@ The `FERNET_KEY` used when the data was encrypted must match, or encrypted colum
 
 ## Review mode (preview before publish)
 Set a campaign's **Publishing mode** to *Review first*. Each rendered episode then waits in the
-**Asset Pool** with an in-browser player; nothing is uploaded until you click **Approve & publish**
-(Reject deletes the render — the episode can be re-rendered from Task Logs via Retry). You get a
-Telegram ping when an episode is ready for review. Review items do not auto-expire; published items
-have their local files cleaned up immediately.
+**Asset Pool** with an in-browser player; nothing is uploaded until you approve it (Reject deletes
+the render — the episode can be re-rendered from Task Logs via Retry). You get a Telegram ping when
+an episode is ready for review. Review items do not auto-expire; published items have their local
+files cleaned up immediately.
+
+**Approving is a green light, not "post now" (ADR-090).** Review mode and posting slots are
+independent settings:
+- Campaign **has posting slots** → approving hands the episode to the schedule. It publishes at the
+  campaign's next slot, on one of its posting days, one episode per slot — so approving five in a
+  sitting spreads them over five slots instead of posting all five at once. The button says
+  *Approve — publish at the next slot* and the confirmation names the date and time. Use
+  **Publish now** on the resulting `Ready` card to skip the wait.
+- Campaign has **no posting slots** → there is no clock to wait for, so approving publishes right
+  away, as it always has.
+
+The Calendar (`/calendar`) shows review campaigns like any other: an unapproved render appears as
+`◐ 21:00 Ep 7 ✓?` on the slot it will claim once you approve it, and `/calendar?view=list` gives the
+exact projected time per episode.
 
 **Asset Pool actions by status:**
-- `Awaiting review` → **Approve & publish** · **Re-render** (discard + fresh render) · **Reject
-  with reason** (deletes render; reason feeds the AI's avoid-list).
-- `Ready` (auto mode, parked for its posting slot) → **Publish now** (skip the slot) ·
+- `Awaiting review` → **Approve** (publishes at the next slot, or immediately if the campaign has
+  none) · **Re-render** (discard + fresh render) · **Reject with reason** (deletes render; reason
+  feeds the AI's avoid-list).
+- `Ready` (approved or auto-rendered, parked for its posting slot) → **Publish now** (skip the slot) ·
   **Discard & re-render** (for a bad render you don't want the slot to auto-publish).
 - `Consumed` (published) / `Expired` / `Rejected` → no actions; use Task Logs → Retry if needed.
 

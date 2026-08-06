@@ -93,23 +93,53 @@ def test_publish_due_campaign_one_per_slot(session, user, channel):
     assert queued == [first.id]
 
 
-def test_publish_due_campaign_skips_continuous_and_review(session, user, channel):
+def test_publish_due_campaign_skips_a_campaign_with_no_slots(session, user, channel):
+    """No posting slots = no clock: those episodes published at render time (or on approval)."""
     from database.models import Campaign
     from database.types import CampaignStatus
     from workers import scheduler as sch
 
     continuous = Campaign(user_id=user.id, channel_id=channel.id, topic_name="C", total_episodes=5,
                           status=CampaignStatus.active, config_json={})  # no slots
-    review = Campaign(user_id=user.id, channel_id=channel.id, topic_name="R", total_episodes=5,
-                      status=CampaignStatus.active,
-                      config_json={"posting_slots": ["21:00"], "auto_publish": False})
-    session.add_all([continuous, review])
+    session.add(continuous)
     session.commit()
-    _ready_item(session, review, channel, 1)
 
     enq = lambda bid: (_ for _ in ()).throw(AssertionError("must not publish"))  # noqa: E731
     assert sch.publish_due_campaign(session, continuous, now=datetime(2026, 7, 17, 21, 0), enqueue=enq) is None
-    assert sch.publish_due_campaign(session, review, now=datetime(2026, 7, 17, 21, 0), enqueue=enq) is None
+
+
+def test_a_review_campaigns_slot_publishes_its_approved_episode(session, user, channel):
+    """ADR-090: review mode gates WHO releases an episode, never WHEN it goes out.
+
+    An approved (`ready`) episode belongs to the posting slot exactly like an auto-published one —
+    this is the regression that made "Review first" silently discard the operator's own schedule and
+    turn the approve click into the publish trigger.
+    """
+    from database.models import Campaign
+    from database.types import BufferStatus, CampaignStatus
+    from workers import scheduler as sch
+
+    review = Campaign(user_id=user.id, channel_id=channel.id, topic_name="R", total_episodes=5,
+                      status=CampaignStatus.active,
+                      config_json={"posting_slots": ["21:00"], "auto_publish": False})
+    session.add(review)
+    session.commit()
+    session.refresh(review)
+    approved = _ready_item(session, review, channel, 1)
+    # Rendered but NOT approved: it must never publish, slot or no slot — that is the actual gate.
+    unapproved = _ready_item(session, review, channel, 2)
+    unapproved.status = BufferStatus.awaiting_review
+    session.commit()
+
+    queued = []
+    enq = lambda bid: queued.append(bid)  # noqa: E731
+    # Outside the slot, an approved episode still waits — approval is not a publish trigger.
+    assert sch.publish_due_campaign(session, review, now=datetime(2026, 7, 17, 12, 0), enqueue=enq) is None
+    assert queued == []
+    # At the slot, the approved one goes; the unapproved one is untouched.
+    assert sch.publish_due_campaign(session, review, now=datetime(2026, 7, 17, 21, 0),
+                                    enqueue=enq) == approved.id
+    assert queued == [approved.id]
 
 
 def test_reap_stuck_tasks(session, user, channel):
