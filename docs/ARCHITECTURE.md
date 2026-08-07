@@ -2362,3 +2362,137 @@ The cost is that "Approve" no longer publishes for slot-scheduled campaigns, whi
 muscle memory for anyone relying on the old behaviour. `Publish now` — which already existed for
 `ready` items — is the deliberate escape hatch, and every approve surface names the new time rather
 than leaving the operator to discover it. Campaigns with no posting slots are untouched.
+
+### ADR-091 — A blocked buffer is not an empty one, and every stage keeps its own timestamp
+
+**Status.** Accepted (R25).
+
+**Context.** Two reports from the same box, a day after ADR-090 shipped: the factory had *stopped
+producing videos* although the buffer was visibly short, and there was no way to tell when anything
+had happened to an episode — queued, rendered, reviewed, due out, actually live.
+
+They turned out to be one failure wearing two hats. The machine knew things about itself that no
+surface could say.
+
+The stall was reproducible in six lines. `hydrate_campaign` measured the buffer as "every Task that
+is not COMPLETED / FAILED / CANCELLED", which lumps together two states that have nothing in common:
+an episode still rendering or waiting for its posting slot **arrives on its own**, while an episode
+parked for a human **arrives only if somebody decides**. On an auto-publish campaign, where a park
+is the exception (Auto-QC held the render back, ADR-084), each parked episode quietly took a place
+in the runway: two parked left room for one render instead of three, and three stopped the campaign
+dead — permanently, because nothing expires an `awaiting_review` item. Meanwhile every surface that
+reports on the buffer counts only `ready` rows, so the dashboard read "campaigns with nothing
+rendered — those slots will be missed" and the slot alert sent the operator to Operations to debug a
+render worker that was idle exactly as designed. The one honest number, "3 episodes are waiting for
+your decision", was in the database and on no page.
+
+The missing timestamps were the reason the stall took a code read to diagnose rather than a glance.
+`Task.finished_at` is the *terminal* stamp — whichever step ends the episode writes it — so a slot
+publish overwrites the render's own finish hours later and the render time is simply gone. No stage
+had a recorded time at all: the lifecycle rail could say WHERE an episode was and never WHEN it got
+there, which is precisely the question "is this thing moving?" reduces to.
+
+**Decision.**
+
+1. **`video_worker.buffer_state` is the one measurement of the render buffer**, and it counts
+   `flowing` and `parked` separately. Hydration consumes it, and so does every surface that reports
+   on it, so a page can no longer disagree with the scheduler about what the factory is doing.
+2. **What counts against the review cap depends on the gate, and only the gate.** On a review-first
+   campaign every render parks, so work still in flight is a parked episode that has not landed yet
+   and counts too — total in-flight stays at the buffer size, exactly the depth those campaigns
+   already ran at. On an auto-publish campaign only the genuinely parked episodes count, and they
+   act as a **stop** (`parked >= cap` pauses rendering) rather than a per-render tax on a runway
+   they are not part of. This is the line the bug lived on.
+3. **The cap is the buffer size — one dial, not two.** An operator who reviews in weekly batches
+   raises the campaign's buffer size and gets a deeper review queue with it. A second number would
+   be a second thing to discover, and the first one already means "how deep should the pipeline be".
+4. **Every idle tick has a named reason** (`review` · `full` · `daily_cap` · `planned_out`), logged
+   and read by the UI. The slot-risk alert and the dashboard runway tile now distinguish *starved*
+   (the render pipeline is the place to look) from *waiting on your approval* (one click away),
+   because those two identical-looking states are fixed by opposite actions.
+5. **Three write-once columns** — `Task.rendered_at`, `reviewed_at`, `published_at` — each stamped
+   by the step that owns it and never rewritten. `finished_at` keeps its terminal meaning; nothing
+   that reads it changes. `published_at` rides the same single commit as the published id and the
+   consumed buffer row (R22), so "we said it published" can never outlive "it published".
+6. **`core/timeline.py` is the one reader.** It composes the stamped moments with the two that were
+   never columns — the enqueue, and the slot an episode is still waiting for — into one ordered list
+   on the campaign's own timezone. The projected slot comes from `approved_publish_time` /
+   `upcoming_slots` (ADR-090), recomputed on every read rather than stored, so the page and the
+   Approve button cannot promise different times. A future time is marked `estimated` and rendered
+   dimmed and labelled `(due)`: a forecast must never be printed like a record.
+
+**Consequences.** A handful of QC-parked episodes can no longer strangle an auto-publish campaign,
+and when the factory does pause it says which of four things it is waiting for — in the log, in the
+bell, and on the dashboard. Review-first campaigns are unchanged in depth by construction, which is
+what makes this safe to ship on top of ADR-090.
+
+The behaviour that deliberately did **not** change: a full review queue still stops rendering. An
+operator who owes three decisions does not need a fourth video, and on a one-render-at-a-time box
+the alternative is spending the only render slot on inventory nobody has looked at. What was wrong
+was never the pause — it was pausing in silence and then blaming the renderer.
+
+The timeline's back-compatibility is a fallback, not a fiction: rows written before this ADR have
+only `finished_at`, which means "published" on a COMPLETED task and "rendered" on any other, and a
+consumed buffer row still remembers the publish instant in `consumed_at`. A stage with no
+recoverable time reports as blank rather than borrowing a neighbour's — one value must never appear
+twice under two labels, which is the failure mode this ADR exists to end.
+
+
+### ADR-092 — The hook lands on the first frame, and the drawn title is a short curiosity gap
+
+**Context.** An operator shared a Facebook Reel preview with two complaints, a session after ADR-091
+shipped. First: the 3-second hook flash (ADR-078) was **invisible in the preview** — it only
+appeared about a second into playback. Second: the two-line title was **cut mid-word to "…"**. Both
+are the *drawn* title fighting constraints that were never right for it.
+
+1. **The cover is frame zero, and the flash faded IN.** Facebook grabs the very first frame of a
+   Reel as its cover, and most players show frame 0 while a video is paused/buffering. The headline
+   event carried `{\fad(150,400)}` — a 150 ms fade-IN — so at t=0 the title's alpha was 0. The one
+   frame the platform samples for the cover was the one frame guaranteed to have no title on it. The
+   hook that exists to win the first two seconds was absent from the still that represents the video
+   everywhere it is not yet playing.
+2. **The drawn title was the published title.** `hook_title` was set to the AI's `title` — a
+   12-15-word, ≤100-char string tuned for *search*. `teaser()` cut it at ~56 chars with an ellipsis,
+   so nearly every Vietnamese title was drawn as a truncated fragment. ADR-078 framed that fragment
+   as "a better curiosity gap than six unreadable rows", which is true relative to the disease but is
+   still the wrong altitude: the cut was patching a title that should never have been the drawn text.
+
+**Decision.**
+
+1. **The flash is opaque from frame 0.** `HEADLINE_FADE_IN_MS = 0` (only the fade-OUT remains), so
+   the cover the platform captures carries the hook and the frame still clears after the window. This
+   is the whole fix for complaint (1), and it is one constant with a name that says why.
+2. **`MetadataVariation.billboard_hook` is the drawn text, written short on purpose.** The AI writes
+   a ≤6-word, ≤48-char curiosity hook per A/B variant — a question, a bold claim, a shocking number,
+   a paradox — that never spoils the payoff and carries no emoji/hashtag/series-name/episode-number.
+   `pick_metadata` draws it as `hook_title`, falling back to the (teased) title for legacy scripts,
+   so nothing that already rendered breaks. The **published** `title` is never touched — it stays
+   long for search — and `teaser()` stays as the safety net for an overlong or legacy hook. A short
+   hook does not trip the shrink loop, so it renders at the full flash size: readable and bold, the
+   "cực hook" the operator asked for, without a bigger cut.
+3. **The cold open earns the window.** The script prompt now demands scene 1 open IN THE MIDDLE OF
+   THE ACTION or on the single most striking image of the piece — never a warm-up or a "today we
+   talk about…" intro — with scene-1 keywords describing that specific arresting visual and the
+   first narration sentence landing the hook. Per-episode footage dedupe (`prefer_unused`) already
+   makes each opening unique.
+4. **The generated poster becomes the platform cover.** The factory already draws a poster; it was
+   shown only in-app. It is now uploaded — YouTube `thumbnails.set` and a long-form Facebook Page
+   video's `thumb` — both fail-open, because an unverified YouTube channel is refused a custom
+   thumbnail and that must never sink a publish that already succeeded. A Reel has no cover API, so a
+   vertical short's cover is exactly the frame-0 flash from decision (1); the custom thumbnail is a
+   search/channel/share surface (the Shorts feed ignores it), which is where the poster earns its
+   place.
+
+**Rejected: scoring candidate footage to pick the "most striking" opening shot.** It sounds like the
+natural companion to decision (3), but a visual-interest score needs the pixels — every candidate
+downloaded and probed — on a CPU-only, single-render box (a hard constraint, not a preference). The
+generator is the cheaper and higher-altitude lever: steer what scene 1 *is*, don't grade what the
+stock library happened to return.
+
+**Compliance (ADR-006 unchanged).** The hook, the cold open and the per-video variation remain
+retention/branding craft, not duplicate-detection evasion; the bulk-variation gate stays off by
+default and operators still owe each platform's ToS on near-identical content.
+
+**Cost.** Existing `flash` campaigns change mid-flight: their next renders draw the short
+`billboard_hook` (or the teased title until the AI supplies one) and their covers carry the hook.
+That is the point of the change.

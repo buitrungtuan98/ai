@@ -69,6 +69,9 @@ _COLUMN_UPGRADES: dict[str, dict[str, str]] = {
     "tasks": {
         "started_at": "DATETIME",
         "finished_at": "DATETIME",
+        "rendered_at": "DATETIME",   # the lifecycle clock (ADR-091) — one stamp per stage,
+        "reviewed_at": "DATETIME",   # written once by the step that owns it, never rewritten,
+        "published_at": "DATETIME",  # unlike `finished_at`, which the last step always overwrites
         "retry_count": "INTEGER DEFAULT 0",
         "auto_retry_count": "INTEGER DEFAULT 0",   # autopilot's failure-retry budget (ADR-076)
         "auto_reject_count": "INTEGER DEFAULT 0",  # autopilot's QC-reject re-render budget

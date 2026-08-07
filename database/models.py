@@ -178,6 +178,16 @@ class Task(Base):
     # Transparency: timing + publish outcome (surfaced in the Task Logs panel).
     started_at: Mapped[datetime | None] = mapped_column(DateTime)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # The lifecycle clock (ADR-091). `finished_at` is the TERMINAL stamp: whichever step ends the
+    # episode rewrites it, so a slot publish overwrites the render's own finish and the render time
+    # is gone. It therefore cannot answer "when did each stage happen". Each of these is written by
+    # the ONE step that owns it and by no other — a re-render moves `rendered_at`, a re-approval
+    # moves `reviewed_at`, and neither can ever touch the other's. Nullable throughout: a stage that
+    # has not happened has no time, and rows written before this shipped keep None
+    # (core/timeline.py falls back to what those rows do have, and to blank where they hold nothing).
+    rendered_at: Mapped[datetime | None] = mapped_column(DateTime)   # the master finished encoding
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime)   # the review gate was passed
+    published_at: Mapped[datetime | None] = mapped_column(DateTime)  # the platform accepted it
     # How many times this episode has been re-rendered, from ANY source — this is the number the
     # operator sees ("retry 3"), so every path increments it.
     retry_count: Mapped[int] = mapped_column(Integer, default=0)

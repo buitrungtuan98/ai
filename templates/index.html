@@ -181,7 +181,18 @@
       {# The worst case leads. An average said "≈1 day" while two campaigns were about to miss slots. #}
       {% if scorecard.empty_campaigns %}
       <div class="n bad">{{ scorecard.empty_campaigns }}<span class="u"> at zero</span></div>
-      <div class="meta">campaign{{ 's' if scorecard.empty_campaigns != 1 }} with nothing rendered — those slots will be missed</div>
+      {# Two different problems, two different fixes (ADR-091): a starved campaign needs the render
+         pipeline looked at, a review-blocked one needs an approve click. Saying "nothing rendered"
+         over the second sent operators to debug a worker that was idle on purpose. #}
+      <div class="meta">
+        {%- if scorecard.review_blocked_campaigns and scorecard.starved_campaigns -%}
+        {{ scorecard.starved_campaigns }} with nothing rendered, {{ scorecard.review_blocked_campaigns }} waiting on your approval — those slots will be missed
+        {%- elif scorecard.review_blocked_campaigns -%}
+        campaign{{ 's' if scorecard.review_blocked_campaigns != 1 }} rendered but <a href="/assets">waiting on your approval</a> — those slots will be missed
+        {%- else -%}
+        campaign{{ 's' if scorecard.starved_campaigns != 1 }} with nothing rendered — those slots will be missed
+        {%- endif -%}
+      </div>
       {% else %}
       <div class="n">{{ scorecard.ready }}<span class="u"> ready</span></div>
       <div class="meta">{% if scorecard.runway_days is not none %}≈ {{ scorecard.runway_days }} day{{ 's' if scorecard.runway_days != 1 }} at current cadence{% else %}no active posting slots{% endif %}</div>

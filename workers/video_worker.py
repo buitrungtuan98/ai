@@ -248,58 +248,149 @@ def enqueue_task(task) -> str:
     return enqueue_render(task.id)
 
 
-def hydrate_campaign(db, campaign: Campaign, *, buffer_size: int | None = None, enqueue=enqueue_render) -> list[int]:
-    """Ensure ONE campaign has up to `buffer_size` upcoming (not-yet-finished) episodes queued.
-    Precedence: explicit arg > campaign config `buffer_size` > global default. Idempotent —
-    unique(campaign,episode) prevents duplicates. Returns Task ids created.
+# Episodes on their way to a slot with NO human in the loop. Everything else that is not terminal
+# is blocked on a decision, and the two are counted separately (ADR-091).
+_FLOWING_TASK_STATUSES = (TaskStatus.PENDING_QUEUE, TaskStatus.AI_GENERATION,
+                          TaskStatus.AUDIO_SYNCED, TaskStatus.RENDERING,
+                          TaskStatus.SCHEDULED, TaskStatus.PUBLISHING)
+# …and the subset with a job actually running behind it. SCHEDULED is the one flowing state that is
+# nobody's job — the episode is rendered and simply waiting for its slot — so it is exactly this set
+# minus that. Derived rather than retyped: two hand-maintained copies of the same list is how the
+# drift this codebase keeps fixing starts.
+_WORKING_TASK_STATUSES = tuple(s for s in _FLOWING_TASK_STATUSES if s != TaskStatus.SCHEDULED)
 
-    Config `max_per_day` caps how many NEW renders this campaign may start per local day, so one
-    campaign can't monopolize the shared Gemini quota when several campaigns/accounts run at once
-    (publishing cadence is still governed by posting slots)."""
+
+@dataclass
+class BufferState:
+    """Why the render buffer is (or is not) creating episodes right now — one computation, read by
+    hydration itself and by every surface that reports on it (ADR-091).
+
+    `flowing` and `parked` are deliberately NOT one number. An episode still rendering, or rendered
+    and waiting for its posting slot, arrives on its own; an episode parked for a human arrives only
+    if somebody decides. Counting them together is what let three QC-parked episodes stop a factory
+    dead while the dashboard reported an empty buffer and blamed the renderer.
+    """
+
+    size: int                 # target depth of episodes on their way out
+    flowing: int              # …and how many there are
+    parked: int               # rendered, blocked on an approve/reject decision
+    review_cap: int           # how many may sit parked before rendering pauses
+    day_budget: int | None    # renders left under `max_per_day` today (None = uncapped)
+    next_episodes: list[int]  # episode numbers hydration will create now, in order (may be empty)
+    reason: str | None        # why nothing is being created: review | full | daily_cap | planned_out
+
+
+def buffer_state(db, campaign: Campaign, *, buffer_size: int | None = None) -> BufferState:
+    """Measure ONE campaign's render buffer. Pure read — no writes, no enqueues.
+
+    Buffer size precedence: explicit arg > campaign config `buffer_size` > global default. Config
+    `max_per_day` caps how many NEW renders this campaign may start per local day, so one campaign
+    can't monopolize the shared Gemini quota when several run at once (publishing cadence is still
+    governed by posting slots).
+
+    The review cap is what bounds work that only a human can release, and it is the buffer size —
+    one dial, not two. An operator who reviews in weekly batches raises the campaign's buffer size
+    and gets a deeper review queue with it; there is no second number to discover.
+
+    What "needs a decision" means depends on the gate. On a REVIEW-FIRST campaign every render parks,
+    so everything in flight counts and the cap holds total in-flight at the buffer size — byte for
+    byte the depth those campaigns already ran at. On an AUTO-publish campaign a parked episode is
+    the exception (Auto-QC held it back), and only the parked ones count — which is the bug this
+    split exists for: three QC-parked episodes used to occupy the whole buffer, so the campaign
+    stopped rendering entirely while every page reported the buffer as empty and blamed the renderer.
+    """
+    from core.compilation import COMPILATION_EPISODE_BASE
+
     cfg = campaign.config_json or {}
     cfg_size = cfg.get("buffer_size")
     size = buffer_size or (int(cfg_size) if cfg_size else None) or settings.DEFAULT_BUFFER_SIZE
+    review_cap = size
     day_budget: int | None = None
     max_per_day = cfg.get("max_per_day")
     if max_per_day:
         day_budget = max(0, int(max_per_day) - renders_started_today(db, campaign))
-    created: list[int] = []
-    # Query episode numbers directly (never via the cached `campaign.tasks` relationship, which can
-    # be stale after we insert Tasks by campaign_id within the same session).
-    all_eps = set(db.scalars(select(Task.episode_number).where(Task.campaign_id == campaign.id)).all())
-    # "Active" = still on its way to publication. COMPLETED/FAILED/CANCELLED are all finished
-    # outcomes: leaving CANCELLED in here would make hydration believe that episode is still coming
-    # and starve the buffer forever (ADR-064).
-    active_eps = set(
-        db.scalars(
-            select(Task.episode_number).where(
-                Task.campaign_id == campaign.id,
-                Task.status.notin_([TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]),
-            )
-        ).all()
-    )
     # Compilations use sentinel numbers (9001+) and are EXTRA content — one waiting for review must
     # not count against the buffer of ordinary upcoming episodes (ADR-082).
-    from core.compilation import COMPILATION_EPISODE_BASE
+    # COMPLETED/FAILED/CANCELLED are all finished outcomes: leaving CANCELLED in here would make
+    # hydration believe that episode is still coming and starve the buffer forever (ADR-064).
+    flowing = db.scalar(
+        select(func.count()).select_from(Task).where(
+            Task.campaign_id == campaign.id,
+            Task.episode_number < COMPILATION_EPISODE_BASE,
+            Task.status.in_(_FLOWING_TASK_STATUSES))) or 0
+    parked = db.scalar(
+        select(func.count()).select_from(Task).where(
+            Task.campaign_id == campaign.id,
+            Task.episode_number < COMPILATION_EPISODE_BASE,
+            Task.status == TaskStatus.AWAITING_REVIEW)) or 0
+    gate_first = not cfg.get("auto_publish", True)
+    # Work that only a human can release. On a review-first campaign an episode still rendering is
+    # a parked episode that has not landed yet, so it counts here too — without that, hydration
+    # would run those campaigns deeper than the buffer size they have always had.
+    awaiting_decision = parked + flowing if gate_first else parked
+    if parked >= review_cap:
+        room = 0            # the review queue is full: another render helps nobody
+    elif gate_first:
+        room = review_cap - awaiting_decision
+    else:
+        # The R25 bug lived on this line. A parked episode on an auto-publish campaign is a stray
+        # Auto-QC held back, not the pipeline — subtracting it from the runway meant three strays
+        # stopped the campaign for good while its ready buffer read as empty.
+        room = size - flowing
+    if day_budget is not None:
+        room = min(room, day_budget)
+    room = max(0, room)
+    # What is left to make, scanned the way hydration fills it: from the next unpublished episode
+    # upward, skipping numbers that already have a Task row. Query episode numbers directly — never
+    # via the cached `campaign.tasks` relationship, which goes stale the moment a Task is inserted
+    # by campaign_id inside the same session.
+    existing = set(db.scalars(select(Task.episode_number)
+                              .where(Task.campaign_id == campaign.id)).all())
+    candidates = [ep for ep in range(campaign.current_episode + 1,
+                                     (campaign.total_episodes or 0) + 1)
+                  if ep not in existing][:room]
+    reason = None
+    if not candidates:
+        # Named in the order the operator can act on: a decision they owe outranks a limit they set,
+        # and both outrank "there is simply nothing left to make".
+        if room:
+            reason = "planned_out"   # there was budget; every planned episode already exists
+        elif parked >= review_cap:
+            reason = "review"
+        elif day_budget == 0:
+            reason = "daily_cap"
+        else:
+            reason = "full"
+    return BufferState(size=size, flowing=flowing, parked=parked, review_cap=review_cap,
+                       day_budget=day_budget, next_episodes=candidates, reason=reason)
 
-    active_eps = {e for e in active_eps if e < COMPILATION_EPISODE_BASE}
-    next_ep = campaign.current_episode + 1
-    while len(active_eps) < size and next_ep <= campaign.total_episodes:
-        if day_budget is not None and len(created) >= day_budget:
+
+def hydrate_campaign(db, campaign: Campaign, *, buffer_size: int | None = None, enqueue=enqueue_render) -> list[int]:
+    """Top ONE campaign's render buffer up to its target depth. Idempotent —
+    unique(campaign,episode) prevents duplicates. Returns Task ids created.
+
+    `buffer_state` decides which episodes may be created and why; this only creates them."""
+    state = buffer_state(db, campaign, buffer_size=buffer_size)
+    if not state.next_episodes:
+        if state.reason == "daily_cap":
             logger.info("Campaign %s reached its daily render cap (%s) — resuming tomorrow",
-                        campaign.id, max_per_day)
-            break
-        if next_ep not in all_eps:
-            task = Task(campaign_id=campaign.id, user_id=campaign.user_id, episode_number=next_ep)
-            db.add(task)
-            db.commit()
-            db.refresh(task)
-            task.rq_job_id = enqueue(task.id)
-            db.commit()
-            created.append(task.id)
-            active_eps.add(next_ep)
-            all_eps.add(next_ep)
-        next_ep += 1
+                        campaign.id, (campaign.config_json or {}).get("max_per_day"))
+        elif state.reason == "review":
+            # Not a silent stall (ADR-091): the buffer is full of work only a human can release,
+            # which is a different situation from "rendering is behind" and is said out loud.
+            logger.info("Campaign %s paused rendering — %s episode(s) waiting for review",
+                        campaign.id, state.parked)
+        return []
+    created: list[int] = []
+    for episode_number in state.next_episodes:
+        task = Task(campaign_id=campaign.id, user_id=campaign.user_id,
+                    episode_number=episode_number)
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+        task.rq_job_id = enqueue(task.id)
+        db.commit()
+        created.append(task.id)
     return created
 
 
@@ -315,21 +406,22 @@ def hydrate_buffers(db, *, buffer_size: int | None = None, enqueue=enqueue_rende
 # ── Publishing / notification dispatch (lazy imports) ────────────────────────
 def _publish(channel: Channel, video_path: str, metadata: dict, user: User,
              *, pending_video_id: str | None = None, on_pending=None,
-             retrying: bool = False) -> str:
+             retrying: bool = False, thumbnail_path: str | None = None) -> str:
     """Upload to whichever platform this channel is. `pending_video_id`/`on_pending` are Facebook's
     duplicate-post guard (ADR-073); `retrying` arms YouTube's title-match guard (ADR-087) — its
-    resumable upload only protects within one call, not across a fresh retry job."""
+    resumable upload only protects within one call, not across a fresh retry job. `thumbnail_path`
+    (the generated poster) is set as the video's cover where the platform allows it (ADR-092)."""
     if channel.platform == Platform.youtube:
         from services import youtube_service
 
         return youtube_service.upload_video(channel, video_path, metadata, user,
-                                            check_existing=retrying)
+                                            check_existing=retrying, thumbnail_path=thumbnail_path)
     if channel.platform == Platform.facebook:
         from services import facebook_service
 
         return facebook_service.upload_video(channel, video_path, metadata,
                                              pending_video_id=pending_video_id,
-                                             on_pending=on_pending)
+                                             on_pending=on_pending, thumbnail_path=thumbnail_path)
     raise RuntimeError(f"Unknown platform: {channel.platform}")
 
 
@@ -376,10 +468,6 @@ class ReviewConflict(RuntimeError):
     """Approving now would act on stale or missing evidence — the caller must surface it, not
     approve anyway (a silent approve of a vanished file or of an episode mid-re-render published
     the wrong thing or nothing, R22)."""
-
-
-_WORKING_TASK_STATUSES = (TaskStatus.PENDING_QUEUE, TaskStatus.AI_GENERATION,
-                          TaskStatus.AUDIO_SYNCED, TaskStatus.RENDERING, TaskStatus.PUBLISHING)
 
 
 def apply_approve(db, item) -> None:
@@ -429,6 +517,10 @@ def apply_approve(db, item) -> None:
             task.retry_count += 1
         task.status = TaskStatus.SCHEDULED  # the publish job drives it to PUBLISHING → COMPLETED
         task.error_message = None
+        # When the gate was passed (ADR-091). Only an episode that WAS parked has a review time —
+        # an auto-publish render walks past the gate and truthfully has none, which is why this is
+        # stamped here and not at render.
+        task.reviewed_at = now
         _append_journey(task, "Review", "approved — publishes "
                         + (when.strftime("%a %d/%m %H:%M") if slotted else "now — publish queued"))
     db.commit()
@@ -663,7 +755,8 @@ def _publish_buffer(db, task: Task, buf: BufferPoolItem, campaign: Campaign,
     video_id = _publish(channel, buf.video_path, meta, user,
                         pending_video_id=(buf.metadata_json or {}).get("pending_video_id"),
                         on_pending=remember_pending,
-                        retrying=bool(task.retry_count) or prior_attempts > 0)
+                        retrying=bool(task.retry_count) or prior_attempts > 0,
+                        thumbnail_path=buf.thumbnail_path)
 
     # Publish success is ONE commit (R22): published ids, the consumed buffer and the COMPLETED
     # status land together. They used to span three commits with file I/O in between, so a kill in
@@ -678,6 +771,11 @@ def _publish_buffer(db, task: Task, buf: BufferPoolItem, campaign: Campaign,
     buf.status = BufferStatus.consumed
     buf.consumed_at = now
     task.finished_at = now
+    # The one timestamp the operator asks about most, and the one `finished_at` was destroying the
+    # render's answer to give (ADR-091). Written here, inside the same single commit as the
+    # published id and the consumed buffer row, so "we said it published" can never outlive
+    # "it published".
+    task.published_at = now
     task.status = TaskStatus.COMPLETED
     task.progress_pct = 100
     _append_journey(task, "Publish attempt", f"published — {video_id}")
@@ -1403,6 +1501,10 @@ def render_task(task_id: int) -> None:
         # because the judge was unavailable for the re-check.
         parked_for_review = not auto_publish or qc_failed or qc_no_verdict_park
         now = datetime.utcnow()
+        # The master exists from here on, whichever branch this episode takes next (ADR-091).
+        # `finished_at` below records the same instant but does not keep it — a slot publish
+        # overwrites it hours later — so the render's own finish is stamped once, here.
+        task.rendered_at = now
         buf = BufferPoolItem(
             campaign_id=campaign.id,
             channel_id=channel.id,

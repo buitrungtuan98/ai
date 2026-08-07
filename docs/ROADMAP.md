@@ -1878,6 +1878,78 @@ up.
 - Verified: 729 tests pass, 13 skipped (15 new in `tests/test_approve_schedule.py`, 2 reshaped to the
   new contract), ruff clean, docs guard green.
 
+## R25 — a blocked buffer is not an empty one, and an episode keeps its clock `DONE`
+
+Reported from production, a day after R24: **no new videos are being created even though the buffer
+is short**, and **there is no way to see an episode's timings** — when it was queued, rendered,
+reviewed, scheduled to go out, and actually published. One cause behind both (ADR-091): the machine
+knew things about itself that no surface could say.
+
+- **The stall, reproduced.** `hydrate_campaign` counted every non-terminal Task as buffer depth, so
+  an episode parked for a human was indistinguishable from one on its way to a slot. On an
+  auto-publish campaign each Auto-QC park quietly took a place in the runway — two parked left room
+  for one render instead of three, three stopped the campaign for good (nothing expires an
+  `awaiting_review` item) — while the dashboard, counting only `ready` rows, reported an empty
+  buffer and pointed at the render worker.
+- **One measurement, two numbers.** `video_worker.buffer_state` counts `flowing` (reaches a slot
+  unaided) apart from `parked` (blocked on a decision); hydration and every reporting surface read
+  the same call. On a **review-first** campaign in-flight work counts against the review cap too, so
+  total in-flight stays at the buffer size — those campaigns are unchanged by construction. On an
+  **auto-publish** campaign parked strays act as a stop, not as a tax on a runway they were never
+  part of. The cap is the buffer size: one dial, raised by anyone who reviews in weekly batches.
+- **Every idle tick names itself** (`review` · `full` · `daily_cap` · `planned_out`). The slot-risk
+  alert stops printing "nothing is rendered yet" over rendered episodes and links to Review; the
+  dashboard runway tile splits *starved* from *waiting on your approval*. Same count, opposite fix.
+- **The clock.** `Task.rendered_at` / `reviewed_at` / `published_at` are written once by the step
+  that owns them — `finished_at` is the terminal stamp and a publish overwrites the render's own
+  finish, which is why the render time used to vanish the moment an episode went live.
+  `published_at` rides the same single commit as the published id and the consumed buffer row (R22).
+- **One reader.** `core/timeline.py` composes those stamps with the enqueue and the projected
+  posting slot into one ordered list on the campaign's own timezone, straight from
+  `approved_publish_time` / `upcoming_slots` so the page and the Approve button cannot disagree. A
+  future time is dimmed and labelled `(due)`; a pre-R25 row falls back to what it still holds and
+  reports an unrecoverable stage as blank rather than borrowing a neighbour's timestamp.
+- **Deliberately unchanged:** a full review queue still pauses rendering. An operator who owes three
+  decisions does not need a fourth video, and this box renders one at a time. The bug was pausing in
+  silence and blaming the renderer, not pausing.
+- Verified: 748 tests pass, 13 skipped (19 new in `tests/test_r25_buffer_clock.py`), ruff clean,
+  docs guard green.
+
+
+## R26 — the hook lands on the first frame, and the title is a short curiosity gap `DONE`
+
+Two Facebook reports, from the same operator who shared a Reel preview: the 3-second hook flash was
+**invisible in the preview**, and the two-line title was **cut mid-word to "…"**. Both were the drawn
+title fighting the wrong constraints — ADR-092 has the write-up.
+
+- **The flash is opaque from frame 0.** Facebook (and most players) grab the FIRST frame as the
+  Reel/video cover, and the old `\fad(150,400)` made that frame blank — the hook only appeared ~1s
+  in, after the cover was already captured. The fade-IN is now 0 (`HEADLINE_FADE_IN_MS`), so the
+  cover carries the hook; the fade-OUT stays, so the frame still clears after the window.
+- **The drawn title is a short hook, written as one.** The billboard used to draw the 12-15-word
+  PUBLISHED title, teased to `TEASER_MAX_CHARS` and cut to "…" on almost every Vietnamese title. The
+  AI now writes a dedicated `billboard_hook` per A/B variant — a ≤6-word, ≤48-char curiosity gap
+  (question / bold claim / shocking number / paradox) that never spoils the payoff. `pick_metadata`
+  draws it (falling back to the title for legacy scripts); `teaser()` stays as the safety net. The
+  published title is never touched — it stays long for search. A short hook renders at the full flash
+  size instead of shrinking, so it also reads bigger.
+- **The cold open earns the first two seconds.** The script prompt now demands scene 1 open IN THE
+  MIDDLE OF THE ACTION or on the single most striking image of the piece — never a slow warm-up —
+  with scene-1 keywords describing that specific visual and the first narration sentence landing the
+  hook. Per-episode footage dedupe (`prefer_unused`) already makes each opening unique; scoring
+  candidate frames for "most striking" was rejected on cost (it means downloading and probing every
+  candidate on a CPU-only box — the generator is the cheaper, higher-altitude lever).
+- **The generated poster becomes the platform cover.** The poster the factory already draws was
+  shown only in-app. It is now uploaded as the custom thumbnail: YouTube `thumbnails.set` (fail-open
+  — an unverified channel is refused and the publish still succeeds; the Shorts FEED ignores custom
+  thumbnails, which is why the in-video flash carries shorts) and a long-form Facebook Page video's
+  `thumb`. A Reel has no cover API, so a vertical short relies on the frame-0 flash.
+- **Compliance (ADR-006 unchanged):** the hook and cold open are retention/branding craft, not
+  duplicate-detection evasion; operators still owe each platform's ToS on near-identical content.
+- Verified: 761 tests pass, 13 skipped (13 new in `tests/test_r26_hook_flash.py`), ruff clean, docs
+  guard green.
+
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

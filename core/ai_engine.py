@@ -138,6 +138,18 @@ class MetadataVariation(BaseModel):
     title: str = Field(min_length=1, max_length=100)
     description: str = Field(min_length=1, max_length=5000)
     tags: list[str] = Field(min_length=3, max_length=15)
+    # The DRAWN on-screen hook (ADR-092): a punchy curiosity gap burned over the video's first 3
+    # seconds and onto the poster thumbnail. Kept SHORT on purpose — the drawn title used to be the
+    # 12-15-word PUBLISHED title cut mid-word to "…", unreadable at billboard size. Optional so a
+    # legacy script with no hook falls back to the title; the published `title` is never touched.
+    billboard_hook: str | None = Field(
+        default=None, max_length=48,
+        description="A SHORT punchy on-screen hook (≤6 words, ≤48 chars) burned over the video's "
+                    "first seconds — a curiosity gap that makes a scroller stop: a question, a bold "
+                    "claim, a shocking number, or a paradox. NEVER spoil the payoff. No emoji, no "
+                    "hashtags, no series name, no episode number. This is the DRAWN teaser, not the "
+                    "published title.",
+    )
 
 
 class VideoScript(_SynopsisMixin):
@@ -821,12 +833,22 @@ def build_script_prompt(
         hashtag_line = (f"voice. End with 3-5 hashtags: relevant topical ones plus #Shorts and "
                         f"EXACTLY this series hashtag: {series_hashtag(topic)} (fans find the whole "
                         "series through it).")
+    cold_open_line = (
+        "COLD OPEN: Scene 1 must hook in the first 2 seconds — open IN THE MIDDLE OF THE ACTION or "
+        "on the single most striking, curiosity-provoking image of the whole piece, never a slow "
+        "warm-up, a greeting, or a 'today we talk about…' intro. Scene 1's pexels_keywords must "
+        "describe that specific arresting visual (not a generic establishing shot), and its "
+        "narration's first sentence must land the hook. "
+    )
     base = (
         format_line +
         f"Language: {language}. "
-        + length_line + scene_line +
+        + length_line + scene_line + cold_open_line +
         "Also produce exactly 3 distinct A/B metadata variations (variant A/B/C) each with a title "
-        "(<=100 chars), a description, and 5-15 tags, all in the same persona/voice. Include a "
+        "(<=100 chars), a description, 5-15 tags, and a `billboard_hook` — a SHORT (≤6 words, ≤48 "
+        "chars) on-screen curiosity hook (a question, bold claim, shocking number, or paradox) that "
+        "NEVER spoils the payoff and carries no emoji, hashtags, series name or episode number — all "
+        "in the same persona/voice. Include a "
         "one-sentence 'synopsis' of this episode's specific premise. Keep it original and engaging. "
         "IMPORTANT: pexels_keywords must be ENGLISH visual search terms (e.g. 'river night fog'), "
         "even when the narration language is not English.\n"
@@ -1564,7 +1586,8 @@ def regenerate_metadata(*, topic: str, language: str, api_key: str, model: str =
     prompt = (
         f"Generate exactly 3 distinct viral A/B metadata variations (variant A/B/C) for a "
         f"short-form video about '{topic}' in {language}. Each: title (<=100 chars), description, "
-        "5-15 tags."
+        "5-15 tags, and a SHORT `billboard_hook` (≤6 words, ≤48 chars) — an on-screen curiosity "
+        "hook that never spoils the payoff and carries no emoji or hashtags."
     )
     return generate_structured(
         prompt=prompt, schema=MetadataSet, api_key=api_key,

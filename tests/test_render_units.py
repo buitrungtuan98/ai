@@ -289,7 +289,10 @@ def test_build_ass_headline_billboard(tmp_path):
     assert len(headline_events) == 1
     assert f"0:00:0{HEADLINE_FLASH_S:.0f}.00" in headline_events[0]  # ends at the flash window…
     assert "0:00:05.00" not in headline_events[0]                    # …NOT at the end of the clip
-    assert r"\fad(150,400)" in headline_events[0]                    # and fades out, not a hard cut
+    # Fully opaque from frame 0 (no fade-IN) so the platform's first-frame cover shows the hook,
+    # with a gentle fade-OUT so the frame clears after the window (ADR-092).
+    assert r"\fad(0,400)" in headline_events[0]
+    assert r"\fad(150," not in headline_events[0]
     # No headline requested → no Headline style (unchanged behaviour).
     out2 = str(tmp_path / "n.ass")
     build_ass([WordTiming("x", 0.0, 1.0)], out2, clip_duration=2.0)

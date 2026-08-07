@@ -132,12 +132,13 @@ def find_existing_upload(channel: Channel, title: str) -> str | None:
 
 
 def upload_video(channel: Channel, video_path: str, metadata: dict, user: User | None = None,
-                 *, check_existing: bool = False) -> str:
+                 *, check_existing: bool = False, thumbnail_path: str | None = None) -> str:
     """Upload a video (resumable) to the channel and return the new video id. Posts the CTA as a
     top-level comment if provided (YouTube's API cannot pin comments programmatically).
     `check_existing` is set on RETRIES only (ADR-087): the extra lookup costs quota and an exact
     title match on a first attempt proves nothing, but on a retry it is the difference between
-    adopting the upload that actually landed and posting it twice."""
+    adopting the upload that actually landed and posting it twice. `thumbnail_path` (the generated
+    poster) is set as the custom thumbnail, fail-open (ADR-092)."""
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaFileUpload
 
@@ -177,10 +178,31 @@ def upload_video(channel: Channel, video_path: str, metadata: dict, user: User |
     video_id = response["id"]
     logger.info("Uploaded video %s to channel %s", video_id, channel.id)
 
+    _set_thumbnail(youtube, video_id, thumbnail_path)
     cta = metadata.get("cta")
     if cta:
         _post_comment(youtube, video_id, cta)
     return video_id
+
+
+def _set_thumbnail(youtube, video_id: str, thumbnail_path: str | None) -> None:
+    """Set the generated poster as the video's custom thumbnail (ADR-092). Best-effort: an
+    unverified YouTube channel is not allowed to set a custom thumbnail and Google rejects the call,
+    so any error is logged and swallowed — it must never fail a publish that already succeeded. The
+    custom thumbnail shows in search, on the channel page and in shares; the Shorts FEED ignores it,
+    which is why the in-video 3-second hook flash carries the opening for shorts (ADR-078)."""
+    import os
+
+    if not (thumbnail_path and os.path.exists(thumbnail_path)):
+        return
+    try:
+        from googleapiclient.http import MediaFileUpload
+
+        media = MediaFileUpload(thumbnail_path, mimetype="image/jpeg")
+        youtube.thumbnails().set(videoId=video_id, media_body=media).execute()
+        logger.info("Set custom thumbnail on video %s", video_id)
+    except Exception:  # noqa: BLE001 — unverified channels can't set thumbnails; never fail publish
+        logger.warning("Could not set custom thumbnail on %s (channel may be unverified)", video_id)
 
 
 def add_to_series_playlist(channel: Channel, campaign, db, video_id: str) -> None:

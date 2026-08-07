@@ -42,7 +42,7 @@ from auth.dependencies import (
     get_owned_campaign,
     get_owned_channel,
 )
-from core import autopilot, creative_brief, failure, monetize, retention, timezones
+from core import autopilot, creative_brief, failure, monetize, retention, timeline, timezones
 from core.config import settings
 from core.tts import QUOTE_VOICES, VOICE_CHOICES
 from core.video_factory import COLOR_GRADE_CHOICES
@@ -443,18 +443,32 @@ def _campaigns_with_empty_buffer(db, user_id: int) -> int:
     Review-first campaigns count too (ADR-090): their slots are real, so a slot with nothing approved
     behind it is just as missed as one with nothing rendered. An episode sitting in the review queue
     does not cover the slot — only approving it does."""
+    return sum(_empty_buffer_split(db, user_id))
+
+
+def _empty_buffer_split(db, user_id: int) -> tuple[int, int]:
+    """The same at-zero campaigns, split by whose move it is: (starved, waiting_on_review).
+
+    Both miss their slot, and they are fixed by opposite actions (ADR-091). Starved means the
+    factory has produced nothing and the render pipeline is the place to look. Waiting-on-review
+    means it produced the episode and is now blocked on a decision — telling that operator "nothing
+    rendered" sends them to an idle worker to debug a queue that is working exactly as designed."""
     ready_by_camp = dict(db.execute(
         select(BufferPoolItem.campaign_id, func.count())
         .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
         .where(Campaign.user_id == user_id, BufferPoolItem.status == BufferStatus.ready)
         .group_by(BufferPoolItem.campaign_id)).all())
-    n = 0
+    starved = waiting = 0
     for c in db.scalars(select(Campaign).where(
             Campaign.user_id == user_id, Campaign.status == CampaignStatus.active)).all():
         cfg = c.config_json or {}
-        if (cfg.get("posting_slots") or []) and not ready_by_camp.get(c.id):
-            n += 1
-    return n
+        if not (cfg.get("posting_slots") or []) or ready_by_camp.get(c.id):
+            continue
+        if video_worker.buffer_state(db, c).parked:
+            waiting += 1
+        else:
+            starved += 1
+    return starved, waiting
 
 
 def _activity_feed(tasks, camp_by_id, chan_by_id) -> list[dict]:
@@ -515,13 +529,17 @@ def _scorecard(db, user_id: int) -> dict:
         select(func.count()).select_from(BufferPoolItem)
         .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
         .where(Campaign.user_id == user_id, BufferPoolItem.status == BufferStatus.ready)) or 0
+    starved, waiting_review = _empty_buffer_split(db, user_id)
     return {
         "throughput": thr, "throughput_days": [d.strftime("%a") for d in days],
         "throughput_max": max(thr) if thr else 0, "published_7d": sum(thr),
         "ready": ready, "runway_days": round(ready / demand, 1) if demand else None,
         # The AVERAGE hid emergencies: "≈1.0 day of runway" read as fine while two campaigns had an
-        # empty buffer and were about to miss tonight's slots. Report the worst case too (ADR-066).
-        "empty_campaigns": _campaigns_with_empty_buffer(db, user_id),
+        # empty buffer and were about to miss tonight's slots. Report the worst case too (ADR-066) —
+        # split by whose move it is, because "nothing rendered" and "nothing approved" need
+        # different people to do different things (ADR-091).
+        "empty_campaigns": starved + waiting_review, "starved_campaigns": starved,
+        "review_blocked_campaigns": waiting_review,
         "retention_this": round(sum(ret_this) / len(ret_this), 1) if ret_this else None,
         "retention_prev": round(sum(ret_prev) / len(ret_prev), 1) if ret_prev else None,
     }
@@ -2531,6 +2549,10 @@ def episode_view(request: Request, user: CurrentUser, db: DbDep, task_id: int,
         request, "episode.html",
         {"request": request, "user": user, "nav": "episodes", "task": task, "campaign": campaign,
          "channel": channel, "buffer": buffer, "previewable": previewable,
+         # When each stage actually happened, on the campaign's own clock (ADR-091) — the rail
+         # below has always said where this episode is and never when it got there.
+         "milestones": timeline.episode_timeline(db, task, campaign, buffer),
+         "timeline_tz": _campaign_tz_name(campaign),
          "stages": _EPISODE_STAGES, "stage_index": stage_index,
          "retention_curve": curve, "retention_drops": retention_drops,
          "failed": task.status == TaskStatus.FAILED, "diagnosis": diagnosis,
@@ -3488,7 +3510,13 @@ def _work_alerts(db, user) -> list[dict]:
 
 def _schedule_alerts(db, user) -> list[dict]:
     """A posting slot about to be missed because nothing is ready — the failure you want to hear
-    about BEFORE it happens, since a missed slot cannot be recovered after the fact."""
+    about BEFORE it happens, since a missed slot cannot be recovered after the fact.
+
+    It also has to be right about WHOSE move it is (ADR-091). "Nothing is rendered yet" pointed at
+    the render queue for a campaign whose episodes were rendered and sitting in the review queue —
+    so the operator went to Operations, found a healthy idle worker, and concluded the factory was
+    broken. A slot at risk behind a parked episode is one approve click from being met, and the
+    alert now says so and links there."""
     ready = dict(db.execute(
         select(BufferPoolItem.campaign_id, func.count())
         .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
@@ -3505,11 +3533,19 @@ def _schedule_alerts(db, user) -> list[dict]:
         if nxt is None or nxt["in_hours"] > _SLOT_RISK_HOURS:
             continue
         channel = channels.get(campaign.channel_id)
-        out.append(_alert("amber", f"slot-risk:{campaign.id}",
-                          f"Next post is {nxt['when']} but nothing is rendered yet — that slot will "
-                          "be missed.", channel=channel.channel_name if channel else "",
-                          campaign=campaign.topic_name, href="/operations?tab=queue",
-                          action="Render queue"))
+        parked = video_worker.buffer_state(db, campaign).parked
+        if parked:
+            text = (f"Next post is {nxt['when']} and {parked} rendered episode"
+                    f"{'s are' if parked != 1 else ' is'} waiting for your approval — approve one "
+                    "or that slot is missed.")
+            href, action = "/assets", "Review"
+        else:
+            text = (f"Next post is {nxt['when']} but nothing is rendered yet — that slot will "
+                    "be missed.")
+            href, action = "/operations?tab=queue", "Render queue"
+        out.append(_alert("amber", f"slot-risk:{campaign.id}", text,
+                          channel=channel.channel_name if channel else "",
+                          campaign=campaign.topic_name, href=href, action=action))
     return out
 
 

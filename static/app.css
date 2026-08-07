@@ -729,6 +729,23 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 .tl-step.now { color: var(--text); font-weight: 600; }
 .tl-step.now::before { background: var(--st-success); }
 
+/* …and the same journey as dated rows: WHERE the rail says, WHEN this says (ADR-091).
+   A stage that has happened reads at full strength; one that is only due is dimmed and labelled,
+   so a forecast never looks like a record. */
+.tl-clock { width: 100%; border-collapse: collapse; font-size: var(--fs-xs); }
+.tl-clock th, .tl-clock td { text-align: left; padding: var(--sp-1) var(--sp-2) var(--sp-1) 0;
+  border-bottom: 1px solid var(--border); vertical-align: baseline; }
+.tl-clock tr:last-child th, .tl-clock tr:last-child td { border-bottom: 0; }
+.tl-clock th { font-weight: 600; color: var(--text-subtle); white-space: nowrap; width: 9.5rem; }
+.tl-clock td.mono { white-space: nowrap; width: 12rem; }
+.tl-clock tr.done th, .tl-clock tr.done td.mono { color: var(--text); }
+.tl-clock tr.due th, .tl-clock tr.due td, .tl-clock tr.todo th, .tl-clock tr.todo td {
+  color: var(--muted); }
+@media (max-width: 600px) {
+  .tl-clock th { width: auto; }
+  .tl-clock td.meta { display: none; }
+}
+
 /* Campaign identity card (live summary) */
 .identity-card { display: flex; align-items: center; gap: var(--sp-3); background: var(--surface-2);
   border: 1px solid var(--border); border-left: 3px solid var(--primary); border-radius: var(--radius);

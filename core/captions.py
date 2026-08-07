@@ -138,6 +138,12 @@ def split_two_tone(text: str) -> tuple[str, str]:
 # ranking actually measures (swipe-away happens in the first ~3s); after it the frame must be clean
 # — a title parked over the footage for the whole clip is what killed retention.
 HEADLINE_FLASH_S = 3.0
+# The flash is fully opaque from frame ZERO — no fade-IN (ADR-092). Facebook (and most players) grab
+# the very first frame as the Reel/video cover; a fade-in leaves that frame blank, so the operator
+# saw a coverless preview with the hook only appearing ~1s in. A gentle fade-OUT still clears the
+# frame after the window, so the hook lands instantly and the footage is clean for the rest.
+HEADLINE_FADE_IN_MS = 0
+HEADLINE_FADE_OUT_MS = 400
 # The DRAWN title is a teaser, not the published title. The AI writes 12-15-word Vietnamese hooks;
 # at billboard size those wrap to five or six rows and eat half of a 1920px frame. Cut at a word
 # boundary: an unfinished hook ("VỊ HOÀNG ĐẾ BỎ NGAI VÀNG VÀO CHIẾN KHU…") is a better 3-second
@@ -197,9 +203,11 @@ def _headline_style_and_event(
     # Alignment 8 = top-centre; heavy outline + shadow so the title reads over any footage/drawing.
     style = (f"Style: Headline,{font_name},{hpx},&H00FFFFFF,&H00000000,&H80000000,"
              f"1,0,1,6,3,8,{MARGIN_PX},{MARGIN_PX},{top_margin},1")
-    # Quick fade in, gentle fade out — the frame is fully clean after the flash window.
+    # Fully opaque from frame 0 (no fade-in) so the platform's first-frame cover shows the hook,
+    # then a gentle fade-out — the frame is fully clean after the flash window (ADR-092).
+    fad = r"{\fad(%d,%d)}" % (HEADLINE_FADE_IN_MS, HEADLINE_FADE_OUT_MS)
     event = (f"Dialogue: 0,{_ass_time(0)},{_ass_time(min(HEADLINE_FLASH_S, end_s))},Headline,,0,0,0,,"
-             r"{\fad(150,400)}" + text)
+             + fad + text)
     return style, event
 
 
@@ -277,7 +285,7 @@ Style: Word,{font_name},{font_px},{primary},{spec['outline']},{spec['back']},1,0
         # Alignment 5 = middle-centre; italic; soft outline+shadow so it reads over any illustration.
         header += (f"Style: Quote,{font_name},{qpx},&H00FFFFFF,&H64101820,&H80000000,"
                    f"0,1,1,2,2,5,{MARGIN_PX},{MARGIN_PX},0,1\n")
-    # Optional top billboard headline (drawn for the whole clip, above the word captions).
+    # Optional top billboard headline — a 3-second hook flash (ADR-078), above the word captions.
     headline_event = ""
     if headline and headline.strip():
         style_line, headline_event = _headline_style_and_event(
