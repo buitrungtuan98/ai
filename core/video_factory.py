@@ -476,9 +476,10 @@ def pick_metadata(script: VideoScript, episode_number: int, ab_testing: bool = T
     variations = script.metadata_variations
     chosen = variations[0] if not ab_testing else variations[(max(episode_number, 1) - 1) % len(variations)]
     meta = chosen.model_dump()
-    # The raw AI hook (before any brand prefix/affiliate) — used for the on-screen billboard title so
-    # the drawn headline stays a clean hook, while the PUBLISHED title may still carry a brand prefix.
-    meta["hook_title"] = chosen.title
+    # The DRAWN on-screen hook (ADR-092): the AI's short curiosity `billboard_hook` when present,
+    # else the title (teased downstream). Taken BEFORE any brand prefix/affiliate so the drawn
+    # headline stays a clean hook, while the PUBLISHED title may still carry a brand prefix.
+    meta["hook_title"] = (getattr(chosen, "billboard_hook", None) or "").strip() or chosen.title
     if title_prefix and title_prefix.strip():
         meta["title"] = f"{title_prefix.strip()} {meta['title']}"[:100]  # YouTube's hard cap
     if affiliate_url:

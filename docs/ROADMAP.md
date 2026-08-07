@@ -1916,6 +1916,40 @@ knew things about itself that no surface could say.
   docs guard green.
 
 
+## R26 — the hook lands on the first frame, and the title is a short curiosity gap `DONE`
+
+Two Facebook reports, from the same operator who shared a Reel preview: the 3-second hook flash was
+**invisible in the preview**, and the two-line title was **cut mid-word to "…"**. Both were the drawn
+title fighting the wrong constraints — ADR-092 has the write-up.
+
+- **The flash is opaque from frame 0.** Facebook (and most players) grab the FIRST frame as the
+  Reel/video cover, and the old `\fad(150,400)` made that frame blank — the hook only appeared ~1s
+  in, after the cover was already captured. The fade-IN is now 0 (`HEADLINE_FADE_IN_MS`), so the
+  cover carries the hook; the fade-OUT stays, so the frame still clears after the window.
+- **The drawn title is a short hook, written as one.** The billboard used to draw the 12-15-word
+  PUBLISHED title, teased to `TEASER_MAX_CHARS` and cut to "…" on almost every Vietnamese title. The
+  AI now writes a dedicated `billboard_hook` per A/B variant — a ≤6-word, ≤48-char curiosity gap
+  (question / bold claim / shocking number / paradox) that never spoils the payoff. `pick_metadata`
+  draws it (falling back to the title for legacy scripts); `teaser()` stays as the safety net. The
+  published title is never touched — it stays long for search. A short hook renders at the full flash
+  size instead of shrinking, so it also reads bigger.
+- **The cold open earns the first two seconds.** The script prompt now demands scene 1 open IN THE
+  MIDDLE OF THE ACTION or on the single most striking image of the piece — never a slow warm-up —
+  with scene-1 keywords describing that specific visual and the first narration sentence landing the
+  hook. Per-episode footage dedupe (`prefer_unused`) already makes each opening unique; scoring
+  candidate frames for "most striking" was rejected on cost (it means downloading and probing every
+  candidate on a CPU-only box — the generator is the cheaper, higher-altitude lever).
+- **The generated poster becomes the platform cover.** The poster the factory already draws was
+  shown only in-app. It is now uploaded as the custom thumbnail: YouTube `thumbnails.set` (fail-open
+  — an unverified channel is refused and the publish still succeeds; the Shorts FEED ignores custom
+  thumbnails, which is why the in-video flash carries shorts) and a long-form Facebook Page video's
+  `thumb`. A Reel has no cover API, so a vertical short relies on the frame-0 flash.
+- **Compliance (ADR-006 unchanged):** the hook and cold open are retention/branding craft, not
+  duplicate-detection evasion; operators still owe each platform's ToS on near-identical content.
+- Verified: 761 tests pass, 13 skipped (13 new in `tests/test_r26_hook_flash.py`), ruff clean, docs
+  guard green.
+
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

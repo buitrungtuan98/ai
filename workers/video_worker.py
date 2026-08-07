@@ -406,21 +406,22 @@ def hydrate_buffers(db, *, buffer_size: int | None = None, enqueue=enqueue_rende
 # ── Publishing / notification dispatch (lazy imports) ────────────────────────
 def _publish(channel: Channel, video_path: str, metadata: dict, user: User,
              *, pending_video_id: str | None = None, on_pending=None,
-             retrying: bool = False) -> str:
+             retrying: bool = False, thumbnail_path: str | None = None) -> str:
     """Upload to whichever platform this channel is. `pending_video_id`/`on_pending` are Facebook's
     duplicate-post guard (ADR-073); `retrying` arms YouTube's title-match guard (ADR-087) — its
-    resumable upload only protects within one call, not across a fresh retry job."""
+    resumable upload only protects within one call, not across a fresh retry job. `thumbnail_path`
+    (the generated poster) is set as the video's cover where the platform allows it (ADR-092)."""
     if channel.platform == Platform.youtube:
         from services import youtube_service
 
         return youtube_service.upload_video(channel, video_path, metadata, user,
-                                            check_existing=retrying)
+                                            check_existing=retrying, thumbnail_path=thumbnail_path)
     if channel.platform == Platform.facebook:
         from services import facebook_service
 
         return facebook_service.upload_video(channel, video_path, metadata,
                                              pending_video_id=pending_video_id,
-                                             on_pending=on_pending)
+                                             on_pending=on_pending, thumbnail_path=thumbnail_path)
     raise RuntimeError(f"Unknown platform: {channel.platform}")
 
 
@@ -754,7 +755,8 @@ def _publish_buffer(db, task: Task, buf: BufferPoolItem, campaign: Campaign,
     video_id = _publish(channel, buf.video_path, meta, user,
                         pending_video_id=(buf.metadata_json or {}).get("pending_video_id"),
                         on_pending=remember_pending,
-                        retrying=bool(task.retry_count) or prior_attempts > 0)
+                        retrying=bool(task.retry_count) or prior_attempts > 0,
+                        thumbnail_path=buf.thumbnail_path)
 
     # Publish success is ONE commit (R22): published ids, the consumed buffer and the COMPLETED
     # status land together. They used to span three commits with file I/O in between, so a kill in

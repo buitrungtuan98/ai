@@ -270,8 +270,13 @@ def _upload_reel(page_id: str, token: str, video_path: str, metadata: dict,
     return video_id
 
 
-def _upload_page_video(page_id: str, token: str, video_path: str, metadata: dict) -> str:
-    """Publish long-form 16:9 as an ordinary Page video."""
+def _upload_page_video(page_id: str, token: str, video_path: str, metadata: dict,
+                       thumbnail_path: str | None = None) -> str:
+    """Publish long-form 16:9 as an ordinary Page video. The generated poster rides along as the
+    video `thumb` when present (ADR-092); a Reel has no cover API, so a vertical short relies on the
+    3-second hook flash burned into its opening frame instead (ADR-078)."""
+    import os
+
     import requests
 
     public = wants_public(metadata)
@@ -279,20 +284,33 @@ def _upload_page_video(page_id: str, token: str, video_path: str, metadata: dict
             "access_token": token, "published": "true" if public else "false"}
     if not public:
         data["unpublished_content_type"] = "DRAFT"
-    with open(video_path, "rb") as fh:
+    # Both files must stay open across the POST; open and close them under ONE try/finally so the
+    # source handle can't leak if the thumbnail open fails. A missing/absent thumbnail simply uploads
+    # without a cover — the video is what matters, not its poster.
+    files: dict = {}
+    try:
+        files["source"] = open(video_path, "rb")
+        if thumbnail_path and os.path.exists(thumbnail_path):
+            files["thumb"] = open(thumbnail_path, "rb")
         resp = requests.post(f"{GRAPH_VIDEO}/{page_id}/videos", data=data,
-                             files={"source": fh}, timeout=_TRANSFER_TIMEOUT)
+                             files=files, timeout=_TRANSFER_TIMEOUT)
+    finally:
+        for fh in files.values():
+            fh.close()
     raise_for_graph(resp, token=token, what="Facebook upload")
     return str((resp.json() or {}).get("id") or "")
 
 
 def upload_video(channel: Channel, video_path: str, metadata: dict,
-                 *, pending_video_id: str | None = None, on_pending=None) -> str:
+                 *, pending_video_id: str | None = None, on_pending=None,
+                 thumbnail_path: str | None = None) -> str:
     """Publish a video to the Page and return its Facebook id.
 
     Vertical shorts go up as Reels, long-form as a Page video; the campaign's privacy choice is
     honoured either way and the CTA is posted as a comment (ADR-073). `pending_video_id`/`on_pending`
-    are the retry guard: a previous attempt's id is checked before anything is uploaded again."""
+    are the retry guard: a previous attempt's id is checked before anything is uploaded again.
+    `thumbnail_path` (the generated poster) is set as a Page-video cover; Reels have no cover API and
+    rely on the burned-in hook flash instead (ADR-092)."""
     import requests
 
     page_id, token = _load(channel)
@@ -307,7 +325,7 @@ def upload_video(channel: Channel, video_path: str, metadata: dict,
 
     try:
         video_id = (_upload_reel(page_id, token, video_path, metadata, on_pending) if reel
-                    else _upload_page_video(page_id, token, video_path, metadata))
+                    else _upload_page_video(page_id, token, video_path, metadata, thumbnail_path))
     except requests.RequestException as exc:
         raise FacebookError(f"Facebook upload failed: {scrub(str(exc), token)}") from None
     if not video_id:

@@ -2436,3 +2436,63 @@ only `finished_at`, which means "published" on a COMPLETED task and "rendered" o
 consumed buffer row still remembers the publish instant in `consumed_at`. A stage with no
 recoverable time reports as blank rather than borrowing a neighbour's — one value must never appear
 twice under two labels, which is the failure mode this ADR exists to end.
+
+
+### ADR-092 — The hook lands on the first frame, and the drawn title is a short curiosity gap
+
+**Context.** An operator shared a Facebook Reel preview with two complaints, a session after ADR-091
+shipped. First: the 3-second hook flash (ADR-078) was **invisible in the preview** — it only
+appeared about a second into playback. Second: the two-line title was **cut mid-word to "…"**. Both
+are the *drawn* title fighting constraints that were never right for it.
+
+1. **The cover is frame zero, and the flash faded IN.** Facebook grabs the very first frame of a
+   Reel as its cover, and most players show frame 0 while a video is paused/buffering. The headline
+   event carried `{\fad(150,400)}` — a 150 ms fade-IN — so at t=0 the title's alpha was 0. The one
+   frame the platform samples for the cover was the one frame guaranteed to have no title on it. The
+   hook that exists to win the first two seconds was absent from the still that represents the video
+   everywhere it is not yet playing.
+2. **The drawn title was the published title.** `hook_title` was set to the AI's `title` — a
+   12-15-word, ≤100-char string tuned for *search*. `teaser()` cut it at ~56 chars with an ellipsis,
+   so nearly every Vietnamese title was drawn as a truncated fragment. ADR-078 framed that fragment
+   as "a better curiosity gap than six unreadable rows", which is true relative to the disease but is
+   still the wrong altitude: the cut was patching a title that should never have been the drawn text.
+
+**Decision.**
+
+1. **The flash is opaque from frame 0.** `HEADLINE_FADE_IN_MS = 0` (only the fade-OUT remains), so
+   the cover the platform captures carries the hook and the frame still clears after the window. This
+   is the whole fix for complaint (1), and it is one constant with a name that says why.
+2. **`MetadataVariation.billboard_hook` is the drawn text, written short on purpose.** The AI writes
+   a ≤6-word, ≤48-char curiosity hook per A/B variant — a question, a bold claim, a shocking number,
+   a paradox — that never spoils the payoff and carries no emoji/hashtag/series-name/episode-number.
+   `pick_metadata` draws it as `hook_title`, falling back to the (teased) title for legacy scripts,
+   so nothing that already rendered breaks. The **published** `title` is never touched — it stays
+   long for search — and `teaser()` stays as the safety net for an overlong or legacy hook. A short
+   hook does not trip the shrink loop, so it renders at the full flash size: readable and bold, the
+   "cực hook" the operator asked for, without a bigger cut.
+3. **The cold open earns the window.** The script prompt now demands scene 1 open IN THE MIDDLE OF
+   THE ACTION or on the single most striking image of the piece — never a warm-up or a "today we
+   talk about…" intro — with scene-1 keywords describing that specific arresting visual and the
+   first narration sentence landing the hook. Per-episode footage dedupe (`prefer_unused`) already
+   makes each opening unique.
+4. **The generated poster becomes the platform cover.** The factory already draws a poster; it was
+   shown only in-app. It is now uploaded — YouTube `thumbnails.set` and a long-form Facebook Page
+   video's `thumb` — both fail-open, because an unverified YouTube channel is refused a custom
+   thumbnail and that must never sink a publish that already succeeded. A Reel has no cover API, so a
+   vertical short's cover is exactly the frame-0 flash from decision (1); the custom thumbnail is a
+   search/channel/share surface (the Shorts feed ignores it), which is where the poster earns its
+   place.
+
+**Rejected: scoring candidate footage to pick the "most striking" opening shot.** It sounds like the
+natural companion to decision (3), but a visual-interest score needs the pixels — every candidate
+downloaded and probed — on a CPU-only, single-render box (a hard constraint, not a preference). The
+generator is the cheaper and higher-altitude lever: steer what scene 1 *is*, don't grade what the
+stock library happened to return.
+
+**Compliance (ADR-006 unchanged).** The hook, the cold open and the per-video variation remain
+retention/branding craft, not duplicate-detection evasion; the bulk-variation gate stays off by
+default and operators still owe each platform's ToS on near-identical content.
+
+**Cost.** Existing `flash` campaigns change mid-flight: their next renders draw the short
+`billboard_hook` (or the teased title until the AI supplies one) and their covers carry the hook.
+That is the point of the change.
