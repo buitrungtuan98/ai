@@ -2529,3 +2529,21 @@ work an operator can publish with one click was the worse failure.
 **Rejected: classifying the 403 as transient with a longer back-off.** Microsoft's refusal of a
 stale token is deterministic until the library changes; retries only spend the render slot.
 
+4. **Keeping edge-tts current: Dependabot, not a runtime self-upgrade.** Merging to `main` already
+   builds and deploys, so the only missing step was *noticing* a release. `.github/dependabot.yml`
+   opens a daily bump PR scoped to edge-tts alone; CI gates it and a merge ships it. Rejected:
+   `pip install -U edge-tts` at worker boot or on a 403 — it would run unreviewed PyPI code in the
+   container that holds the Fernet key and OAuth tokens (a supply-chain hole), make the image
+   non-reproducible, and still not pass the test suite first.
+5. **The final Auto-QC judge gets the text leg's resilience.** Operators saw nearly every video
+   parked for review. The vision judge was one bare call on the chain's primary model with a
+   2048-token cap: a per-minute 429 (the script, critic and script judge had just spent the same
+   minute's quota), a spent primary, or a thinking model burning the cap before the JSON all became
+   "QC unavailable" → parked. `generate_structured` now accepts `image_paths`/`audio_path` and the
+   QC judge runs through it — one retry/repair/fallback loop for text and vision (DRY). The footage
+   judges stay single-shot: they are optional and fail open.
+6. **Auto-requalify is timed to the outage.** One re-judge, 2h later, fired straight into a daily
+   quota that resets only at Pacific midnight. Now up to three re-judges ≥ 2h apart, and a
+   daily-quota park waits for `failure.quota_reset_since`. Bounded: three vision calls per parked
+   video at most, still under the shared budget reserve.
+

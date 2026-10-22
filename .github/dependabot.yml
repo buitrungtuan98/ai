@@ -1,0 +1,16 @@
+# Keeps edge-tts current without anyone watching PyPI (R27, ADR-093).
+#
+# edge-tts rides Microsoft's undocumented read-aloud endpoint, and Microsoft rotates its auth every
+# few months; a stale pin then 403s EVERY render. Dependabot opens a bump PR the day a release
+# lands, CI (tests.yml) runs on it, and merging deploys it (deploy.yml). Deliberately scoped to
+# edge-tts only: every other pin moves on purpose, not on a bot's schedule (KISS).
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    allow:
+      - dependency-name: "edge-tts"
+    labels: ["dependencies", "tts"]
+    open-pull-requests-limit: 2

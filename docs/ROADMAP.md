@@ -1968,8 +1968,18 @@ transient"; meanwhile episodes that HAD rendered were deleted as "aged out befor
 - **A breaker-paused campaign holds its finished episodes.** `expire_stale_buffers` skips campaigns
   in `failed` (circuit breaker): the breaker stops slot publishing, so the sweep was deleting
   videos that could only wait. ▶ Start resumes publishing them.
-- Verified: 779 tests pass (5 new in `tests/test_r27_tts_refusal.py`), ruff clean, docs guard
-  green. Live TTS against Microsoft is credential/network-gated — verify one render on the box.
+- **edge-tts stays current by itself.** `.github/dependabot.yml` opens a daily bump PR for edge-tts
+  only; CI runs on it and merging deploys. A runtime self-upgrade inside the container was
+  rejected (unreviewed PyPI code running next to the Fernet key and OAuth tokens).
+- **Auto-QC no longer parks videos on a hiccup.** The final vision judge was ONE bare call on the
+  chain's primary model with a 2048-token cap: a per-minute 429, a spent primary, or a thinking
+  model truncating its JSON all read as "QC unavailable" and parked the video for a human. It now
+  runs through `generate_structured` (retry, JSON repair, chain fallback, 8192 tokens).
+- **Auto-requalify gets three tries, timed to the outage.** It re-judged ONCE, 2h later — straight
+  into the same spent daily quota. Now up to 3 re-judges ≥ 2h apart, and a daily-quota park waits
+  for the Pacific reset.
+- Verified: 783 tests pass (9 new in `tests/test_r27_tts_refusal.py`), ruff clean, docs guard
+  green. Live TTS / Gemini are credential/network-gated — verify one render on the box.
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation

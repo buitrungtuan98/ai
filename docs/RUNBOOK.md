@@ -197,6 +197,8 @@ failed episodes. Transient one-off 403s are retried automatically (3 attempts). 
 edge-tts still 403s persistently from the box, Microsoft may be blocking that IP range — the
 escape hatch is swapping `core/tts.py`'s backend for a paid/keyed TTS API (e.g. Azure Speech free
 tier) behind the same interface.
+Dependabot (`.github/dependabot.yml`) opens the edge-tts bump PR for you the day a release lands
+— review it, let CI pass, merge, and the deploy workflow ships it.
 **After any edge-tts upgrade, verify subtitles on one video**: library defaults can change
 silently — e.g. 7.x switched the default from word to SENTENCE boundaries, which produced perfect
 videos with zero captions until `boundary="WordBoundary"` was passed explicitly (a regression test

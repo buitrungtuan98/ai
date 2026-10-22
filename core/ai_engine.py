@@ -254,12 +254,18 @@ def generate_structured(
     temperature: float = 0.7,
     max_output_tokens: int = 8192,  # generous: thinking tokens + full JSON must both fit
     max_retries: int = 3,
+    image_paths: list[str] | None = None,
+    audio_path: str | None = None,
 ) -> T:
     """Call Gemini and return a validated instance of `schema`.
 
     `model` may be a comma-separated fallback chain: a retired model (404) or an exhausted daily
     quota fails over to the next entry automatically, so a Google-side model retirement or a spent
-    free tier degrades instead of halting the factory."""
+    free tier degrades instead of halting the factory.
+
+    `image_paths` (+ optional `audio_path`) routes the same retry/repair/fallback loop through the
+    vision call (R27): the final Auto-QC used to be ONE bare attempt on the chain's primary model,
+    so a per-minute 429 or a spent primary parked every finished video for a human."""
     models = model_chain(model)
     last: GeminiError | None = None
     for i, m in enumerate(models):
@@ -267,7 +273,7 @@ def generate_structured(
             return _generate_structured_single(
                 prompt=prompt, schema=schema, api_key=api_key, system_prompt=system_prompt,
                 model=m, temperature=temperature, max_output_tokens=max_output_tokens,
-                max_retries=max_retries,
+                max_retries=max_retries, image_paths=image_paths, audio_path=audio_path,
             )
         except GeminiError as exc:
             msg = str(exc)
@@ -289,6 +295,8 @@ def _generate_structured_single(
     temperature: float,
     max_output_tokens: int,
     max_retries: int,
+    image_paths: list[str] | None = None,
+    audio_path: str | None = None,
 ) -> T:
     """One model's attempt loop: retries with backoff and a repair turn on JSON/validation errors;
     fails FAST (no retry burn) on deterministic errors — daily quota spent, model not found."""
@@ -304,14 +312,21 @@ def _generate_structured_single(
     for attempt in range(max_retries):
         rate_limited = False
         try:
-            raw = _call_gemini(
-                api_key=api_key,
-                model=model,
-                prompt=convo,
-                system_prompt=system_prompt,
-                temperature=temperature,
-                max_output_tokens=max_output_tokens,
-            )
+            if image_paths:
+                raw = _call_gemini_vision(
+                    api_key=api_key, model=model, image_paths=image_paths, audio_path=audio_path,
+                    prompt=f"{system_prompt}\n\n{convo}" if system_prompt else convo,
+                    temperature=temperature, max_output_tokens=max_output_tokens,
+                )
+            else:
+                raw = _call_gemini(
+                    api_key=api_key,
+                    model=model,
+                    prompt=convo,
+                    system_prompt=system_prompt,
+                    temperature=temperature,
+                    max_output_tokens=max_output_tokens,
+                )
             return schema.model_validate_json(_strip_code_fence(raw))
         except GeminiBlockedError:
             raise  # not retryable — the content itself was refused
@@ -1475,8 +1490,10 @@ def judge_video_frames(frame_paths: list[str], *, api_key: str, context: str = "
                        model: str = DEFAULT_MODEL) -> VideoQCVerdict:
     """Final-output spot check: are captions readable, visuals coherent, nothing broken?
     With `audio_path` set, the SAME call also judges the voice track (clear speech, right
-    language, music not drowning the narration) — audio-aware QC at zero extra API cost."""
-    schema_hint = json.dumps(VideoQCVerdict.model_json_schema(), ensure_ascii=False)
+    language, music not drowning the narration) — audio-aware QC at zero extra API cost.
+
+    Runs through `generate_structured` (R27): retries a rate limit, repairs bad JSON, and falls
+    over the model chain — this verdict decides whether a video publishes or waits for a human."""
     audio_line = ""
     if audio_path:
         audio_line = (
@@ -1485,15 +1502,15 @@ def judge_video_frames(frame_paths: list[str], *, api_key: str, context: str = "
             "the stated language, background music (if any) never drowns the voice, and there "
             "are no long unintended silences. "
         )
-    raw = _call_gemini_vision(
-        api_key=api_key, model=model, image_paths=frame_paths, audio_path=audio_path,
+    return generate_structured(
+        api_key=api_key, model=model, schema=VideoQCVerdict, temperature=0.2,
+        image_paths=frame_paths, audio_path=audio_path,
         prompt=("These are frames sampled from an automatically produced vertical (9:16) short "
                 f"video. {context}\n"
                 "Check: captions present and readable (not clipped), visuals look coherent and "
-                f"intentional (no broken/black/garbled frames), overall watchable quality. {audio_line}"
-                f"Return ONLY JSON matching this schema:\n{schema_hint}"),
+                f"intentional (no broken/black/garbled frames), overall watchable quality. "
+                f"{audio_line}"),
     )
-    return VideoQCVerdict.model_validate_json(_strip_code_fence(raw))
 
 
 # ── Critic pass (Loop 1: every video improves before it is even rendered) ────

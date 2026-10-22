@@ -963,7 +963,7 @@ def autopilot_review_channel(db, channel, mode: str, approve_min: int, reject_ma
 
 
 REQUALIFY_MIN_AGE_HOURS = 2   # give a judge outage time to clear before asking again
-REQUALIFY_MAX_AUTO = 1        # ONE automatic re-judge per item; after that the button is the human's
+REQUALIFY_MAX_AUTO = 3        # automatic re-judges per item (R27); after that the button is the human's
 
 
 def autopilot_requalify_channel(db, channel) -> int:
@@ -971,11 +971,15 @@ def autopilot_requalify_channel(db, channel) -> int:
 
     Batch Q made an unavailable judge park honestly — but then the item waited for a human forever,
     even though `requalify_task` exists and judge outages are quota-shaped (they clear at the
-    Pacific reset or within minutes for a rate limit). This queues ONE automatic re-judge per item,
-    only after the outage has had ≥ REQUALIFY_MIN_AGE_HOURS to clear, and only below the shared
-    budget reserve. The re-judge updates the verdict in place and the item STAYS parked — the next
-    review pass routes on the fresh verdict exactly as it would on any other. The marker lives at
-    the metadata top level (`auto_requalify`) because `requalify_task` rewrites the `qc` dict."""
+    Pacific reset or within minutes for a rate limit). This queues up to REQUALIFY_MAX_AUTO
+    automatic re-judges per item, each ≥ REQUALIFY_MIN_AGE_HOURS after the last, and only below the
+    shared budget reserve. A judge absent for a spent DAILY quota is not asked again until a Pacific
+    reset has passed (R27): the single re-judge used to fire 2h later into the same spent quota,
+    fail identically, and leave the episode for a human — every episode, on a quota-tight day.
+    The re-judge updates the verdict in place and the item STAYS parked — the next review pass
+    routes on the fresh verdict exactly as it would on any other. The markers live at the metadata
+    top level (`auto_requalify` = last attempt, `auto_requalify_n` = count) because
+    `requalify_task` rewrites the `qc` dict."""
     from core.usage import reserve_reached
 
     user = db.get(User, channel.user_id)
@@ -983,7 +987,8 @@ def autopilot_requalify_channel(db, channel) -> int:
         return 0
     if reserve_reached(user):
         return 0   # the judge is likely absent for exactly this reason — asking again burns quota
-    cutoff = datetime.utcnow() - timedelta(hours=REQUALIFY_MIN_AGE_HOURS)
+    now = datetime.utcnow()
+    cutoff = now - timedelta(hours=REQUALIFY_MIN_AGE_HOURS)
     queued = 0
     items = db.scalars(
         select(BufferPoolItem).join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
@@ -993,11 +998,19 @@ def autopilot_requalify_channel(db, channel) -> int:
     for item in items:
         md = item.metadata_json or {}
         qc = md.get("qc") or {}
-        if not qc.get("unavailable") or md.get("auto_requalify"):
+        if not qc.get("unavailable"):
             continue
-        if item.created_at and item.created_at > cutoff:
+        last = md.get("auto_requalify")
+        tries = int(md.get("auto_requalify_n") or (1 if last else 0))  # pre-R27 marker = one try
+        if tries >= REQUALIFY_MAX_AUTO:
+            continue
+        since = datetime.fromisoformat(last) if last else item.created_at
+        if since and since > cutoff:
             continue   # too fresh — the outage that parked it may still be in force
-        item.metadata_json = {**md, "auto_requalify": datetime.utcnow().isoformat()}
+        reason = qc.get("unavailable_reason") or ""
+        if since and "daily quota" in reason and not failure.quota_reset_since(reason, since, now):
+            continue   # the spent quota only comes back at the Pacific reset
+        item.metadata_json = {**md, "auto_requalify": now.isoformat(), "auto_requalify_n": tries + 1}
         db.commit()
         task_queue.enqueue_requalify(item.id)
         queued += 1
