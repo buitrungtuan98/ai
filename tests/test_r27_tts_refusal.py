@@ -232,13 +232,40 @@ def test_no_sentence_is_sent_to_the_voice_without_a_word_in_it():
     assert tts.pause_after('"Why?"') == tts.pause_after("Why?")
 
 
-def test_no_audio_received_needs_a_fresh_script_not_a_retry():
+def test_no_audio_received_is_named_and_stays_retryable():
     from core import failure
 
     msg = ("edge_tts.exceptions.NoAudioReceived: No audio was received. Please verify that your "
            "parameters are correct.")
-    assert failure.diagnose(msg)["cause"] == "The voice service returned no audio for a line"
-    assert failure.is_transient(msg) is False
+    d = failure.diagnose(msg)
+    assert d["cause"] == "The voice service returned no audio for a line"
+    assert "Discard & re-render" in d["fix"]
+    assert failure.is_transient(msg) is True   # the deterministic cause is fixed upstream (R30)
+
+
+def test_a_paused_campaign_keeps_its_videos_after_it_resumes(session, user, channel, tmp_path,
+                                                            monkeypatch):
+    """R30: the hold must STOP the age clock — skipping alone deleted them on the first sweep after
+    the resume."""
+    import os
+
+    from database.types import BufferStatus, CampaignStatus
+    from workers import scheduler, task_queue
+
+    monkeypatch.setattr(task_queue, "queued_publish_buffer_ids", lambda: set())
+    camp = _campaign(session, user, channel, CampaignStatus.failed)
+    item = _ready(session, camp, channel, 1, tmp_path, datetime.utcnow() - timedelta(hours=10))
+    t0 = datetime.utcnow()
+    scheduler.expire_stale_buffers(session, now=t0)                       # held: clock stops
+    camp.status = CampaignStatus.active                                   # ▶ Start, 5 days later
+    session.commit()
+    scheduler.expire_stale_buffers(session, now=t0 + timedelta(days=5))
+    session.refresh(item)
+    assert item.status == BufferStatus.ready and os.path.exists(item.video_path)
+    assert item.metadata_json["held_hours"] >= 119                        # the pause was banked
+    scheduler.expire_stale_buffers(session, now=t0 + timedelta(days=10)) # …but it still ages
+    session.refresh(item)
+    assert item.status == BufferStatus.expired
 
 
 def test_dark_footage_is_not_a_black_screen_but_pure_black_is(tmp_path):

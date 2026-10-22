@@ -150,6 +150,7 @@ def expire_stale_buffers(db, *, max_age_hours: int | None = None, now: datetime 
     publish_in_motion = task_queue.queued_publish_buffer_ids()
     queue_pos: dict[int, int] = {}   # position of each campaign's next item in its publish queue
     expired = 0
+    held_changed = False
     for item in items:
         # An upload already on its way is never stale inventory (R22): approving an old-enough
         # episode used to hand it straight to this sweep, which deleted the file minutes before
@@ -167,8 +168,20 @@ def expire_stale_buffers(db, *, max_age_hours: int | None = None, now: datetime 
         # halts slot publishing, so its ready items could only wait — and this sweep then deleted
         # them as "aged out". A run of failed renders (a stale edge-tts, a dead key) cost the
         # episodes that HAD rendered fine. ▶ Start resumes publishing them where they stood.
+        # The clock STOPS while held (R30): skipping alone only postponed the delete to the first
+        # sweep after the resume, which ran before the publish loop and found the item days old.
+        md = dict(item.metadata_json or {})
         if campaign is not None and campaign.status == CampaignStatus.failed:
+            if "held_since" not in md:
+                item.metadata_json = {**md, "held_since": now.isoformat()}
+                held_changed = True
             continue
+        if "held_since" in md:   # released — bank how long it was held, then age normally
+            since = datetime.fromisoformat(md.pop("held_since"))
+            md["held_hours"] = round(float(md.get("held_hours") or 0)
+                                     + max(0.0, (now - since).total_seconds() / 3600), 2)
+            item.metadata_json = md
+            held_changed = True
         if campaign is not None:
             cfg = campaign.config_json or {}
         item_max_age = max(max_age_hours, 7 * 24 + 12) if cfg.get("posting_days") else max_age_hours
@@ -182,6 +195,7 @@ def expire_stale_buffers(db, *, max_age_hours: int | None = None, now: datetime 
         elif item.created_at is not None:
             own_wait_h = (item.publish_at - item.created_at).total_seconds() / 3600
             item_max_age = max(item_max_age, own_wait_h + 24)
+        item_max_age += float(md.get("held_hours") or 0)   # time held paused is not age
         cutoff = now.timestamp() - item_max_age * 3600
         # Age from when the item became PUBLISHABLE (approval), not from the render (R22): days
         # parked awaiting review used to count against the budget, so reviewing late meant the
@@ -224,8 +238,9 @@ def expire_stale_buffers(db, *, max_age_hours: int | None = None, now: datetime 
                             campaign_id=item.campaign_id,
                             evidence={"episode": item.episode_number,
                                       "max_age_hours": int(item_max_age)})
-    if expired:
+    if expired or held_changed:
         db.commit()
+    if expired:
         logger.info("Expired %d stale buffer item(s)", expired)
     return expired
 
@@ -245,20 +260,33 @@ def finish_stranded_campaign(db, campaign) -> bool:
     if campaign.status != CampaignStatus.active:
         return False
     total = campaign.total_episodes or 0
-    if not total or campaign.current_episode >= total:
+    if not total:
         return False
     tasks = [t for t in db.scalars(select(Task).where(Task.campaign_id == campaign.id)).all()
              if t.episode_number < COMPILATION_EPISODE_BASE]
+    buffered = db.scalar(select(func.count()).select_from(BufferPoolItem).where(
+        BufferPoolItem.campaign_id == campaign.id,
+        BufferPoolItem.status.in_([BufferStatus.ready, BufferStatus.awaiting_review]),
+        BufferPoolItem.episode_number < COMPILATION_EPISODE_BASE))
+    if campaign.current_episode >= total:
+        # At its total and still "active" (R30): a wind-down sets total = published, and
+        # completion only ever ran on a publish. Rendered extras get to publish first — the one
+        # that does completes it the normal way — and once none is left, it is closed here, so
+        # auto-create sees the gap instead of a campaign "running" at N/N forever.
+        working = (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED,
+                   TaskStatus.SCHEDULED, TaskStatus.AWAITING_REVIEW)
+        if buffered or any(t.status not in working for t in tasks):
+            return False
+        video_worker.complete_campaign(db, campaign)
+        logger.info("Campaign %s closed at %s/%s", campaign.id, campaign.current_episode, total)
+        return True
     by_ep = {t.episode_number: t for t in tasks}
     if any(ep not in by_ep for ep in range(1, total + 1)):
         return False   # episodes still to be created — hydration owns this campaign
     terminal = (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED)
     if any(t.status not in terminal for t in tasks):
         return False   # something is still rendering/waiting — not stranded
-    if db.scalar(select(func.count()).select_from(BufferPoolItem).where(
-            BufferPoolItem.campaign_id == campaign.id,
-            BufferPoolItem.status.in_([BufferStatus.ready, BufferStatus.awaiting_review]),
-            BufferPoolItem.episode_number < COMPILATION_EPISODE_BASE)):
+    if buffered:
         return False   # a rendered episode is still on its way out
     dead = [t for t in tasks if t.status == TaskStatus.FAILED]
     for t in dead:
@@ -985,7 +1013,9 @@ def autopilot_requalify_channel(db, channel) -> int:
     queued = 0
     items = db.scalars(
         select(BufferPoolItem).join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
-        .where(Campaign.channel_id == channel.id,
+        # Active campaigns only (R30): the review pass skips the rest, so re-judging their parks
+        # spent vision calls on a verdict nothing would read.
+        .where(Campaign.channel_id == channel.id, Campaign.status == CampaignStatus.active,
                BufferPoolItem.status == BufferStatus.awaiting_review)
         .order_by(BufferPoolItem.id)).all()
     for item in items:
@@ -1447,12 +1477,6 @@ def apply_autopilot_action(db, action, *, auto_start_successor: bool = False,
                 raise ValueError("campaign gone")
             campaign.total_episodes = max(1, int(action.params.get("total_episodes")))
             db.commit()
-            if action.kind == "wind_down" and campaign.current_episode >= campaign.total_episodes:
-                # Stopped means finished (R29). Completion only ever happened on a publish, and a
-                # wound-down campaign has nothing left to publish — so it sat "active" at N/N for
-                # good, auto-create counted it as running, and the channel went quiet instead of
-                # getting a replacement. Its already-rendered extras simply age out.
-                video_worker.complete_campaign(db, campaign)
             if action.kind == "extend":
                 try:
                     video_worker.hydrate_campaign(db, campaign)  # render the newly-allowed episodes
@@ -1586,7 +1610,11 @@ def autopilot_refill_channel(db, channel, now: datetime | None = None) -> int:
         return 0
     now = now or datetime.utcnow()
     campaigns = db.scalars(select(Campaign).where(Campaign.channel_id == channel.id)).all()
-    if sum(c.status == CampaignStatus.active for c in campaigns) >= fs["min_active"]:
+    # A breaker-stopped campaign still holds its slot (R30): replacing it the same pass let a
+    # systemic fault (dead key, refused voice) spawn a fresh failing campaign every few days, and
+    # auto-resume then pushed the channel past `max_active`. It waits for resume or the operator.
+    occupied = (CampaignStatus.active, CampaignStatus.failed)
+    if sum(c.status in occupied for c in campaigns) >= fs["min_active"]:
         return 0
     if any(c.status == CampaignStatus.pending for c in campaigns):
         return 0   # the operator has one queued up — starting it is their call, not a refill
@@ -1600,10 +1628,14 @@ def autopilot_refill_channel(db, channel, now: datetime | None = None) -> int:
     if parent is None:
         return 0
     design = None
-    if not autopilot.is_proven_parent(classes[parent.id]):
-        # Only a stopped/flopping campaign to build from (R29): a fresh AI-designed angle or
-        # nothing — never a plain clone of the angle that just failed. No key / over budget →
-        # try again next pass.
+    stopped = db.scalar(select(func.count()).select_from(AutopilotAction).where(
+        AutopilotAction.campaign_id == parent.id, AutopilotAction.kind == "wind_down",
+        AutopilotAction.status == "applied"))
+    if stopped or not autopilot.is_proven_parent(classes[parent.id]):
+        # A flop-breaker or council stop needs no "underperforming" label (R30) — a stopped
+        # angle is unproven by definition, and its total records where it stopped.
+        # A fresh AI-designed angle or nothing — never a plain clone of the angle that just
+        # failed. No key / over budget → try again next pass.
         design = _design_successor(db, parent)
         if design is None:
             return 0
@@ -1626,20 +1658,30 @@ def autopilot_resume_channel(db, channel, now: datetime | None = None) -> int:
     provider blip, a spent quota) left it stopped until a human pressed ▶ Start, and its review
     queue frozen with it. This resumes one after RESUME_AFTER_HOURS when its last failure is
     retryable (`failure.is_transient`, or a quota whose Pacific reset has passed); if the fault is
-    still there, three more failures trip the breaker again. A fault that needs a human — a dead
+    still there, the very next failure trips the breaker again (the old streak still counts). A fault that needs a human — a dead
     key, a refused voice service, a safety block — is never resumed, and after MAX_AUTO_RESUMES
     tries without a single success it stays stopped for the operator. Returns campaigns resumed."""
     from core import autopilot
 
-    if not autopilot.factory_settings(channel)["auto_resume"]:
+    fs = autopilot.factory_settings(channel)
+    if not fs["auto_resume"]:
         return 0
     now = now or datetime.utcnow()
     resumed = 0
+    active = db.scalar(select(func.count()).select_from(Campaign).where(
+        Campaign.channel_id == channel.id, Campaign.status == CampaignStatus.active)) or 0
     for c in db.scalars(select(Campaign).where(Campaign.channel_id == channel.id,
                                                Campaign.status == CampaignStatus.failed)).all():
-        last_fail = db.scalars(select(Task).where(
+        if active >= fs["max_active"]:
+            break
+        # The CAUSE is the newest failure the breaker counted (R30) — the same rows
+        # `consecutive_failures` counts. A later review reject or worker-restart row is not why
+        # the campaign stopped, and reading it either blocked a healable resume or hid a dead key.
+        last_fail = next((t for t in db.scalars(select(Task).where(
             Task.campaign_id == c.id, Task.status == TaskStatus.FAILED,
-            Task.finished_at.isnot(None)).order_by(Task.finished_at.desc())).first()
+            Task.finished_at.isnot(None)).order_by(Task.finished_at.desc())).all()
+            if not (failure.is_reject(t.error_message) or failure.is_infrastructure(t.error_message))),
+            None)
         if last_fail is None or (now - last_fail.finished_at) < timedelta(hours=RESUME_AFTER_HOURS):
             continue
         msg = last_fail.error_message
@@ -1663,6 +1705,7 @@ def autopilot_resume_channel(db, channel, now: datetime | None = None) -> int:
         except Exception:  # noqa: BLE001 — the tick's own hydration picks it up next time
             logger.warning("resume hydration failed for campaign %s", c.id, exc_info=True)
         resumed += 1
+        active += 1
     return resumed
 
 

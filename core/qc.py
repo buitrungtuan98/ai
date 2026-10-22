@@ -204,8 +204,8 @@ def run_final_qc(master_path: str, *, api_key: str, context: str = "",
                 # quota or a refused key — those refuse the second call exactly the same way.
                 reason = _unavailable_reason(exc)
                 if audio_path is None or "quota" in reason or "rate-limiting" in reason \
-                        or "API key" in reason:
-                    raise
+                        or "API key" in reason or "timed out" in reason:
+                    raise   # these refuse a second call exactly the same way (a timeout: slower)
                 logger.warning("Final QC with audio failed (%s) — judging frames only", reason)
                 verdict = judge_video_frames(frames, api_key=api_key, context=context, **kwargs)
         passed = verdict.quality_score >= threshold

@@ -2032,7 +2032,28 @@ The operator asked: after full-auto stops a campaign, does it create a new one? 
   it too. `_unavailable_reason` now names a refused key, a timeout or a rejected request, and
   otherwise appends a scrubbed error tail; a call that fails with the audio track attached is
   retried frames-only (never for quota, rate limits or a refused key).
-- Verified: 797 tests pass (end-to-end refill + 2 QC tests), ruff clean, docs guard green.
+- **Independent pre-merge review (all verified, all fixed):**
+  - *A paused campaign's videos still aged out* — the R27 hold only skipped them; the first sweep
+    after ▶ Start/resume (it runs before the publish loop) found them days old and deleted them.
+    The clock now stops: `held_since` while paused, banked into `held_hours` on release.
+  - *Auto-create replaced a breaker-stopped campaign* — a dead key spawned a fresh failing campaign
+    every 3 days, and auto-resume then pushed the channel past `max_active`. A `failed` campaign now
+    occupies its slot; resume respects `max_active`.
+  - *A flop-breaker stop could be cloned with a 1–3 episode total* — the flop breaker and the
+    council stop campaigns still labelled "healthy". Any parent with an applied wind-down is now
+    unproven (fresh AI design required, its planned length used).
+  - *Auto-resume read the wrong failure* — a later review reject blocked it, a worker-restart row
+    hid a dead key. It now reads the newest failure the breaker counted, like
+    `consecutive_failures`.
+  - *A wind-down deleted its rendered extras* — it now leaves them to publish (the one that does
+    completes the campaign normally); `finish_stranded_campaign` closes an N/N campaign once nothing
+    is left. Requalify skips non-active campaigns (their parks were re-judged for nobody).
+  - *QC worst case ~19 min inside the render lock* — vision uses 2 tries, the frames-only retry is
+    skipped after a timeout, and a blocked vision response raises `GeminiBlockedError` (shared
+    `_response_text`) instead of being "repaired" twice more.
+  - *`NoAudioReceived` non-transient* — with the split fix its remaining cause is a service hiccup:
+    retryable again, fresh-script escape named in the fix copy.
+- Verified: 801 tests pass, ruff clean, docs guard green.
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation

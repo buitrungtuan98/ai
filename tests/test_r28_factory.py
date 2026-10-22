@@ -214,12 +214,14 @@ def test_a_wind_down_completes_the_campaign_and_auto_create_replaces_it(session,
     session.add(stop)
     session.commit()
     scheduler.autopilot_autoapply_channel(session, channel)
+    assert scheduler.finish_stranded_campaign(session, flop) is True     # nothing left to publish
     session.refresh(flop)
     assert flop.status == CampaignStatus.completed      # was: "active" at 7/7 forever
 
-    # Its only campaign flopped: a replacement needs a FRESH angle, never a clone.
+    # Its only campaign was stopped: a replacement needs a FRESH angle, never a clone — even
+    # when the stop came from the flop breaker and the label still reads "healthy" (R30).
     monkeypatch.setattr(autopilot, "classify_campaigns",
-                        lambda db, cs: {c.id: {"label": "underperforming"} for c in cs})
+                        lambda db, cs: {c.id: {"label": "healthy"} for c in cs})
     assert scheduler.autopilot_refill_channel(session, channel) == 0   # no AI design → wait
 
     fresh = SimpleNamespace(topic_name="A New Angle", total_episodes=30,
@@ -229,3 +231,45 @@ def test_a_wind_down_completes_the_campaign_and_auto_create_replaces_it(session,
     new = session.query(Campaign).filter(Campaign.id != flop.id).one()
     assert new.topic_name == "A New Angle" and new.status == CampaignStatus.active
     assert new.total_episodes == 30          # the fresh plan's length, not the flop's 7-episode stop
+
+
+def test_a_wound_down_campaign_publishes_its_extras_before_it_closes(session, user, channel, quiet,
+                                                                      tmp_path):
+    from database.models import BufferPoolItem
+    from database.types import BufferStatus, CampaignStatus
+    from workers import scheduler
+
+    camp = _campaign(session, user, channel, CampaignStatus.active)   # 10/10 after a wind-down
+    f = tmp_path / "x.mp4"
+    f.write_bytes(b"v")
+    session.add(BufferPoolItem(campaign_id=camp.id, channel_id=channel.id, episode_number=11,
+                               video_path=str(f), status=BufferStatus.ready))
+    session.commit()
+    assert scheduler.finish_stranded_campaign(session, camp) is False   # the extra goes out first
+    session.refresh(camp)
+    assert camp.status == CampaignStatus.active
+
+
+def test_a_breaker_stopped_campaign_holds_its_slot(session, user, channel, quiet):
+    from database.types import CampaignStatus
+    from workers import scheduler
+
+    _campaign(session, user, channel, CampaignStatus.completed)
+    _campaign(session, user, channel, CampaignStatus.failed, topic="Dead key")
+    _switch(session, channel, auto_create=True)
+    assert scheduler.autopilot_refill_channel(session, channel) == 0    # no replacement spawned
+
+
+def test_resume_reads_the_real_cause_and_respects_max_active(session, user, channel, quiet):
+    from database.types import CampaignStatus
+    from workers import scheduler
+
+    _switch(session, channel, auto_resume=True, max_active=1)
+    camp = _campaign(session, user, channel, CampaignStatus.failed)
+    _failed(session, camp, user, "ConnectionResetError: connection reset by peer", 30, ep=1)
+    _failed(session, camp, user, "Rejected in review: weak hook", 26, ep=2)   # newer, not the cause
+    busy = _campaign(session, user, channel, CampaignStatus.active, topic="Running")
+    assert scheduler.autopilot_resume_channel(session, channel) == 0      # channel already full
+    busy.status = CampaignStatus.completed
+    session.commit()
+    assert scheduler.autopilot_resume_channel(session, channel) == 1      # the reject didn't block it

@@ -2639,3 +2639,13 @@ key, a timeout and a rejected request are named, anything else carries a scrubbe
 (URLs, `key=` and API-key-shaped strings removed), and a call refused with the audio track
 attached is retried once on frames alone — a verdict from frames beats no verdict.
 
+**Revision after an independent review (same round).** Decision 1 is revised: a wind-down does NOT
+complete the campaign at once — that deleted its already-rendered extras ("nothing is deleted").
+Instead `finish_stranded_campaign` closes an active campaign at N/N once no ready/awaiting item or
+in-flight render remains; an extra that publishes completes it through `advance_campaign` as
+before. Also from that review: the breaker hold stops the expiry clock (`held_since` → `held_hours`)
+rather than merely skipping, a `failed` campaign occupies an auto-create slot, auto-resume respects
+`max_active` and reads the newest breaker-counted failure, any wound-down parent requires a fresh
+design, and the vision QC leg is bounded (2 tries; no frames-only retry after a timeout; blocks
+raise instead of being repaired).
+

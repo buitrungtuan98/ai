@@ -227,7 +227,13 @@ def _call_gemini(
     # the watchdog then executed a perfectly alive worker ("stopped making progress", en masse).
     resp = gen_model.generate_content(
         prompt, request_options={"timeout": settings.AI_CALL_TIMEOUT_SECONDS})
+    return _response_text(resp)
 
+
+def _response_text(resp) -> str:
+    """The response text, or GeminiBlockedError for a block — shared by the text and vision legs
+    (R30: vision read `resp.text` bare, so a block surfaced as a ValueError the retry loop took for
+    a repairable parse error and asked again)."""
     # Distinguish a safety block from a normal empty response.
     candidates = getattr(resp, "candidates", None) or []
     for cand in candidates:
@@ -1115,7 +1121,7 @@ def _call_gemini_vision(
     # Bounded like the text leg (R22) — a hung vision call must fail, not wedge the worker.
     resp = gen_model.generate_content(
         parts, request_options={"timeout": settings.AI_CALL_TIMEOUT_SECONDS})
-    return resp.text
+    return _response_text(resp)
 
 
 # ── Image generation (Studio Mode: AI-drawn story visuals) ───────────────────
@@ -1504,7 +1510,10 @@ def judge_video_frames(frame_paths: list[str], *, api_key: str, context: str = "
         )
     return generate_structured(
         api_key=api_key, model=model, schema=VideoQCVerdict, temperature=0.2,
-        image_paths=frame_paths, audio_path=audio_path,
+        # Two tries, not three (R30): this runs inside the render lock, and the frames-only
+        # fallback in run_final_qc may add a second round — keep the worst case well clear of
+        # the render job's timeout.
+        max_retries=2, image_paths=frame_paths, audio_path=audio_path,
         prompt=("These are frames sampled from an automatically produced vertical (9:16) short "
                 f"video. {context}\n"
                 "Check: captions present and readable (not clipped), visuals look coherent and "
