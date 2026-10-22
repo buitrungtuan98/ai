@@ -2000,6 +2000,20 @@ default — ADR-094 has the write-up.
   gives up after 3 resumes without a success.
 - Verified: 791 tests pass (8 new in `tests/test_r28_factory.py`), ruff clean, docs guard green.
 
+## R29 — every voice request has a word in it, and dark footage is not a black screen `DONE`
+
+First renders after R27's deploy: the 403 was gone, but two new reports — ADR-095 has the write-up.
+
+- **`NoAudioReceived` failed renders.** Paced narration sends each sentence to edge-tts separately,
+  and `split_sentences` cut `Orwell wrote: "War is peace."` into `…peace.` + `"` — a request with
+  nothing to speak, which Microsoft answers with no audio. Pieces without a letter/digit now glue
+  onto a neighbour; a leading closing quote/bracket moves back to the sentence it closes.
+- **Auto-QC failed a 10/10 video for "black screen for 6.0s".** `blackdetect`'s default
+  `pix_th=0.10` counts a dark navy night/deep-sea shot as black; both attempts reused the footage,
+  so the episode parked for a human. Now `pix_th=0.03` (truly black); pure black is still caught.
+- `NoAudioReceived` gets its own non-transient failure class pointing at Discard & re-render.
+- Verified: 794 tests pass (3 new in `tests/test_r27_tts_refusal.py`), ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

@@ -216,3 +216,47 @@ def test_requalify_waits_for_the_pacific_reset_on_a_spent_daily_quota(session, u
     item.created_at = noon_pacific - timedelta(hours=30)  # a reset has passed since
     session.commit()
     assert scheduler.autopilot_requalify_channel(session, channel) == 1
+
+
+# ── R29: every TTS request has something to say; dark is not black ───────────
+def test_no_sentence_is_sent_to_the_voice_without_a_word_in_it():
+    from core import tts
+
+    assert tts.split_sentences('Orwell wrote: "War is peace."') == ['Orwell wrote: "War is peace."']
+    assert tts.split_sentences('He said "Stop." Then he left.') == ['He said "Stop."', "Then he left."]
+    assert tts.split_sentences('He left. "Run," she said.') == ["He left.", '"Run," she said.']
+    assert tts.split_sentences("Why? … Because.") == ["Why? …", "Because."]
+    assert tts.split_sentences("Part 13. 🔥") == ["Part 13. 🔥"]
+    assert tts.split_sentences("… Then silence.") == ["… Then silence."]
+    assert tts.split_sentences("Xin chào. Tạm biệt!") == ["Xin chào.", "Tạm biệt!"]
+    assert tts.pause_after('"Why?"') == tts.pause_after("Why?")
+
+
+def test_no_audio_received_needs_a_fresh_script_not_a_retry():
+    from core import failure
+
+    msg = ("edge_tts.exceptions.NoAudioReceived: No audio was received. Please verify that your "
+           "parameters are correct.")
+    assert failure.diagnose(msg)["cause"] == "The voice service returned no audio for a line"
+    assert failure.is_transient(msg) is False
+
+
+def test_dark_footage_is_not_a_black_screen_but_pure_black_is(tmp_path):
+    import shutil
+    import subprocess
+
+    import pytest
+
+    from core import media
+
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not installed")
+
+    def clip(color: str) -> str:
+        out = str(tmp_path / f"{color}.mp4")
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i",
+                        f"color=c={color}:s=160x284:d=3", "-y", out], check=True)
+        return out
+
+    assert media.max_black_span(clip("0x101418")) == 0.0   # a night / deep-sea shot
+    assert media.max_black_span(clip("0x000000")) > 2.5    # a broken, padded gap

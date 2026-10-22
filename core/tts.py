@@ -223,17 +223,46 @@ def synthesize(
 # separately, stitches them with deterministic silence gaps, and returns ONE merged word-timing list
 # with correct absolute offsets, so captions still line up exactly with the assembled audio.
 _SENTENCE_RE = re.compile(r"[^.!?…]*[.!?…]+|[^.!?…]+$", re.UNICODE)
+_SPEAKABLE_RE = re.compile(r"\w", re.UNICODE)   # a letter or digit, in any script
+_CLOSERS = "\"'”’»)]}"                          # what may trail a terminator: 'peace."' / '(why?)'
 _GAP_DEFAULT = 0.35
 
 
 def split_sentences(text: str) -> list[str]:
-    """Split narration into sentences, keeping terminators. Deterministic (no NLP dependency)."""
-    return [m.group().strip() for m in _SENTENCE_RE.finditer(text or "") if m.group().strip()]
+    """Split narration into sentences, keeping terminators. Deterministic (no NLP dependency).
+
+    Every piece must have something to SAY (R29): each sentence is its own edge-tts request, and a
+    piece with no letter or digit — the closing quote of `"War is peace."`, a lone `…`, an emoji,
+    a `)` — makes Microsoft return no audio at all (`NoAudioReceived`), which failed the whole
+    render after three identical retries. Such a piece is glued onto the sentence before it (or the
+    one after, if it leads)."""
+    out: list[str] = []
+    lead = ""
+    for m in _SENTENCE_RE.finditer(text or ""):
+        piece = m.group().strip()
+        if not piece:
+            continue
+        if not _SPEAKABLE_RE.search(piece):
+            if out:
+                out[-1] += piece if piece[0] in _CLOSERS else f" {piece}"
+            else:
+                lead = f"{lead}{piece} "
+            continue
+        # '" Then he left.' — that quote closes the previous sentence. A straight quote is moved
+        # only when the previous sentence left one open: in 'He left. "Run," she said.' it OPENS.
+        while out and piece and piece[0] in _CLOSERS and (
+                piece[0] not in "\"'" or out[-1].count(piece[0]) % 2 == 1):
+            out[-1] += piece[0]
+            piece = piece[1:].lstrip()
+        out.append(f"{lead}{piece}".strip())
+        lead = ""
+    return out
 
 
 def pause_after(sentence: str) -> float:
-    """Deterministic breath gap (seconds) following a sentence — longer after a beat that lands."""
-    s = sentence.rstrip()
+    """Deterministic breath gap (seconds) following a sentence — longer after a beat that lands.
+    Trailing quotes/brackets are looked through: `"Why?"` lands like `Why?`."""
+    s = sentence.rstrip().rstrip(_CLOSERS)
     if s.endswith("…") or s.endswith("..."):
         return 0.7   # cliffhanger / trailing off — let it hang
     if s.endswith("?"):

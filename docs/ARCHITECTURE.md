@@ -2584,3 +2584,28 @@ ToS on volume and near-identical content.
 **Rejected:** auto-creating a channel's first campaign from the channel profile alone (no proven
 formula — see 1); auto-resuming every breaker stop on a timer (would loop a dead key forever).
 
+### ADR-095 — A voice request must contain a word; "black" means black, not dark
+
+**Context.** Right after ADR-093's edge-tts upgrade, renders failed with edge-tts `NoAudioReceived`,
+and an episode about Orwell scored 10/10 from the vision judge yet "FAILED Auto-QC" twice for a
+6.0 s "black screen", parking it for a human.
+
+1. **Sentence splitting fed the voice punctuation.** `synthesize_paced` sends each sentence as its
+   own request. The terminator-based split left the closing quote of `"War is peace."` (also a
+   lone `…`, an emoji, a `)`) as a sentence of its own; Microsoft returns no audio for text with
+   nothing speakable, and three identical retries failed the scene. `split_sentences` now
+   guarantees every piece has a letter or digit, gluing the rest to a neighbour, and moves a
+   leading closing quote/bracket back to the sentence it closes — a straight `"` only when that
+   sentence left one open, since the same mark also OPENS a quote. No NLP dependency (KISS).
+2. **The black-frame check measured darkness.** `blackdetect` defaults to `pix_th=0.10`: a pixel
+   below 10% of the video range counts as black, and 98% such pixels make a "black" frame. A dark
+   navy night or deep-sea shot (#101418) meets that, so a dark-themed but correct video failed the
+   deterministic gate twice — the re-render reuses the footage. The gate exists to catch breakage
+   (a missing clip, a padded gap), which is pure black, so `pix_th=0.03` (≈ luma ≤ 22 of 16–235)
+   keeps that and drops the false positive. Verified with ffmpeg on both colours.
+3. `NoAudioReceived` is classified non-transient: a plain Retry reuses the same script, so the fix
+   copy points at Discard & re-render.
+
+**Rejected:** skipping the deterministic black check when the vision judge scores high — the free
+check exists precisely for the frames the judge's few samples miss.
+
