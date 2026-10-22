@@ -159,6 +159,45 @@ def review_thresholds(channel) -> tuple[int, int]:
     return hi, lo
 
 
+# ── The factory switches (R28, ADR-094) — full-auto only, each OFF until the operator turns it on ─
+# Full-auto already stops laggards (wind_down), extends winners and plans successors near a cap.
+# These three close the loops that still needed a human: a channel left with nothing running, a
+# creative tweak that waited for a click, and a campaign the breaker stopped for a passing fault.
+FACTORY_SWITCHES = ("auto_create", "auto_tune", "auto_resume")
+DEFAULT_MAX_ACTIVE = 2      # campaigns running at once per channel (the successor cap, unchanged)
+MAX_ACTIVE_CEILING = 5      # one render slot box-wide: more parallel campaigns only thin the buffer
+
+
+def factory_settings(channel) -> dict:
+    """The channel's factory switches + campaign-count bounds, clamped. `min_active` is how many
+    campaigns auto-create keeps running (1..max_active)."""
+    cfg = channel.autopilot_json or {}
+    out = {k: bool(cfg.get(k, False)) for k in FACTORY_SWITCHES}
+    try:
+        hi = int(cfg.get("max_active", DEFAULT_MAX_ACTIVE) or DEFAULT_MAX_ACTIVE)
+        lo = int(cfg.get("min_active", 1) or 1)
+    except (TypeError, ValueError):
+        hi, lo = DEFAULT_MAX_ACTIVE, 1
+    hi = max(1, min(hi, MAX_ACTIVE_CEILING))
+    out["max_active"] = hi
+    out["min_active"] = max(1, min(lo, hi))
+    return out
+
+
+# Parent ranking for auto-create: the formula worth carrying forward. A laggard is never a parent —
+# cloning a failing angle into a fresh campaign is how a factory scales its own mistakes.
+_PARENT_RANK = {"winner": 0, "healthy": 1, "too_early": 2, "unmeasured": 3}
+
+
+def pick_refill_parent(campaigns, classes: dict[int, dict]):
+    """The channel's best campaign to carry into a new one, or None. Pure."""
+    eligible = [c for c in campaigns if classes.get(c.id, {}).get("label") in _PARENT_RANK]
+    if not eligible:
+        return None
+    return min(eligible, key=lambda c: (_PARENT_RANK[classes[c.id]["label"]],
+                                        -(classes[c.id].get("retention") or 0), -c.id))
+
+
 # The pre-render SCRIPT judge's own ceiling (ADR-089). It used to read `review_thresholds` and use
 # the channel's video-QC reject threshold as-is — "one scale, one discipline" (ADR-079 C2). One
 # scale, two very different costs: a channel tightened for finished VIDEO ("Reject at QC ≤ 7")

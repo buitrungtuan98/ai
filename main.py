@@ -1251,13 +1251,25 @@ def delete_channel_character(char_id: str, channel=Depends(get_owned_channel), d
 @app.post("/channels/{channel_id}/autopilot")
 def set_channel_autopilot(channel=Depends(get_owned_channel), db=Depends(get_db),
                           mode: str = Form("off"), interval_hours: str = Form(""),
-                          approve_min: str = Form(""), reject_max: str = Form("")):
-    """Set a channel's autopilot mode + cadence + review strictness (per-channel, ADR-044).
-    Off = the operator drives everything (default). Values are validated/clamped like every form."""
+                          approve_min: str = Form(""), reject_max: str = Form(""),
+                          auto_create: str = Form(""), auto_tune: str = Form(""),
+                          auto_resume: str = Form(""), min_active: str = Form(""),
+                          max_active: str = Form("")):
+    """Set a channel's autopilot mode + cadence + review strictness (per-channel, ADR-044), and the
+    full-auto factory switches (R28, ADR-094). Off = the operator drives everything (default).
+    Values are validated/clamped like every form; an unticked checkbox is simply absent → off."""
     cfg = dict(channel.autopilot_json or {})
     cfg["mode"] = mode if mode in autopilot.MODES else "off"
     if interval_hours.strip().isdigit():
         cfg["interval_hours"] = max(1, min(int(interval_hours), 24))
+    for key, val in (("auto_create", auto_create), ("auto_tune", auto_tune),
+                     ("auto_resume", auto_resume)):
+        cfg[key] = val == "on"
+    if max_active.strip().isdigit():
+        cfg["max_active"] = max(1, min(int(max_active), autopilot.MAX_ACTIVE_CEILING))
+    if min_active.strip().isdigit():
+        cfg["min_active"] = max(1, min(int(min_active),
+                                       cfg.get("max_active", autopilot.DEFAULT_MAX_ACTIVE)))
     review = dict(cfg.get("review") or {})
     if approve_min.strip().isdigit():
         review["approve_min"] = max(1, min(int(approve_min), 10))

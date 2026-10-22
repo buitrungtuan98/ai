@@ -2547,3 +2547,40 @@ stale token is deterministic until the library changes; retries only spend the r
    daily-quota park waits for `failure.quota_reset_since`. Bounded: three vision calls per parked
    video at most, still under the shared budget reserve.
 
+### ADR-094 — The factory switches: auto-create, auto-improve, auto-resume (full-auto, opt-in)
+
+**Context.** The operator asked whether the factory could run a channel end to end: create
+campaigns, stop the bad ones, keep the best, improve as it goes. Most of that already existed in
+full-auto (ADR-044/076/081): `wind_down` stops a laggard or a flop streak, `extend` keeps a winner
+going, a successor is planned near a healthy campaign's cap. Three loops still ended at a human:
+a channel whose campaigns had all finished or been wound down went silent; the weekly creative
+`tune` always waited for a click; and a campaign the circuit breaker stopped stayed stopped until
+someone pressed ▶ Start, even when the fault had been a network blip (R27's incident).
+
+**Decision.** Three per-channel switches, active only in Full auto, each OFF until ticked:
+
+1. **Auto-create** keeps `min_active` campaigns running by reusing the successor machinery
+   (`_create_successor`): the parent is the channel's best campaign by classification, a laggard is
+   never a parent, the new campaign is AI-designed and review-first. Bounded by `max_active`
+   (ceiling 5 — one render slot box-wide), one per `REFILL_COOLDOWN_DAYS`, and it defers to a
+   pending campaign a human queued. It does NOT invent a channel's first campaign: with nothing
+   measured to build from, the operator's brief is worth more than a cold AI guess.
+2. **Auto-improve** lets autoapply apply `tune` proposals. ADR-044 kept creative direction
+   human-confirmed; this makes that a choice per channel rather than a rule. The strategist files
+   at most one tune a week, and the replaced values are stored on the action so it can be undone.
+3. **Auto-resume** restarts a breaker-stopped campaign after `RESUME_AFTER_HOURS` only when its last
+   failure classifies as self-healing (`failure.is_transient`, or a quota past its Pacific reset).
+   The breaker still guards: a still-present fault trips it again after three failures, and
+   `MAX_AUTO_RESUMES` resumes without a single success hand the campaign back to the operator.
+
+**Why opt-in, not default.** Each switch spends render time and AI quota without asking. An
+operator who enabled Full auto under ADR-044 agreed to approve/publish/retry, not to new campaigns
+appearing; a changed default would be a silent expansion of what the machine does on their behalf.
+
+**Compliance (ADR-006 unchanged).** Auto-create produces new, AI-designed campaigns, capped per
+channel and review-first — it is not a mass-posting multiplier. Operators still owe each platform's
+ToS on volume and near-identical content.
+
+**Rejected:** auto-creating a channel's first campaign from the channel profile alone (no proven
+formula — see 1); auto-resuming every breaker stop on a timer (would loop a dead key forever).
+

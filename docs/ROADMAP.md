@@ -1981,6 +1981,25 @@ transient"; meanwhile episodes that HAD rendered were deleted as "aged out befor
 - Verified: 783 tests pass (9 new in `tests/test_r27_tts_refusal.py`), ruff clean, docs guard
   green. Live TTS / Gemini are credential/network-gated — verify one render on the box.
 
+## R28 — the factory switches: auto-create, auto-improve, auto-resume `DONE`
+
+The operator asked for a channel that runs itself end to end. Full-auto already stopped flopping
+campaigns (`wind_down`), extended winners and planned successors near a cap; three loops still
+waited on a human. Each is now a per-channel switch on the Channels page, Full auto only, OFF by
+default — ADR-094 has the write-up.
+
+- **Auto-create** (`autopilot_refill_channel`): fewer than `min_active` campaigns running → start a
+  new one from the channel's best campaign (`pick_refill_parent` — never a laggard), through the
+  existing successor path: AI-designed angle, review-first. One per channel per 3 days, capped by
+  `max_active`, skipped when a human's pending campaign is waiting. A channel's FIRST campaign is
+  still the operator's: there is no proven formula to carry yet.
+- **Auto-improve** (`auto_tune`): the weekly strategist tweak (caption theme / music mood / voice
+  rate) applies without a click; the replaced values ride on the action for an undo.
+- **Auto-resume** (`autopilot_resume_channel`): a breaker-stopped campaign restarts 24h later when
+  its last failure heals by itself; never for a dead key, refused voice service or safety block;
+  gives up after 3 resumes without a success.
+- Verified: 791 tests pass (8 new in `tests/test_r28_factory.py`), ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download
