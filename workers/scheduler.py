@@ -1374,7 +1374,10 @@ def _create_successor(db, parent, *, auto_start: bool = False, review_first: boo
         config["auto_publish"] = False  # training wheels: gate the new campaign's output on review
     new = Campaign(user_id=parent.user_id, channel_id=parent.channel_id,
                    topic_name=topic,
-                   total_episodes=parent.total_episodes,
+                   # A last-resort parent was cut short by its wind-down (R30): its total is
+                   # where it STOPPED, not a plan — take the fresh design's length instead.
+                   total_episodes=(getattr(design, "total_episodes", None)
+                                   or parent.total_episodes),
                    status=CampaignStatus.active if auto_start else CampaignStatus.pending,
                    config_json=config)
     db.add(new)

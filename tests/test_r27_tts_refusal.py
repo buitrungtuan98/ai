@@ -260,3 +260,46 @@ def test_dark_footage_is_not_a_black_screen_but_pure_black_is(tmp_path):
 
     assert media.max_black_span(clip("0x101418")) == 0.0   # a night / deep-sea shot
     assert media.max_black_span(clip("0x000000")) > 2.5    # a broken, padded gap
+
+
+# ── R30: Auto-QC says WHY it could not run, and drops the audio before giving up ──
+def _qc_env(monkeypatch):
+    from core import qc
+
+    monkeypatch.setattr(qc.media, "probe_duration", lambda p: 10.0)
+    monkeypatch.setattr(qc, "extract_frame", lambda v, o, at: None)
+    monkeypatch.setattr(qc, "extract_audio", lambda v, o: None)
+    return qc
+
+
+def test_final_qc_falls_back_to_frames_only_when_the_audio_is_refused(monkeypatch):
+    from types import SimpleNamespace
+
+    qc = _qc_env(monkeypatch)
+    calls: list = []
+
+    def judge(frames, *, api_key, context, audio_path=None, **kw):
+        calls.append(audio_path)
+        if audio_path:
+            raise RuntimeError("400 Audio input is not supported for this model")
+        return SimpleNamespace(quality_score=8, issues=[])
+
+    monkeypatch.setattr(qc, "judge_video_frames", judge)
+    r = qc.run_final_qc("m.mp4", api_key="k")
+    assert r.score == 8 and not r.unavailable and calls[-1] is None
+
+
+def test_final_qc_names_the_real_cause_without_leaking_secrets(monkeypatch):
+    qc = _qc_env(monkeypatch)
+    calls: list = []
+
+    def refused(frames, **kw):
+        calls.append(kw.get("audio_path"))
+        raise RuntimeError("400 API key not valid. https://g.example/v1?key=AIzaSySECRET")
+
+    monkeypatch.setattr(qc, "judge_video_frames", refused)
+    r = qc.run_final_qc("m.mp4", api_key="k")
+    assert r.unavailable and "API key" in r.unavailable_reason
+    assert len(calls) == 1                         # a refused key is not asked twice
+    reason = qc._unavailable_reason(RuntimeError("boom at https://h.example/?key=AIzaSyX"))
+    assert "boom" in reason and "AIza" not in reason and "https" not in reason

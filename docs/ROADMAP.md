@@ -2025,7 +2025,14 @@ The operator asked: after full-auto stops a campaign, does it create a new one? 
   `finish_stranded_campaign` — the third copy of "complete + activate the next pending" is gone).
 - **A channel whose only campaign flopped had no parent.** A laggard may now be auto-create's parent
   as a last resort, but only under a fresh AI-designed angle; with no AI design it waits.
-- Verified: 795 tests pass (1 new end-to-end in `tests/test_r28_factory.py`), ruff clean, docs guard green.
+- **A replacement inherited the flop's cut-down length.** With a fresh design, the new campaign
+  takes the design's `total_episodes`, not the stopped parent's (which is where it stopped).
+- **"Auto-QC could not run — the vision API could not be reached" hid the real cause.** Every error
+  that was not quota/404 read that one sentence — a test against Gemini with an invalid key showed
+  it too. `_unavailable_reason` now names a refused key, a timeout or a rejected request, and
+  otherwise appends a scrubbed error tail; a call that fails with the audio track attached is
+  retried frames-only (never for quota, rate limits or a refused key).
+- Verified: 797 tests pass (end-to-end refill + 2 QC tests), ruff clean, docs guard green.
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -103,9 +104,22 @@ class QCResult:
         return out
 
 
+_SECRET_RE = re.compile(r"\b[a-z][a-z0-9+.-]*://\S+|\bkey=\S+|\bAIza[0-9A-Za-z_-]+", re.IGNORECASE)
+
+
+def _error_detail(exc: Exception) -> str:
+    """A short, secret-free tail of the real error (R30): URLs, `key=` and anything shaped like a
+    Google API key are removed. Without it every unclassified failure read the same sentence and the
+    actual cause lived only in the worker log the operator never sees."""
+    text = _SECRET_RE.sub("…", " ".join(str(exc).split()))
+    # The judge's own wrapper ("generate_structured failed after 3 attempts: …") is not the cause.
+    text = text.split("attempts: ", 1)[-1]
+    return text[:140]
+
+
 def _unavailable_reason(exc: Exception) -> str:
     """Why the judge could not run, in words the operator can act on — classified from the error,
-    never quoted raw (provider errors can embed request URLs)."""
+    with a scrubbed detail where no class fits (provider errors can embed request URLs)."""
     msg = str(exc).lower()
     if "daily quota" in msg or "resets ~midnight" in msg:
         return "Gemini daily quota is spent — it resets around midnight US-Pacific"
@@ -113,7 +127,14 @@ def _unavailable_reason(exc: Exception) -> str:
         return "Gemini is rate-limiting right now — usually clears within minutes"
     if "model not found" in msg or "404" in msg:
         return "the configured Gemini model was not found — check the model chain on Credentials"
-    return "the vision API could not be reached"
+    # R30: an invalid key, a timeout and a rejected request all used to read "could not be reached".
+    if "api key" in msg or "api_key" in msg or "permission" in msg or "403" in msg:
+        return "Gemini refused the API key — check it on the Credentials page"
+    if "timed out" in msg or "timeout" in msg or "deadline" in msg:
+        return "the vision call timed out — usually clears on the next try"
+    if "400" in msg or "invalid argument" in msg:
+        return f"Gemini rejected the request ({_error_detail(exc)})"
+    return f"the vision API could not be reached ({_error_detail(exc)})"
 
 
 # Deterministic post-render checks — free, no API. They catch catastrophic breakage (a mostly-black
@@ -174,8 +195,19 @@ def run_final_qc(master_path: str, *, api_key: str, context: str = "",
                                exc_info=True)
                 audio_path = None
             kwargs = {"model": model} if model else {}
-            verdict = judge_video_frames(frames, api_key=api_key, context=context,
-                                         audio_path=audio_path, **kwargs)
+            try:
+                verdict = judge_video_frames(frames, api_key=api_key, context=context,
+                                             audio_path=audio_path, **kwargs)
+            except Exception as exc:  # noqa: BLE001 — classified below; frames-only is the retry
+                # The audio track is the one part of this request a model can refuse outright
+                # (R30): judge on frames alone before giving up on a verdict. Never for a spent
+                # quota or a refused key — those refuse the second call exactly the same way.
+                reason = _unavailable_reason(exc)
+                if audio_path is None or "quota" in reason or "rate-limiting" in reason \
+                        or "API key" in reason:
+                    raise
+                logger.warning("Final QC with audio failed (%s) — judging frames only", reason)
+                verdict = judge_video_frames(frames, api_key=api_key, context=context, **kwargs)
         passed = verdict.quality_score >= threshold
         if not passed:
             logger.info("Final QC failed (score %s/10): %s", verdict.quality_score, verdict.issues)

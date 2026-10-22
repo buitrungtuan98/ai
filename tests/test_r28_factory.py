@@ -222,9 +222,10 @@ def test_a_wind_down_completes_the_campaign_and_auto_create_replaces_it(session,
                         lambda db, cs: {c.id: {"label": "underperforming"} for c in cs})
     assert scheduler.autopilot_refill_channel(session, channel) == 0   # no AI design → wait
 
-    fresh = SimpleNamespace(topic_name="A New Angle", **{k: None for k in
-                                                         scheduler._SUCCESSOR_CREATIVE_KEYS})
+    fresh = SimpleNamespace(topic_name="A New Angle", total_episodes=30,
+                            **{k: None for k in scheduler._SUCCESSOR_CREATIVE_KEYS})
     monkeypatch.setattr(scheduler, "_design_successor", lambda db, parent: fresh)
     assert scheduler.autopilot_refill_channel(session, channel) == 1
     new = session.query(Campaign).filter(Campaign.id != flop.id).one()
     assert new.topic_name == "A New Angle" and new.status == CampaignStatus.active
+    assert new.total_episodes == 30          # the fresh plan's length, not the flop's 7-episode stop

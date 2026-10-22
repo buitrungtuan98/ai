@@ -2632,3 +2632,10 @@ whose only campaign flopped had nothing to build from.
 re-opens it": a completed campaign gets no further extend proposals. ▶ Start still re-opens it by
 hand, and the honest state ("completed", not "active at N/N") is what every surface needed.
 
+**Addendum (same round).** The replacement takes the fresh design's planned length — a wound-down
+parent's `total_episodes` records where it stopped, not a plan. And Auto-QC's "unavailable" reason
+stops collapsing every unclassified error into "the vision API could not be reached": a refused
+key, a timeout and a rejected request are named, anything else carries a scrubbed error tail
+(URLs, `key=` and API-key-shaped strings removed), and a call refused with the audio track
+attached is retried once on frames alone — a verdict from frames beats no verdict.
+
