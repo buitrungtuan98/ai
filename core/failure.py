@@ -167,6 +167,13 @@ PATTERNS: tuple[tuple[tuple[str, ...], str, str, str, str, bool], ...] = (
      "requirements.txt, redeploy, then retry (RUNBOOK: TTS failures). Also check the box's clock "
      "is synced (NTP). Finished episodes are safe in the buffer meanwhile.",
      "/operations", "Operations", False),
+    # edge-tts answered but spoke nothing (R29): a line with nothing speakable. Deterministic for the
+    # SAME script — a plain Retry reuses it — so it needs a fresh script, not the retry budget.
+    (("noaudioreceived", "no audio was received"),
+     "The voice service returned no audio for a line",
+     "A narration line had nothing the voice could speak (only punctuation or emoji). Open the "
+     "episode and use Discard & re-render — it writes a fresh script, where a plain Retry reuses "
+     "this one.", "", "", False),
     # "rate limit"/"exceeded" moved here from the quota class (R22): per-minute throttles and
     # requests' "Max retries exceeded with url" recover in minutes, not at the Pacific reset.
     (("timed out", "timeout", "connection", "network", "temporarily unavailable", "rate limit",

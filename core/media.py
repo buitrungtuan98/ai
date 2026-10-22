@@ -40,10 +40,15 @@ def probe_audio_stats(path: str) -> dict:
 
 def max_black_span(path: str) -> float:
     """Longest continuous fully-black stretch in seconds (0.0 if none), via ffmpeg blackdetect —
-    the deterministic basis for catching a broken/black render. Raises on an unreadable file."""
+    the deterministic basis for catching a broken/black render. Raises on an unreadable file.
+
+    `pix_th=0.03` means truly black (luma ≤ ~22 of the 16–235 video range), not merely dark (R29):
+    ffmpeg's default 0.10 counted a night or deep-sea shot (#101418) as "black screen", so a dark
+    but perfectly good video failed QC twice and was parked — next to a 10/10 vision verdict. The
+    breakage this check exists for (a missing clip, a padded gap) is pure black and still caught."""
     out = subprocess.run(
         ["ffmpeg", "-hide_banner", "-nostats", "-i", path,
-         "-vf", "blackdetect=d=0.5:pic_th=0.98", "-an", "-f", "null", "-"],
+         "-vf", "blackdetect=d=0.5:pic_th=0.98:pix_th=0.03", "-an", "-f", "null", "-"],
         capture_output=True, text=True, check=True,
     )
     spans: list[float] = []
