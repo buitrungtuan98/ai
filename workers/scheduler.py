@@ -163,6 +163,12 @@ def expire_stale_buffers(db, *, max_age_hours: int | None = None, now: datetime 
             continue
         cfg = {}
         campaign = campaigns.get(item.campaign_id)
+        # A campaign the circuit breaker stopped holds its finished episodes too (R27): the breaker
+        # halts slot publishing, so its ready items could only wait — and this sweep then deleted
+        # them as "aged out". A run of failed renders (a stale edge-tts, a dead key) cost the
+        # episodes that HAD rendered fine. ▶ Start resumes publishing them where they stood.
+        if campaign is not None and campaign.status == CampaignStatus.failed:
+            continue
         if campaign is not None:
             cfg = campaign.config_json or {}
         item_max_age = max(max_age_hours, 7 * 24 + 12) if cfg.get("posting_days") else max_age_hours

@@ -188,8 +188,11 @@ review-parked render, or scheduled render resets the failure count.
 The voice rides Microsoft's undocumented Edge read-aloud endpoint via the `edge-tts` library.
 Microsoft rotates the endpoint's auth scheme every so often; when they do, **old library versions
 start failing every render** with `WSServerHandshakeError: 403` in `tts.synthesize` (a URL without
-a `Sec-MS-GEC=` parameter in the error is the tell for a stale version). Fix: bump `edge-tts` to
-the latest release in `requirements.txt`, redeploy (the image rebuild picks it up), Retry the
+a `Sec-MS-GEC=` parameter, or with an older `Sec-MS-GEC-Version=` prefix than the current
+release sends — `1-…` vs `2-…` in R27 — is the tell for a stale version; the episode banner reads
+"The voice service refused the connection"). Fix: bump `edge-tts` to
+the latest release in `requirements.txt`, redeploy (the image rebuild picks it up), press ▶ Start on any campaign the
+circuit breaker stopped (its rendered episodes were held, not expired — R27), then Retry the
 failed episodes. Transient one-off 403s are retried automatically (3 attempts). If a CURRENT
 edge-tts still 403s persistently from the box, Microsoft may be blocking that IP range — the
 escape hatch is swapping `core/tts.py`'s backend for a paid/keyed TTS API (e.g. Azure Speech free

@@ -1950,6 +1950,27 @@ title fighting the wrong constraints — ADR-092 has the write-up.
   guard green.
 
 
+## R27 — a refused voice service is not a network blip, and a paused campaign keeps its videos `DONE`
+
+One operator report, two banners: every render failed with edge-tts'
+`WSServerHandshakeError: 403` and was labelled "A provider was unreachable — almost always
+transient"; meanwhile episodes that HAD rendered were deleted as "aged out before it could publish
+(waited more than 180h)". ADR-093 has the write-up.
+
+- **edge-tts 7.2.8 → 7.3.1.** Microsoft rotated the read-aloud endpoint's sign-in again: 7.2.8 signs
+  with `Sec-MS-GEC-Version=1-…`, 7.3.x computes the new token and sends `2-…`. Same `Communicate`
+  API (`boundary="WordBoundary"`, `pitch`, chunk keys) — no code change in `core/tts.py`.
+- **The refusal has its own failure class** (`core/failure.py`): `WSServerHandshakeError: 403` /
+  `SkewAdjustmentError` → "The voice service refused the connection", non-transient, fix copy
+  points at the edge-tts bump + clock sync. A 5xx handshake stays in the network class.
+- **URLs never decide a class.** `_classification_text` drops URLs, like it already dropped frame
+  paths: the 403's `…&ConnectionId=…` matched the network class's "connection".
+- **A breaker-paused campaign holds its finished episodes.** `expire_stale_buffers` skips campaigns
+  in `failed` (circuit breaker): the breaker stops slot publishing, so the sweep was deleting
+  videos that could only wait. ▶ Start resumes publishing them.
+- Verified: 779 tests pass (5 new in `tests/test_r27_tts_refusal.py`), ruff clean, docs guard
+  green. Live TTS against Microsoft is credential/network-gated — verify one render on the box.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

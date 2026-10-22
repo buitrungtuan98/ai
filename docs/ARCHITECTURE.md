@@ -2496,3 +2496,36 @@ default and operators still owe each platform's ToS on near-identical content.
 **Cost.** Existing `flash` campaigns change mid-flight: their next renders draw the short
 `billboard_hook` (or the teased title until the AI supplies one) and their covers carry the hook.
 That is the point of the change.
+
+### ADR-093 — A refused voice service is its own failure class, and a paused campaign keeps its videos
+
+**Context.** An operator reported two failures on one channel. Every new render failed in
+`tts.synthesize_paced` with edge-tts' `WSServerHandshakeError: 403`, and the triage banner called it
+"A provider was unreachable — almost always transient". Separately, episodes that had rendered fine
+were failed as "aged out before it could publish (waited more than 180h)".
+
+1. **Root cause of the 403: a stale edge-tts.** Microsoft rotated the read-aloud endpoint's
+   `Sec-MS-GEC` token scheme; edge-tts 7.2.8 signs with version `1-…` and is refused on every
+   attempt, 7.3.x signs with the new `2-…` scheme. The fix is the pin bump (the RUNBOOK's documented
+   remedy). The `Communicate` API we use is unchanged, so `core/tts.py` is untouched.
+2. **Misdiagnosis: the URL matched "connection".** The 403's summary line carries the request URL,
+   whose `ConnectionId=` query parameter matched the network class's bare word "connection" — the
+   same haystack-noise bug R22 fixed for traceback frame paths. `_classification_text` now strips
+   URLs, and a dedicated, NON-transient row ("The voice service refused the connection") sits ahead
+   of the network class, matched on `wsserverhandshakeerror: 403` / `skewadjustmenterror`. A 5xx
+   handshake still classifies as network/transient. The refusal is deliberately NOT an
+   infrastructure cause: every render fails identically, which is exactly the systemic fault the
+   circuit breaker exists to stop before it burns the AI quota spent on each script.
+3. **The aged-out episodes were the breaker's collateral.** Three TTS failures tripped the breaker,
+   which sets the campaign `failed` — and slot publishing only serves `active` campaigns. The
+   expiry sweep did not know that, so the ready buffer aged past its cutoff and was deleted.
+   `expire_stale_buffers` now skips `failed` campaigns, the same hold an expired channel token
+   already gets (R22): the wait is the machine's, not the episode's.
+
+**Trade-off.** A campaign left stopped indefinitely keeps its ready files on disk. That is bounded
+(at most the render-ahead buffer per campaign) and the disk sweeper still runs; deleting finished
+work an operator can publish with one click was the worse failure.
+
+**Rejected: classifying the 403 as transient with a longer back-off.** Microsoft's refusal of a
+stale token is deterministic until the library changes; retries only spend the render slot.
+
