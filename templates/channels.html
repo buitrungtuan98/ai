@@ -256,6 +256,17 @@
                the two are connected. #}
             {% call ui.field('Reject at QC ≤', hint='auto-reject score (/10) · also rejects scripts, capped at 4') %}<input name="reject_max" type="number" min="0" max="9" value="{{ rv.get('reject_max', 4) }}">{% endcall %}
           </div>
+          {# The factory switches (R28, ADR-094): only act in Full auto, each off until ticked. #}
+          <fieldset class="mt-sm">
+            <legend class="hint"><b>🏭 Factory</b> — Full auto only. Already automatic in Full auto: stop a campaign that keeps flopping, extend a winner, plan a successor near the cap.</legend>
+            <label><input type="checkbox" name="auto_create" {{ 'checked' if a.get('auto_create') }}> <b>Auto-create</b> — when fewer campaigns are running than the minimum below, start a new one from this channel’s best campaign (AI-designed angle; its first videos wait for review). Never from a flopping campaign; at most one every 3 days.</label><br>
+            <label><input type="checkbox" name="auto_tune" {{ 'checked' if a.get('auto_tune') }}> <b>Auto-improve</b> — apply the AI’s weekly creative tweak (caption theme, music mood, voice speed) without asking. The old values are kept in the decision log.</label><br>
+            <label><input type="checkbox" name="auto_resume" {{ 'checked' if a.get('auto_resume') }}> <b>Auto-resume</b> — restart a campaign stopped after repeated failures, 24h later, when the fault heals by itself (network blip, spent quota). Never for a broken key or a refused voice service; gives up after 3 tries.</label>
+            <div class="grid cols-2">
+              {% call ui.field('Keep at least', hint='campaigns running (auto-create)') %}<input name="min_active" type="number" min="1" max="5" value="{{ a.get('min_active', 1) }}">{% endcall %}
+              {% call ui.field('At most', hint='campaigns running at once (1–5)') %}<input name="max_active" type="number" min="1" max="5" value="{{ a.get('max_active', 2) }}">{% endcall %}
+            </div>
+          </fieldset>
           <button class="btn sm" type="submit">Save autopilot</button>
         </form>
       </div>

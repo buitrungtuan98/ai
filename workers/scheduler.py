@@ -163,6 +163,12 @@ def expire_stale_buffers(db, *, max_age_hours: int | None = None, now: datetime 
             continue
         cfg = {}
         campaign = campaigns.get(item.campaign_id)
+        # A campaign the circuit breaker stopped holds its finished episodes too (R27): the breaker
+        # halts slot publishing, so its ready items could only wait — and this sweep then deleted
+        # them as "aged out". A run of failed renders (a stale edge-tts, a dead key) cost the
+        # episodes that HAD rendered fine. ▶ Start resumes publishing them where they stood.
+        if campaign is not None and campaign.status == CampaignStatus.failed:
+            continue
         if campaign is not None:
             cfg = campaign.config_json or {}
         item_max_age = max(max_age_hours, 7 * 24 + 12) if cfg.get("posting_days") else max_age_hours
@@ -840,7 +846,7 @@ def resume_checkpoint_ids(db) -> set[str]:
 
 
 AUTOPILOT_LOG_KINDS = ("approved", "rejected", "escalated", "recommended", "retried", "caught_up",
-                       "requalified", "expired", "reconciled")
+                       "requalified", "expired", "reconciled", "resumed")
 AUTOPILOT_LOG_RETENTION_DAYS = 90  # prune the operational decision log beyond this so it never bloats
 
 
@@ -957,7 +963,7 @@ def autopilot_review_channel(db, channel, mode: str, approve_min: int, reject_ma
 
 
 REQUALIFY_MIN_AGE_HOURS = 2   # give a judge outage time to clear before asking again
-REQUALIFY_MAX_AUTO = 1        # ONE automatic re-judge per item; after that the button is the human's
+REQUALIFY_MAX_AUTO = 3        # automatic re-judges per item (R27); after that the button is the human's
 
 
 def autopilot_requalify_channel(db, channel) -> int:
@@ -965,11 +971,15 @@ def autopilot_requalify_channel(db, channel) -> int:
 
     Batch Q made an unavailable judge park honestly — but then the item waited for a human forever,
     even though `requalify_task` exists and judge outages are quota-shaped (they clear at the
-    Pacific reset or within minutes for a rate limit). This queues ONE automatic re-judge per item,
-    only after the outage has had ≥ REQUALIFY_MIN_AGE_HOURS to clear, and only below the shared
-    budget reserve. The re-judge updates the verdict in place and the item STAYS parked — the next
-    review pass routes on the fresh verdict exactly as it would on any other. The marker lives at
-    the metadata top level (`auto_requalify`) because `requalify_task` rewrites the `qc` dict."""
+    Pacific reset or within minutes for a rate limit). This queues up to REQUALIFY_MAX_AUTO
+    automatic re-judges per item, each ≥ REQUALIFY_MIN_AGE_HOURS after the last, and only below the
+    shared budget reserve. A judge absent for a spent DAILY quota is not asked again until a Pacific
+    reset has passed (R27): the single re-judge used to fire 2h later into the same spent quota,
+    fail identically, and leave the episode for a human — every episode, on a quota-tight day.
+    The re-judge updates the verdict in place and the item STAYS parked — the next review pass
+    routes on the fresh verdict exactly as it would on any other. The markers live at the metadata
+    top level (`auto_requalify` = last attempt, `auto_requalify_n` = count) because
+    `requalify_task` rewrites the `qc` dict."""
     from core.usage import reserve_reached
 
     user = db.get(User, channel.user_id)
@@ -977,7 +987,8 @@ def autopilot_requalify_channel(db, channel) -> int:
         return 0
     if reserve_reached(user):
         return 0   # the judge is likely absent for exactly this reason — asking again burns quota
-    cutoff = datetime.utcnow() - timedelta(hours=REQUALIFY_MIN_AGE_HOURS)
+    now = datetime.utcnow()
+    cutoff = now - timedelta(hours=REQUALIFY_MIN_AGE_HOURS)
     queued = 0
     items = db.scalars(
         select(BufferPoolItem).join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
@@ -987,11 +998,19 @@ def autopilot_requalify_channel(db, channel) -> int:
     for item in items:
         md = item.metadata_json or {}
         qc = md.get("qc") or {}
-        if not qc.get("unavailable") or md.get("auto_requalify"):
+        if not qc.get("unavailable"):
             continue
-        if item.created_at and item.created_at > cutoff:
+        last = md.get("auto_requalify")
+        tries = int(md.get("auto_requalify_n") or (1 if last else 0))  # pre-R27 marker = one try
+        if tries >= REQUALIFY_MAX_AUTO:
+            continue
+        since = datetime.fromisoformat(last) if last else item.created_at
+        if since and since > cutoff:
             continue   # too fresh — the outage that parked it may still be in force
-        item.metadata_json = {**md, "auto_requalify": datetime.utcnow().isoformat()}
+        reason = qc.get("unavailable_reason") or ""
+        if since and "daily quota" in reason and not failure.quota_reset_since(reason, since, now):
+            continue   # the spent quota only comes back at the Pacific reset
+        item.metadata_json = {**md, "auto_requalify": now.isoformat(), "auto_requalify_n": tries + 1}
         db.commit()
         task_queue.enqueue_requalify(item.id)
         queued += 1
@@ -1438,9 +1457,12 @@ def apply_autopilot_action(db, action, *, auto_start_successor: bool = False,
             if campaign is None:
                 raise ValueError("campaign gone")
             cfg = dict(campaign.config_json or {})
-            for k in ("caption_theme", "music_mood", "rate_pct"):
-                if k in (action.params or {}):
-                    cfg[k] = action.params[k]
+            keys = [k for k in ("caption_theme", "music_mood", "rate_pct") if k in (action.params or {})]
+            # What it replaced rides on the action (R28): an auto-applied tune must be undoable by
+            # reading the decision log, not by remembering what the campaign used to say.
+            action.evidence = {**(action.evidence or {}), "previous": {k: cfg.get(k) for k in keys}}
+            for k in keys:
+                cfg[k] = action.params[k]
             campaign.config_json = cfg
             db.commit()
         elif action.kind == "successor":
@@ -1504,9 +1526,12 @@ def autopilot_autoapply_channel(db, channel) -> dict:
     """Full-auto only: apply the proposals just filed, with guardrails. Structural, reversible
     actions (extend / wind-down / successor) auto-apply; a successor respects the `max_active` cap
     (default 2) and at most one is created per pass; creative 'tune' proposals are left for the
-    operator (creative direction stays human-confirmed). Never deletes anything."""
-    cfg = channel.autopilot_json or {}
-    max_active = int(cfg.get("max_active", 2) or 2)
+    operator unless the channel's `auto_tune` switch is on (R28 — the strategist files at most one a
+    week, and the replaced values are kept on the action). Never deletes anything."""
+    from core import autopilot
+
+    fs = autopilot.factory_settings(channel)
+    max_active = fs["max_active"]
     applied = {"extend": 0, "wind_down": 0, "successor": 0}
     successors = 0
     for a in db.scalars(select(AutopilotAction).where(
@@ -1520,6 +1545,9 @@ def autopilot_autoapply_channel(db, channel) -> dict:
             if apply_autopilot_action(db, a, auto_start_successor=True, review_first_successor=True):
                 successors += 1
                 applied["successor"] += 1
+        elif a.kind == "tune" and fs["auto_tune"]:
+            if apply_autopilot_action(db, a):
+                applied["tune"] = applied.get("tune", 0) + 1
         elif a.kind in ("extend", "wind_down", "slot_change", "compile"):
             # slot_change is bounded upstream (one applied change per campaign per week, enforced
             # by the council rails); compile only queues a build that ALWAYS parks for review, so
@@ -1527,6 +1555,98 @@ def autopilot_autoapply_channel(db, channel) -> dict:
             if apply_autopilot_action(db, a):
                 applied[a.kind] = applied.get(a.kind, 0) + 1
     return applied
+
+
+REFILL_COOLDOWN_DAYS = 3        # at most one auto-created campaign per channel per this window
+RESUME_AFTER_HOURS = 24         # a breaker-stopped campaign waits this long before a retry
+MAX_AUTO_RESUMES = 3            # resumes without a success in between, then it's the operator's
+
+
+def autopilot_refill_channel(db, channel, now: datetime | None = None) -> int:
+    """Auto-create (R28): keep `min_active` campaigns running on a full-auto channel.
+
+    The successor path only fires for a HEALTHY campaign near its cap, so a channel whose campaigns
+    finished, were wound down, or were deleted simply went quiet until a human noticed. This carries
+    the channel's best remaining formula (`pick_refill_parent` — never a laggard) into a new campaign
+    through the same `_create_successor` the successor action uses: AI-designed angle, started, and
+    review-first ("training wheels") so its first videos wait for the review gate. One per channel
+    per REFILL_COOLDOWN_DAYS, never above `max_active`, and never with nothing proven to build from —
+    the first campaign of a channel is always the operator's. Returns 1 if it created one."""
+    from core import autopilot
+
+    fs = autopilot.factory_settings(channel)
+    if not fs["auto_create"]:
+        return 0
+    now = now or datetime.utcnow()
+    campaigns = db.scalars(select(Campaign).where(Campaign.channel_id == channel.id)).all()
+    if sum(c.status == CampaignStatus.active for c in campaigns) >= fs["min_active"]:
+        return 0
+    if any(c.status == CampaignStatus.pending for c in campaigns):
+        return 0   # the operator has one queued up — starting it is their call, not a refill
+    recent = db.scalar(select(func.count()).select_from(AutopilotAction).where(
+        AutopilotAction.channel_id == channel.id, AutopilotAction.kind == "successor",
+        AutopilotAction.created_at >= now - timedelta(days=REFILL_COOLDOWN_DAYS)))
+    if recent:
+        return 0
+    parent = autopilot.pick_refill_parent(campaigns, autopilot.classify_campaigns(db, campaigns))
+    if parent is None:
+        return 0
+    action = AutopilotAction(
+        user_id=channel.user_id, channel_id=channel.id, campaign_id=parent.id, kind="successor",
+        summary=(f"Auto-created a new campaign from “{parent.topic_name}” — the channel had fewer "
+                 f"than {fs['min_active']} running. Its first videos wait for review.")[:300],
+        evidence={"reason": "refill", "min_active": fs["min_active"]}, params={})
+    db.add(action)
+    db.commit()
+    return 1 if apply_autopilot_action(db, action, auto_start_successor=True,
+                                       review_first_successor=True) else 0
+
+
+def autopilot_resume_channel(db, channel, now: datetime | None = None) -> int:
+    """Auto-resume (R28): restart a campaign the circuit breaker stopped for a fault that heals.
+
+    The breaker is right to stop a campaign whose renders keep failing — but a passing outage (a
+    provider blip, a spent quota) left it stopped until a human pressed ▶ Start, and its review
+    queue frozen with it. This resumes one after RESUME_AFTER_HOURS when its last failure is
+    retryable (`failure.is_transient`, or a quota whose Pacific reset has passed); if the fault is
+    still there, three more failures trip the breaker again. A fault that needs a human — a dead
+    key, a refused voice service, a safety block — is never resumed, and after MAX_AUTO_RESUMES
+    tries without a single success it stays stopped for the operator. Returns campaigns resumed."""
+    from core import autopilot
+
+    if not autopilot.factory_settings(channel)["auto_resume"]:
+        return 0
+    now = now or datetime.utcnow()
+    resumed = 0
+    for c in db.scalars(select(Campaign).where(Campaign.channel_id == channel.id,
+                                               Campaign.status == CampaignStatus.failed)).all():
+        last_fail = db.scalars(select(Task).where(
+            Task.campaign_id == c.id, Task.status == TaskStatus.FAILED,
+            Task.finished_at.isnot(None)).order_by(Task.finished_at.desc())).first()
+        if last_fail is None or (now - last_fail.finished_at) < timedelta(hours=RESUME_AFTER_HOURS):
+            continue
+        msg = last_fail.error_message
+        if not (failure.is_transient(msg) or failure.quota_reset_since(msg, last_fail.finished_at, now)):
+            continue
+        last_ok = db.scalar(select(func.max(Task.finished_at)).where(
+            Task.campaign_id == c.id, Task.status == TaskStatus.COMPLETED))
+        tries = db.scalar(select(func.count()).select_from(AutopilotAction).where(
+            AutopilotAction.campaign_id == c.id, AutopilotAction.kind == "resumed",
+            AutopilotAction.created_at >= (last_ok or datetime.min)))
+        if tries >= MAX_AUTO_RESUMES:
+            continue
+        c.status = CampaignStatus.active
+        db.commit()
+        _log_action(db, channel, "resumed",
+                    f"Resumed “{c.topic_name}” — stopped {int((now - last_fail.finished_at).total_seconds() // 3600)}h "
+                    f"ago for a fault that heals on its own (try {tries + 1}/{MAX_AUTO_RESUMES}).",
+                    campaign_id=c.id, evidence={"try": tries + 1})
+        try:
+            video_worker.hydrate_campaign(db, c)
+        except Exception:  # noqa: BLE001 — the tick's own hydration picks it up next time
+            logger.warning("resume hydration failed for campaign %s", c.id, exc_info=True)
+        resumed += 1
+    return resumed
 
 
 def autopilot_strategist_channel(db, user, channel, respect_cadence: bool = True) -> int:
@@ -1694,6 +1814,12 @@ def autopilot_pass(db=None, now: datetime | None = None, respect_cadence: bool =
             proposed += council_r.get("filed", 0)
             autoapplied = _ap_step(db, ch, "autoapply", lambda: autopilot_autoapply_channel(db, ch),
                                    {}, failures) if mode == "autopilot" else {}
+            if mode == "autopilot":   # the factory switches (R28) — each a no-op until turned on
+                autoapplied = dict(autoapplied)
+                autoapplied["resumed"] = _ap_step(
+                    db, ch, "resume", lambda: autopilot_resume_channel(db, ch), 0, failures)
+                autoapplied["created"] = _ap_step(
+                    db, ch, "refill", lambda: autopilot_refill_channel(db, ch), 0, failures)
             if failures:
                 summary["partial"] += 1
                 if respect_cadence:

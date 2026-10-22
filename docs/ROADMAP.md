@@ -1950,6 +1950,56 @@ title fighting the wrong constraints — ADR-092 has the write-up.
   guard green.
 
 
+## R27 — a refused voice service is not a network blip, and a paused campaign keeps its videos `DONE`
+
+One operator report, two banners: every render failed with edge-tts'
+`WSServerHandshakeError: 403` and was labelled "A provider was unreachable — almost always
+transient"; meanwhile episodes that HAD rendered were deleted as "aged out before it could publish
+(waited more than 180h)". ADR-093 has the write-up.
+
+- **edge-tts 7.2.8 → 7.3.1.** Microsoft rotated the read-aloud endpoint's sign-in again: 7.2.8 signs
+  with `Sec-MS-GEC-Version=1-…`, 7.3.x computes the new token and sends `2-…`. Same `Communicate`
+  API (`boundary="WordBoundary"`, `pitch`, chunk keys) — no code change in `core/tts.py`.
+- **The refusal has its own failure class** (`core/failure.py`): `WSServerHandshakeError: 403` /
+  `SkewAdjustmentError` → "The voice service refused the connection", non-transient, fix copy
+  points at the edge-tts bump + clock sync. A 5xx handshake stays in the network class.
+- **URLs never decide a class.** `_classification_text` drops URLs, like it already dropped frame
+  paths: the 403's `…&ConnectionId=…` matched the network class's "connection".
+- **A breaker-paused campaign holds its finished episodes.** `expire_stale_buffers` skips campaigns
+  in `failed` (circuit breaker): the breaker stops slot publishing, so the sweep was deleting
+  videos that could only wait. ▶ Start resumes publishing them.
+- **edge-tts stays current by itself.** `.github/dependabot.yml` opens a daily bump PR for edge-tts
+  only; CI runs on it and merging deploys. A runtime self-upgrade inside the container was
+  rejected (unreviewed PyPI code running next to the Fernet key and OAuth tokens).
+- **Auto-QC no longer parks videos on a hiccup.** The final vision judge was ONE bare call on the
+  chain's primary model with a 2048-token cap: a per-minute 429, a spent primary, or a thinking
+  model truncating its JSON all read as "QC unavailable" and parked the video for a human. It now
+  runs through `generate_structured` (retry, JSON repair, chain fallback, 8192 tokens).
+- **Auto-requalify gets three tries, timed to the outage.** It re-judged ONCE, 2h later — straight
+  into the same spent daily quota. Now up to 3 re-judges ≥ 2h apart, and a daily-quota park waits
+  for the Pacific reset.
+- Verified: 783 tests pass (9 new in `tests/test_r27_tts_refusal.py`), ruff clean, docs guard
+  green. Live TTS / Gemini are credential/network-gated — verify one render on the box.
+
+## R28 — the factory switches: auto-create, auto-improve, auto-resume `DONE`
+
+The operator asked for a channel that runs itself end to end. Full-auto already stopped flopping
+campaigns (`wind_down`), extended winners and planned successors near a cap; three loops still
+waited on a human. Each is now a per-channel switch on the Channels page, Full auto only, OFF by
+default — ADR-094 has the write-up.
+
+- **Auto-create** (`autopilot_refill_channel`): fewer than `min_active` campaigns running → start a
+  new one from the channel's best campaign (`pick_refill_parent` — never a laggard), through the
+  existing successor path: AI-designed angle, review-first. One per channel per 3 days, capped by
+  `max_active`, skipped when a human's pending campaign is waiting. A channel's FIRST campaign is
+  still the operator's: there is no proven formula to carry yet.
+- **Auto-improve** (`auto_tune`): the weekly strategist tweak (caption theme / music mood / voice
+  rate) applies without a click; the replaced values ride on the action for an undo.
+- **Auto-resume** (`autopilot_resume_channel`): a breaker-stopped campaign restarts 24h later when
+  its last failure heals by itself; never for a dead key, refused voice service or safety block;
+  gives up after 3 resumes without a success.
+- Verified: 791 tests pass (8 new in `tests/test_r28_factory.py`), ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

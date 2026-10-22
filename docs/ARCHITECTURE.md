@@ -2496,3 +2496,91 @@ default and operators still owe each platform's ToS on near-identical content.
 **Cost.** Existing `flash` campaigns change mid-flight: their next renders draw the short
 `billboard_hook` (or the teased title until the AI supplies one) and their covers carry the hook.
 That is the point of the change.
+
+### ADR-093 — A refused voice service is its own failure class, and a paused campaign keeps its videos
+
+**Context.** An operator reported two failures on one channel. Every new render failed in
+`tts.synthesize_paced` with edge-tts' `WSServerHandshakeError: 403`, and the triage banner called it
+"A provider was unreachable — almost always transient". Separately, episodes that had rendered fine
+were failed as "aged out before it could publish (waited more than 180h)".
+
+1. **Root cause of the 403: a stale edge-tts.** Microsoft rotated the read-aloud endpoint's
+   `Sec-MS-GEC` token scheme; edge-tts 7.2.8 signs with version `1-…` and is refused on every
+   attempt, 7.3.x signs with the new `2-…` scheme. The fix is the pin bump (the RUNBOOK's documented
+   remedy). The `Communicate` API we use is unchanged, so `core/tts.py` is untouched.
+2. **Misdiagnosis: the URL matched "connection".** The 403's summary line carries the request URL,
+   whose `ConnectionId=` query parameter matched the network class's bare word "connection" — the
+   same haystack-noise bug R22 fixed for traceback frame paths. `_classification_text` now strips
+   URLs, and a dedicated, NON-transient row ("The voice service refused the connection") sits ahead
+   of the network class, matched on `wsserverhandshakeerror: 403` / `skewadjustmenterror`. A 5xx
+   handshake still classifies as network/transient. The refusal is deliberately NOT an
+   infrastructure cause: every render fails identically, which is exactly the systemic fault the
+   circuit breaker exists to stop before it burns the AI quota spent on each script.
+3. **The aged-out episodes were the breaker's collateral.** Three TTS failures tripped the breaker,
+   which sets the campaign `failed` — and slot publishing only serves `active` campaigns. The
+   expiry sweep did not know that, so the ready buffer aged past its cutoff and was deleted.
+   `expire_stale_buffers` now skips `failed` campaigns, the same hold an expired channel token
+   already gets (R22): the wait is the machine's, not the episode's.
+
+**Trade-off.** A campaign left stopped indefinitely keeps its ready files on disk. That is bounded
+(at most the render-ahead buffer per campaign) and the disk sweeper still runs; deleting finished
+work an operator can publish with one click was the worse failure.
+
+**Rejected: classifying the 403 as transient with a longer back-off.** Microsoft's refusal of a
+stale token is deterministic until the library changes; retries only spend the render slot.
+
+4. **Keeping edge-tts current: Dependabot, not a runtime self-upgrade.** Merging to `main` already
+   builds and deploys, so the only missing step was *noticing* a release. `.github/dependabot.yml`
+   opens a daily bump PR scoped to edge-tts alone; CI gates it and a merge ships it. Rejected:
+   `pip install -U edge-tts` at worker boot or on a 403 — it would run unreviewed PyPI code in the
+   container that holds the Fernet key and OAuth tokens (a supply-chain hole), make the image
+   non-reproducible, and still not pass the test suite first.
+5. **The final Auto-QC judge gets the text leg's resilience.** Operators saw nearly every video
+   parked for review. The vision judge was one bare call on the chain's primary model with a
+   2048-token cap: a per-minute 429 (the script, critic and script judge had just spent the same
+   minute's quota), a spent primary, or a thinking model burning the cap before the JSON all became
+   "QC unavailable" → parked. `generate_structured` now accepts `image_paths`/`audio_path` and the
+   QC judge runs through it — one retry/repair/fallback loop for text and vision (DRY). The footage
+   judges stay single-shot: they are optional and fail open.
+6. **Auto-requalify is timed to the outage.** One re-judge, 2h later, fired straight into a daily
+   quota that resets only at Pacific midnight. Now up to three re-judges ≥ 2h apart, and a
+   daily-quota park waits for `failure.quota_reset_since`. Bounded: three vision calls per parked
+   video at most, still under the shared budget reserve.
+
+### ADR-094 — The factory switches: auto-create, auto-improve, auto-resume (full-auto, opt-in)
+
+**Context.** The operator asked whether the factory could run a channel end to end: create
+campaigns, stop the bad ones, keep the best, improve as it goes. Most of that already existed in
+full-auto (ADR-044/076/081): `wind_down` stops a laggard or a flop streak, `extend` keeps a winner
+going, a successor is planned near a healthy campaign's cap. Three loops still ended at a human:
+a channel whose campaigns had all finished or been wound down went silent; the weekly creative
+`tune` always waited for a click; and a campaign the circuit breaker stopped stayed stopped until
+someone pressed ▶ Start, even when the fault had been a network blip (R27's incident).
+
+**Decision.** Three per-channel switches, active only in Full auto, each OFF until ticked:
+
+1. **Auto-create** keeps `min_active` campaigns running by reusing the successor machinery
+   (`_create_successor`): the parent is the channel's best campaign by classification, a laggard is
+   never a parent, the new campaign is AI-designed and review-first. Bounded by `max_active`
+   (ceiling 5 — one render slot box-wide), one per `REFILL_COOLDOWN_DAYS`, and it defers to a
+   pending campaign a human queued. It does NOT invent a channel's first campaign: with nothing
+   measured to build from, the operator's brief is worth more than a cold AI guess.
+2. **Auto-improve** lets autoapply apply `tune` proposals. ADR-044 kept creative direction
+   human-confirmed; this makes that a choice per channel rather than a rule. The strategist files
+   at most one tune a week, and the replaced values are stored on the action so it can be undone.
+3. **Auto-resume** restarts a breaker-stopped campaign after `RESUME_AFTER_HOURS` only when its last
+   failure classifies as self-healing (`failure.is_transient`, or a quota past its Pacific reset).
+   The breaker still guards: a still-present fault trips it again after three failures, and
+   `MAX_AUTO_RESUMES` resumes without a single success hand the campaign back to the operator.
+
+**Why opt-in, not default.** Each switch spends render time and AI quota without asking. An
+operator who enabled Full auto under ADR-044 agreed to approve/publish/retry, not to new campaigns
+appearing; a changed default would be a silent expansion of what the machine does on their behalf.
+
+**Compliance (ADR-006 unchanged).** Auto-create produces new, AI-designed campaigns, capped per
+channel and review-first — it is not a mass-posting multiplier. Operators still owe each platform's
+ToS on volume and near-identical content.
+
+**Rejected:** auto-creating a channel's first campaign from the channel profile alone (no proven
+formula — see 1); auto-resuming every breaker stop on a timer (would loop a dead key forever).
+

@@ -157,6 +157,16 @@ PATTERNS: tuple[tuple[tuple[str, ...], str, str, str, str, bool], ...] = (
      "One of the source clips or the audio track was unusable. A retry usually picks different "
      "footage and succeeds; if it repeats, try a different visual source on the campaign.",
      "", "", True),
+    # The edge-tts handshake refused (R27). Ahead of the network class: the refusal used to land there
+    # as "almost always transient", the autopilot retried it on its budget, and every retry 403'd the
+    # same way — a stale library or a skewed clock is fixed on the box, never by trying again.
+    (("wsserverhandshakeerror: 403", "skewadjustmenterror"),
+     "The voice service refused the connection",
+     "Microsoft's text-to-speech endpoint rejected this box. Almost always the edge-tts library is "
+     "out of date after Microsoft rotated the endpoint's sign-in — bump edge-tts in "
+     "requirements.txt, redeploy, then retry (RUNBOOK: TTS failures). Also check the box's clock "
+     "is synced (NTP). Finished episodes are safe in the buffer meanwhile.",
+     "/operations", "Operations", False),
     # "rate limit"/"exceeded" moved here from the quota class (R22): per-minute throttles and
     # requests' "Max retries exceeded with url" recover in minutes, not at the Pacific reset.
     (("timed out", "timeout", "connection", "network", "temporarily unavailable", "rate limit",
@@ -174,6 +184,9 @@ PATTERNS: tuple[tuple[tuple[str, ...], str, str, str, str, bool], ...] = (
 )
 
 
+_URL_RE = re.compile(r"\b[a-z][a-z0-9+.-]*://\S+", re.IGNORECASE)
+
+
 def _classification_text(message: str) -> str:
     """What to classify: the exception summary, not the scaffolding around it.
 
@@ -181,16 +194,21 @@ def _classification_text(message: str) -> str:
     haystack noise that used to decide the class ("workers/video_worker.py" matched the bare word
     "worker" on every stored failure, R22). A traceback's trailing non-indented block is exactly
     the "ExcType: message" summary (multi-line exception text included); everything indented above
-    it is frames and source lines. Non-traceback messages classify whole, as before."""
-    if "Traceback (most recent call last)" not in message:
-        return message
-    lines = [ln for ln in message.splitlines() if ln.strip()]
-    tail: list[str] = []
-    for line in reversed(lines):
-        if line.startswith(" "):  # frame/source lines are indented; the summary block is not
-            break
-        tail.append(line)
-    return "\n".join(reversed(tail)) if tail else message
+    it is frames and source lines. Non-traceback messages classify whole, as before.
+
+    URLs are dropped too (R27): they are the same kind of haystack noise as frame paths. An edge-tts
+    403 carries `…&ConnectionId=…` in its URL, which matched the network class's "connection" and
+    told the operator a hard refusal was a transient blip."""
+    if "Traceback (most recent call last)" in message:
+        lines = [ln for ln in message.splitlines() if ln.strip()]
+        tail: list[str] = []
+        for line in reversed(lines):
+            if line.startswith(" "):  # frame/source lines are indented; the summary block is not
+                break
+            tail.append(line)
+        if tail:
+            message = "\n".join(reversed(tail))
+    return _URL_RE.sub("", message)
 
 
 def _word_hit(word: str, low: str) -> bool:
