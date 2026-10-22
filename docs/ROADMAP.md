@@ -1989,7 +1989,7 @@ waited on a human. Each is now a per-channel switch on the Channels page, Full a
 default — ADR-094 has the write-up.
 
 - **Auto-create** (`autopilot_refill_channel`): fewer than `min_active` campaigns running → start a
-  new one from the channel's best campaign (`pick_refill_parent` — never a laggard), through the
+  new one from the channel's best campaign (`pick_refill_parent` — a laggard only as a last resort, see R30), through the
   existing successor path: AI-designed angle, review-first. One per channel per 3 days, capped by
   `max_active`, skipped when a human's pending campaign is waiting. A channel's FIRST campaign is
   still the operator's: there is no proven formula to carry yet.
@@ -2013,6 +2013,19 @@ First renders after R27's deploy: the 403 was gone, but two new reports — ADR-
   so the episode parked for a human. Now `pix_th=0.03` (truly black); pure black is still caught.
 - `NoAudioReceived` gets its own non-transient failure class pointing at Discard & re-render.
 - Verified: 794 tests pass (3 new in `tests/test_r27_tts_refusal.py`), ruff clean, docs guard green.
+
+## R30 — a stopped campaign is finished, and auto-create replaces it `DONE`
+
+The operator asked: after full-auto stops a campaign, does it create a new one? It didn't — ADR-096.
+
+- **A wind-down never completed the campaign.** It sets `total_episodes` to the published count, but
+  completion only ever ran on a publish, and nothing publishes after a stop — so the campaign sat
+  `active` at N/N forever and auto-create counted it as running. An applied wind-down now completes
+  it through the new `video_worker.complete_campaign` (also used by `advance_campaign` and
+  `finish_stranded_campaign` — the third copy of "complete + activate the next pending" is gone).
+- **A channel whose only campaign flopped had no parent.** A laggard may now be auto-create's parent
+  as a last resort, but only under a fresh AI-designed angle; with no AI design it waits.
+- Verified: 795 tests pass (1 new end-to-end in `tests/test_r28_factory.py`), ruff clean, docs guard green.
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation

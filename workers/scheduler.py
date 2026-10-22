@@ -266,8 +266,7 @@ def finish_stranded_campaign(db, campaign) -> bool:
         if (not failure.is_human_reject(msg) and (t.auto_retry_count or 0) < AUTOPILOT_MAX_RETRIES
                 and (failure.is_transient(msg) or failure.is_quota(msg))):
             return False   # the autopilot can still save this one — wait for it
-    campaign.status = CampaignStatus.completed
-    db.commit()
+    video_worker.complete_campaign(db, campaign)   # also activates the next in line
     user = db.get(User, campaign.user_id)
     blocked = ", ".join(f"Ep {t.episode_number}" for t in dead[:5]) or "—"
     channel = db.get(Channel, campaign.channel_id)
@@ -285,12 +284,6 @@ def finish_stranded_campaign(db, campaign) -> bool:
             f"🏁 Campaign '{campaign.topic_name}' completed at {campaign.current_episode}/{total} "
             f"episodes — {blocked} failed in a way no automatic retry can fix. Retry them from "
             "the episode page if you want the full run.")
-    nxt = db.scalar(select(Campaign).where(
-        Campaign.user_id == campaign.user_id,
-        Campaign.status == CampaignStatus.pending).order_by(Campaign.id))
-    if nxt is not None:   # the lifecycle promise: finishing one activates the next in line
-        nxt.status = CampaignStatus.active
-        db.commit()
     logger.warning("Campaign %s completed stranded at %s/%s", campaign.id,
                    campaign.current_episode, total)
     return True
@@ -1358,16 +1351,19 @@ def _design_successor(db, parent):
         return None
 
 
-def _create_successor(db, parent, *, auto_start: bool = False, review_first: bool = False) -> int:
+def _create_successor(db, parent, *, auto_start: bool = False, review_first: bool = False,
+                      design=None) -> int:
     """A successor carries a proven campaign's FORMULA into a fresh campaign. The base is the parent's
     config (voice/format/schedule/QC/branding — what works); an optional AI design pass (S5) freshens
     the creative layer (topic, persona, catchphrases, caption/grade) while keeping that formula, and
     falls back to a plain "<parent> II" clone when AI is unavailable. Copilot-approved → PENDING for
     the operator to start. Full-auto → auto_start + review_first: it renders but its first videos wait
-    for review ("training wheels", ADR-044). Reversible. Returns the new campaign id."""
+    for review ("training wheels", ADR-044). Reversible. Returns the new campaign id. `design` is a
+    CampaignProposal the caller already obtained (auto-create's last-resort path, which must not
+    fall back to a clone)."""
     config = dict(parent.config_json or {})
     topic = (parent.topic_name + " II")[:255]
-    proposal = _design_successor(db, parent)
+    proposal = design if design is not None else _design_successor(db, parent)
     if proposal is not None:
         topic = (proposal.topic_name or topic)[:255]
         for k in _SUCCESSOR_CREATIVE_KEYS:  # overlay only the creative layer; keep the proven formula
@@ -1437,7 +1433,7 @@ def log_council_report(db, channel, user, result: dict) -> None:
 
 
 def apply_autopilot_action(db, action, *, auto_start_successor: bool = False,
-                           review_first_successor: bool = False) -> bool:
+                           review_first_successor: bool = False, successor_design=None) -> bool:
     """Apply a proposed action — reversible config changes only, never a delete. Marks the row
     applied (or failed) and returns success. Shared by the Copilot approve route (defaults: a
     successor is created PENDING) and full-auto (auto_start + review_first)."""
@@ -1448,6 +1444,12 @@ def apply_autopilot_action(db, action, *, auto_start_successor: bool = False,
                 raise ValueError("campaign gone")
             campaign.total_episodes = max(1, int(action.params.get("total_episodes")))
             db.commit()
+            if action.kind == "wind_down" and campaign.current_episode >= campaign.total_episodes:
+                # Stopped means finished (R29). Completion only ever happened on a publish, and a
+                # wound-down campaign has nothing left to publish — so it sat "active" at N/N for
+                # good, auto-create counted it as running, and the channel went quiet instead of
+                # getting a replacement. Its already-rendered extras simply age out.
+                video_worker.complete_campaign(db, campaign)
             if action.kind == "extend":
                 try:
                     video_worker.hydrate_campaign(db, campaign)  # render the newly-allowed episodes
@@ -1469,7 +1471,8 @@ def apply_autopilot_action(db, action, *, auto_start_successor: bool = False,
             if campaign is None:
                 raise ValueError("campaign gone")
             new_id = _create_successor(db, campaign, auto_start=auto_start_successor,
-                                       review_first=review_first_successor)
+                                       review_first=review_first_successor,
+                                       design=successor_design)
             action.params = {**(action.params or {}), "created_campaign_id": new_id}
         elif action.kind == "compile":
             # Build a best-of from the library (ADR-082). Applying only CREATES + QUEUES the build;
@@ -1567,11 +1570,12 @@ def autopilot_refill_channel(db, channel, now: datetime | None = None) -> int:
 
     The successor path only fires for a HEALTHY campaign near its cap, so a channel whose campaigns
     finished, were wound down, or were deleted simply went quiet until a human noticed. This carries
-    the channel's best remaining formula (`pick_refill_parent` — never a laggard) into a new campaign
-    through the same `_create_successor` the successor action uses: AI-designed angle, started, and
-    review-first ("training wheels") so its first videos wait for the review gate. One per channel
-    per REFILL_COOLDOWN_DAYS, never above `max_active`, and never with nothing proven to build from —
-    the first campaign of a channel is always the operator's. Returns 1 if it created one."""
+    the channel's best remaining formula (`pick_refill_parent`) into a new campaign through the
+    same `_create_successor` the successor action uses: AI-designed angle, started, and
+    review-first ("training wheels") so its first videos wait for the review gate. A stopped
+    laggard is a parent only as a last resort, and then only under a FRESH AI design — never a
+    plain clone (R29). One per channel per REFILL_COOLDOWN_DAYS, never above `max_active`; the
+    first campaign of a channel is always the operator's. Returns 1 if it created one."""
     from core import autopilot
 
     fs = autopilot.factory_settings(channel)
@@ -1588,9 +1592,18 @@ def autopilot_refill_channel(db, channel, now: datetime | None = None) -> int:
         AutopilotAction.created_at >= now - timedelta(days=REFILL_COOLDOWN_DAYS)))
     if recent:
         return 0
-    parent = autopilot.pick_refill_parent(campaigns, autopilot.classify_campaigns(db, campaigns))
+    classes = autopilot.classify_campaigns(db, campaigns)
+    parent = autopilot.pick_refill_parent(campaigns, classes)
     if parent is None:
         return 0
+    design = None
+    if not autopilot.is_proven_parent(classes[parent.id]):
+        # Only a stopped/flopping campaign to build from (R29): a fresh AI-designed angle or
+        # nothing — never a plain clone of the angle that just failed. No key / over budget →
+        # try again next pass.
+        design = _design_successor(db, parent)
+        if design is None:
+            return 0
     action = AutopilotAction(
         user_id=channel.user_id, channel_id=channel.id, campaign_id=parent.id, kind="successor",
         summary=(f"Auto-created a new campaign from “{parent.topic_name}” — the channel had fewer "
@@ -1599,7 +1612,8 @@ def autopilot_refill_channel(db, channel, now: datetime | None = None) -> int:
     db.add(action)
     db.commit()
     return 1 if apply_autopilot_action(db, action, auto_start_successor=True,
-                                       review_first_successor=True) else 0
+                                       review_first_successor=True,
+                                       successor_design=design) else 0
 
 
 def autopilot_resume_channel(db, channel, now: datetime | None = None) -> int:

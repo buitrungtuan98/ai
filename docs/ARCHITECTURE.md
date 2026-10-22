@@ -2609,3 +2609,26 @@ and an episode about Orwell scored 10/10 from the vision judge yet "FAILED Auto-
 **Rejected:** skipping the deterministic black check when the vision judge scores high — the free
 check exists precisely for the frames the judge's few samples miss.
 
+### ADR-096 — Stopping a campaign finishes it; a flop is a parent only under a fresh angle
+
+**Context.** The operator asked whether full-auto, after stopping a weak campaign, creates a new
+one. Reading the path end to end, it never would: `wind_down` sets `total_episodes` to the
+published count, but a campaign became `completed` only inside `advance_campaign` — on a publish —
+and a stopped campaign publishes nothing more. `finish_stranded_campaign` skips anything already at
+N/N. So the campaign stayed `active` forever, auto-create (ADR-094) counted it as running, and the
+channel went quiet. Separately, ADR-094 never let a laggard be auto-create's parent, so a channel
+whose only campaign flopped had nothing to build from.
+
+**Decision.**
+1. An applied `wind_down` completes the campaign at once. "Complete + activate the user's next
+   pending campaign" existed twice already; it is now `video_worker.complete_campaign`, used by
+   all three finishing paths (DRY). Rendered extras past the cut age out through the normal sweep.
+2. A laggard ranks last as a parent and is used only as a last resort, and then only with a fresh
+   AI design (`_design_successor`) passed through to `_create_successor`. If the design is
+   unavailable (no key, budget reserve), auto-create waits for a later pass. A plain clone of a
+   failing angle is never created.
+
+**Trade-off.** Completing on wind-down makes the stop slightly less reversible than "extend
+re-opens it": a completed campaign gets no further extend proposals. ▶ Start still re-opens it by
+hand, and the honest state ("completed", not "active at N/N") is what every surface needed.
+
