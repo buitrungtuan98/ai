@@ -221,6 +221,14 @@ All days unchecked = every day. Rendering still runs ahead daily, and day-gated 
 kept up to ~a week before expiring (instead of the default 72h) so an episode can wait for its
 publish day.
 
+**Best time to post (R37):** with Autopilot on, the channel learns when its audience shows up
+(Channels → 🕑 Best time to post). It moves at most one slot per campaign per week:
+- **Copilot** proposes the move on the Autopilot page; **Full-auto** applies it.
+- A move can be weekday-only (e.g. Mondays at 06:30), and the calendar shows it.
+- Moves that did worse after two weeks are undone.
+- Editing a campaign's slots yourself clears its weekday overrides: your edit wins. To stop moves
+  entirely, set the channel's Autopilot to Off.
+
 ## "Nothing is being rendered" — the four reasons
 Rendering runs ahead to the campaign's **buffer size**, and pauses for exactly one of four reasons.
 The dashboard runway tile and the alert bell name which one; the worker log says the same thing.

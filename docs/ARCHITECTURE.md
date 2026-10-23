@@ -2732,3 +2732,26 @@ additively (`create_all`), so an older build keeps running against a newer DB.
 **Rejected:** rolling back from the CI runner (it would need the previous sha from git history,
 and the box's state is the truth); blue/green containers (double the RAM on a 24 GB box running
 one render, and render concurrency must stay 1).
+
+### ADR-101 — Posting times move toward the audience, one reversible step at a time
+
+**Context.** Slots were fixed by the operator. The council (ADR-081) could swap one slot from an
+hour-level table, but it had no weekday dimension and no minimum sample, and nothing undid a bad
+move. Performance compared lifetime numbers at mixed ages.
+
+**Decision.** A deterministic engine (`core/best_time.py`, no AI) scores videos by views at 24h ÷
+the channel median, in a weekday × six-daypart grid with shrinkage, and files at most one
+`slot_change` per campaign per week. It is the same action kind as the council's, so the existing
+weekly cooldown and Copilot/Full-auto semantics cover both.
+- A move may be scoped to one weekday, stored as `slots_by_day`. A weekday override replaces that
+  day's slots, and `slots_for_day` is the one reader.
+- One week in five explores an under-measured daypart with a non-only slot.
+- Every move is judged after 14 days and undone if the new time scores below 90% of the old one.
+- Snapshots at 2h/24h/72h/7d make ages comparable, and each episode keeps its style.
+
+**Rejected:**
+- Hour × weekday cells (168 cells at ~2 posts a day stay empty for months).
+- A bandit choosing the time of every post (it fights a slot schedule the operator can read and
+  edit).
+- Asking the AI to pick times (numbers it could invent; the council's rails exist for that reason).
+

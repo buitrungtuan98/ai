@@ -700,6 +700,15 @@ video.preview { width: 100%; max-height: 420px; border-radius: var(--radius-sm);
 /* Channel growth (Channels page): the totals, then two series on one axis — bars for episodes
    published per day, a line for subscribers gained per day. Hand-rolled; no chart library. */
 .growth { border-top: 1px solid var(--border); padding-top: var(--sp-3); }
+/* Best time to post (R37): weekday × daypart heat grid. Scrolls sideways on a phone. */
+.bt-scroll { overflow-x: auto; }
+.bt-grid { border-collapse: separate; border-spacing: 3px; font-size: var(--fs-xs); min-width: 420px; }
+.bt-grid th { color: var(--muted); font-weight: var(--fw-medium); text-align: left; padding: 2px 4px; }
+.bt-grid td { text-align: center; padding: 4px 6px; border-radius: var(--radius-sm); }
+.bt-grid .bt-hi { background: var(--st-success-bg); color: var(--st-success); font-weight: var(--fw-semibold); }
+.bt-grid .bt-mid { background: var(--st-pending-bg); }
+.bt-grid .bt-lo { background: var(--st-failed-bg); color: var(--st-failed); }
+.bt-grid .bt-none { color: var(--text-subtle); }
 .growth-nums { display: flex; flex-wrap: wrap; gap: var(--sp-4); }
 .gn { font-size: var(--fs-md); font-weight: var(--fw-bold); color: var(--text); }
 .gn small { display: block; font-size: var(--fs-xs); font-weight: var(--fw-normal); color: var(--muted); }

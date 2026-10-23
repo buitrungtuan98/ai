@@ -761,6 +761,21 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
 _CHANNEL_STATUS_FILTERS = ("active", "expired")
 
 
+def _best_time_view(db, channel) -> dict:
+    """The audience map for the Channels page: weekday × daypart scores (1.0 = a normal video), plus
+    the engine's latest moves. Read-only; the same numbers the engine decides from (R37)."""
+    from core import best_time
+    from workers.scheduler import _best_time_samples
+
+    grid = best_time.build_grid(_best_time_samples(db, channel))
+    moves = db.scalars(select(AutopilotAction).where(
+        AutopilotAction.channel_id == channel.id, AutopilotAction.kind == "slot_change")
+        .order_by(AutopilotAction.id.desc()).limit(5)).all()
+    return {"grid": grid, "dayparts": best_time.DAYPARTS, "weekdays": best_time.WEEKDAYS,
+            "min_samples": best_time.MIN_SAMPLES,
+            "moves": [m for m in moves if (m.evidence or {}).get("source") == "best_time"][:3]}
+
+
 @app.get("/channels", response_class=HTMLResponse)
 def channels_page(request: Request, user: CurrentUser, db: DbDep, status: str = "", q: str = "",
                   flash: str = "", flash_reason: str = "", fb_page_id: str = "",
@@ -799,6 +814,8 @@ def channels_page(request: Request, user: CurrentUser, db: DbDep, status: str = 
          "growth": {c.id: analytics_service.channel_growth(db, c.id) for c in channels},
          # Monetization scoreboard (ADR-080): how far from being PAID, in the platform's currency.
          "monetize": {c.id: monetize.channel_progress(db, c) for c in channels},
+         # Best time to post (R37): when this channel's audience shows up, and what was moved.
+         "best_time": {c.id: _best_time_view(db, c) for c in channels},
          "characters": {c.id: _sanitize_characters(c.characters_json) for c in channels},
          "flash": flash if flash in ("profile", "autopilot", "character", "char_img_ok",
                                      "char_img_fail", "no_google_client", "fb_added",
@@ -1825,7 +1842,13 @@ def update_campaign(user: CurrentUser, db: DbDep, campaign=Depends(get_owned_cam
     campaign.topic_name = form["topic_name"]
     campaign.channel_id = form["channel_id"]
     campaign.total_episodes = form["total_episodes"]
-    campaign.config_json = form["config"]
+    new_cfg, old_cfg = form["config"], campaign.config_json or {}
+    # Weekday slot overrides learned by the best-time engine (R37) are not on the form: keep them
+    # through an unrelated edit, drop them when the operator changes the slots (their edit wins).
+    if old_cfg.get("slots_by_day") and (sorted(new_cfg.get("posting_slots") or [])
+                                        == sorted(old_cfg.get("posting_slots") or [])):
+        new_cfg["slots_by_day"] = old_cfg["slots_by_day"]
+    campaign.config_json = new_cfg
     db.commit()
     edited = creative_brief.changed(before, creative_brief.key_digests(campaign, channel, user))
     if edited:
@@ -2738,11 +2761,10 @@ def _calendar_row_cells(campaign: Campaign, ready_eps: list[int], overrides=None
     """
     from datetime import timedelta
 
-    from workers.scheduler import WEEKDAY_KEYS, local_now
+    from workers.scheduler import WEEKDAY_KEYS, local_now, slots_for_day
 
     cfg = campaign.config_json or {}
-    slots = sorted(cfg.get("posting_slots") or [])
-    if not slots:
+    if not cfg.get("posting_slots"):
         return None   # no schedule to draw; review-first campaigns DO have one (ADR-090)
     # ONE definition of "which episode lands in which slot": the next N free slots, lowest-numbered
     # episode first — exactly what the scheduler does and what the publish list shows. Approved
@@ -2769,7 +2791,7 @@ def _calendar_row_cells(campaign: Campaign, ready_eps: list[int], overrides=None
         if allowed and WEEKDAY_KEYS[day.weekday()] not in allowed:
             rows.append({"gate": True, "slots": cells})
             continue
-        for s in slots:
+        for s in sorted(slots_for_day(cfg, day)):
             try:
                 hh, mm = (int(x) for x in s.split(":"))
             except ValueError:
