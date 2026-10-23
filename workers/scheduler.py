@@ -67,6 +67,14 @@ def is_posting_day(days: list[str], now: datetime) -> bool:
     return WEEKDAY_KEYS[now.weekday()] in days
 
 
+def slots_for_day(cfg: dict, day: datetime) -> list[str]:
+    """The "HH:MM" slots for one local day: that weekday's override from `slots_by_day` (written by
+    the best-time engine, R37 — e.g. Mondays post at 06:30 instead of 19:00) or the daily slots.
+    ONE definition, shared by the publish check, catch-up and the upcoming-slot list."""
+    override = (cfg.get("slots_by_day") or {}).get(WEEKDAY_KEYS[day.weekday()])
+    return list(override or cfg.get("posting_slots") or [])
+
+
 def slot_scheduled(cfg: dict) -> bool:
     """True when a posting schedule owns this campaign's publish TIMING (ADR-090).
 
@@ -86,8 +94,7 @@ def upcoming_slots(campaign, count: int = 1, now: datetime | None = None) -> lis
     next-slot chip, the calendar grid, the publish list and the approve path — so the time an
     operator is promised on approval is the same time the scheduler will actually use."""
     cfg = campaign.config_json or {}
-    slots = sorted(cfg.get("posting_slots") or [])
-    if not slots:
+    if not slot_scheduled(cfg):
         return []
     allowed = cfg.get("posting_days") or []
     now_local = now or local_now(cfg.get("timezone"))
@@ -96,7 +103,7 @@ def upcoming_slots(campaign, count: int = 1, now: datetime | None = None) -> lis
         day = now_local + timedelta(days=dd)
         if allowed and WEEKDAY_KEYS[day.weekday()] not in allowed:
             continue
-        for s in slots:
+        for s in sorted(slots_for_day(cfg, day)):
             try:
                 hh, mm = (int(x) for x in s.split(":"))
             except ValueError:
@@ -452,13 +459,12 @@ def publish_due_campaign(db, campaign: Campaign, now: datetime | None = None,
         logger.info("Rescheduled publish: campaign %s episode %s queued",
                     campaign.id, override.episode_number)
         return override.id
-    slots = cfg.get("posting_slots") or []
     if not slot_scheduled(cfg):
         return None  # no slots: continuous mode already published at render time
     now = now or local_now(cfg.get("timezone"))
     if not is_posting_day(cfg.get("posting_days") or [], now):
         return None  # weekday-gated campaign: today is not a publish day
-    if not is_within_slot(slots, now):
+    if not is_within_slot(slots_for_day(cfg, now), now):
         return None
     if _recently_published(db, campaign.id, settings.SLOT_TOLERANCE_MINUTES):
         return None
@@ -1307,10 +1313,10 @@ def catch_up_due(db, campaign: Campaign, now: datetime | None = None):
     # waits for a real slot; an operator who wants it out sooner has "Publish now".
     if not cfg.get("auto_publish", True):
         return None
-    slots = sorted(cfg.get("posting_slots") or [])
-    if not slots:
+    if not slot_scheduled(cfg):
         return None  # continuous mode publishes at render time — nothing to catch up
     now_l = now or local_now(cfg.get("timezone"))
+    slots = sorted(slots_for_day(cfg, now_l))
     if not is_posting_day(cfg.get("posting_days") or [], now_l):
         return None
     if is_within_slot(slots, now_l) or _recently_published(db, campaign.id, settings.SLOT_TOLERANCE_MINUTES):
@@ -1490,6 +1496,109 @@ def _create_successor(db, parent, *, auto_start: bool = False, review_first: boo
     return new.id
 
 
+def _best_time_samples(db, channel, *, campaign_id: int | None = None,
+                       since: datetime | None = None, now: datetime | None = None) -> list:
+    """Measured ordinary episodes of a channel (or one campaign) as best-time samples: local
+    weekday + hour of publish (each on its campaign's clock) and views at 24h."""
+    from core import best_time
+    from core.compilation import ordinary_episodes
+    from services.analytics_service import publish_local, published_time
+
+    now = now or datetime.utcnow()
+    since = since or now - timedelta(days=best_time.WINDOW_DAYS)
+    q = (select(Task, Campaign).join(Campaign, Task.campaign_id == Campaign.id)
+         .where(Campaign.channel_id == channel.id, Task.status == TaskStatus.COMPLETED,
+                Task.published_video_id.isnot(None)))
+    if campaign_id is not None:
+        q = q.where(Task.campaign_id == campaign_id)
+    rows = db.execute(q).all()
+    keep = {t.id for t in ordinary_episodes([t for t, _ in rows])}
+    out = []
+    for t, c in rows:
+        v = (t.stats_json or {}).get("views_24h")
+        when = published_time(t)
+        if t.id not in keep or v is None or when is None or when < since:
+            continue
+        local = publish_local(t, c)
+        out.append(best_time.Sample(best_time.WEEKDAYS[local.weekday()], local.hour, int(v)))
+    return out
+
+
+def autopilot_best_time_channel(db, channel, now: datetime | None = None) -> int:
+    """The best-time engine (R37, ADR-101): judge earlier moves, then file at most ONE slot move per
+    campaign as a `slot_change` action — the same kind the council files, so its weekly cooldown
+    and "already proposed" guard cover both. Copilot: a proposal. Full-auto: auto-applied by the
+    autoapply step. Returns actions filed. Pure numbers — no AI call."""
+    from core import best_time
+    from core.council import _slot_change_recently_applied
+
+    now = now or datetime.utcnow()
+    filed = 0
+    grid = best_time.build_grid(_best_time_samples(db, channel, now=now))
+
+    def _file(campaign_id: int, summary: str, params: dict, evidence: dict) -> None:
+        db.add(AutopilotAction(user_id=channel.user_id, channel_id=channel.id,
+                               campaign_id=campaign_id, kind="slot_change", summary=summary[:300],
+                               evidence={"source": "best_time", **evidence}, params=params))
+
+    # 1. Did the moves we made pay? Undo the ones that did not (an undo is never judged itself).
+    reverted: set[int] = set()
+    for a in db.scalars(select(AutopilotAction).where(
+            AutopilotAction.channel_id == channel.id, AutopilotAction.kind == "slot_change",
+            AutopilotAction.status == "applied")).all():
+        ev = a.evidence or {}
+        if ev.get("source") != "best_time" or ev.get("revert") or ev.get("judged"):
+            continue
+        if a.resolved_at is None or a.campaign_id is None:
+            continue
+        verdict = best_time.judge_move(
+            ev, a.params or {},
+            _best_time_samples(db, channel, campaign_id=a.campaign_id, since=a.resolved_at, now=now),
+            (now - a.resolved_at).total_seconds() / 86400)
+        if verdict == "wait":
+            continue
+        a.evidence = {**ev, "judged": verdict}
+        if verdict == "revert":
+            p = a.params or {}
+            _file(a.campaign_id,
+                  f"Undo: posting at {p.get('to')} did worse than {p.get('from')} — moving back",
+                  {"from": p.get("to"), "to": p.get("from"), "scope": p.get("scope") or "all"},
+                  {"revert": True, "revert_of": a.id})
+            reverted.add(a.campaign_id)
+            filed += 1
+    db.commit()
+
+    # 2. One move per campaign, at most weekly (shared cooldown with the council's moves).
+    iso_week = now.isocalendar()[1]
+    for c in db.scalars(select(Campaign).where(Campaign.channel_id == channel.id,
+                                               Campaign.status == CampaignStatus.active)).all():
+        cfg = c.config_json or {}
+        if c.id in reverted or not slot_scheduled(cfg):
+            continue
+        pending = db.scalar(select(func.count()).select_from(AutopilotAction).where(
+            AutopilotAction.campaign_id == c.id, AutopilotAction.kind == "slot_change",
+            AutopilotAction.status == "proposed")) or 0
+        last = db.scalars(select(AutopilotAction).where(
+            AutopilotAction.campaign_id == c.id, AutopilotAction.kind == "slot_change")
+            .order_by(AutopilotAction.id.desc()).limit(1)).first()
+        dismissed_recently = bool(
+            last and last.status == "dismissed" and last.resolved_at
+            and last.resolved_at >= now - timedelta(days=REPROPOSE_AFTER_DAYS))
+        if pending or dismissed_recently or _slot_change_recently_applied(db, c.id):
+            continue   # a "no" from the operator holds for REPROPOSE_AFTER_DAYS, as elsewhere
+        move = best_time.plan_move(grid, cfg, iso_week=iso_week, channel_id=channel.id)
+        if move is None:
+            continue
+        where = "every day" if move.scope == "all" else f"on {move.scope.title()}"
+        _file(c.id, f"Post at {move.to} instead of {move.frm} {where}: {move.reason}",
+              {"from": move.frm, "to": move.to, "scope": move.scope},
+              {"from_score": move.from_score, "to_score": move.to_score, "explore": move.explore,
+               "median_24h": grid["median_24h"], "samples": grid["n"]})
+        filed += 1
+    db.commit()
+    return filed
+
+
 def autopilot_council_channel(db, user, channel) -> dict:
     """The daily judged pass (ADR-081) — Gemini reads the evidence pack and files proposals through
     the rails. Guarded like the strategist: a Gemini key, the 80% budget reserve (rendering is never
@@ -1596,13 +1705,29 @@ def apply_autopilot_action(db, action, *, auto_start_successor: bool = False,
             # have edited slots between proposal and approval.
             if campaign is None:
                 raise ValueError("campaign gone")
+            # A best-time move (R37) may be scoped to ONE weekday: that day gets its own slot list
+            # in `slots_by_day`, a copy of what it posted at before with the one slot swapped.
             cfg = dict(campaign.config_json or {})
-            slots = list(cfg.get("posting_slots") or [])
             frm, to = (action.params or {}).get("from"), (action.params or {}).get("to")
+            day = (action.params or {}).get("scope") or "all"
+            if day == "all":
+                slots = list(cfg.get("posting_slots") or [])
+            else:
+                by_day = dict(cfg.get("slots_by_day") or {})
+                slots = list(by_day.get(day) or cfg.get("posting_slots") or [])
             if frm not in slots:
                 raise ValueError(f"slot {frm!r} no longer exists on the campaign")
+            if to in slots:
+                raise ValueError(f"slot {to!r} is already one of the campaign's slots")
             slots[slots.index(frm)] = to
-            cfg["posting_slots"] = slots
+            if day == "all":
+                cfg["posting_slots"] = slots
+            elif sorted(slots) == sorted(cfg.get("posting_slots") or []):
+                by_day.pop(day, None)            # back to the daily slots — no override needed
+                cfg["slots_by_day"] = by_day
+            else:
+                by_day[day] = slots
+                cfg["slots_by_day"] = by_day
             campaign.config_json = cfg
             db.commit()
         else:
@@ -1938,6 +2063,8 @@ def autopilot_pass(db=None, now: datetime | None = None, respect_cadence: bool =
                                 lambda: autopilot_propose_channel(db, ch, now=now), 0, failures)
             proposed += _ap_step(db, ch, "strategist", lambda: autopilot_strategist_channel(
                 db, db.get(User, ch.user_id), ch), 0, failures)
+            proposed += _ap_step(db, ch, "best_time",
+                                 lambda: autopilot_best_time_channel(db, ch, now=now), 0, failures)
             council_r = _ap_step(db, ch, "council", lambda: autopilot_council_channel(
                 db, db.get(User, ch.user_id), ch), {"filed": 0}, failures)
             proposed += council_r.get("filed", 0)

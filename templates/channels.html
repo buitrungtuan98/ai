@@ -140,6 +140,46 @@
       </div>
     </details>
     {% endif %}
+    {# ── Best time to post (R37): weekday × time of day, 1.0× = a normal video at 24h ── #}
+    {% set bt = best_time.get(c.id) %}
+    {% if bt and bt.grid.n %}
+    <details class="disclosure mt-sm">
+      <summary><span class="sum"><span class="sum-l">🕑 Best time to post</span><span class="sum-v">
+        {% if bt.grid.n < bt.min_samples %}learning — {{ bt.grid.n }}/{{ bt.min_samples }} videos{% else %}{{ bt.grid.n }} videos measured{% endif %}</span></span></summary>
+      <div class="disclosure-body">
+        <p class="hint">Views in the first 24h compared with this channel's typical video
+          ({{ '{:,}'.format(bt.grid.median_24h|int) if bt.grid.median_24h else '—' }}), by the
+          campaign's local weekday and time. Few videos in a cell pull it toward normal, so one lucky
+          post cannot move the schedule.</p>
+        <div class="bt-scroll">
+        <table class="bt-grid">
+          <thead><tr><th></th>{% for dp in bt.dayparts %}<th title="{{ dp[2] }}:00–{{ dp[3] }}:00">{{ dp[1] }}</th>{% endfor %}</tr></thead>
+          <tbody>
+          {% for d in bt.weekdays %}
+          <tr><th>{{ d|title }}</th>
+            {% for dp in bt.dayparts %}{% set cell = bt.grid.cells[d][dp[0]] %}
+            <td class="{{ 'bt-none' if not cell.n else ('bt-hi' if cell.score >= 1.2 else ('bt-lo' if cell.score <= 0.8 else 'bt-mid')) }}"
+                title="{{ d|title }} {{ dp[1] }}: {{ cell.n }} video{{ 's' if cell.n != 1 }}">{% if cell.n %}{{ '%.1f'|format(cell.score) }}×{% else %}·{% endif %}</td>
+            {% endfor %}</tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        </div>
+        {% if bt.grid.n < bt.min_samples %}
+        <p class="hint mt-sm">The schedule starts moving once {{ bt.min_samples }} videos have a 24h
+          view count. Until then this map only fills in.</p>
+        {% else %}
+        <p class="hint mt-sm">The autopilot moves at most one slot per campaign per week toward the
+          strongest times, tries an untested time about one week in five, and undoes a move that did
+          worse after two weeks.</p>
+        {% endif %}
+        {% for m in bt.moves %}
+        <p class="meta" style="margin:2px 0">{{ m.created_at.strftime('%b %d') if m.created_at }} ·
+          {{ m.summary }} ({{ m.status }})</p>
+        {% endfor %}
+      </div>
+    </details>
+    {% endif %}
     <div class="row-actions">
       <a class="btn ghost sm" href="/campaigns?channel={{ c.id }}">Campaigns →</a>
       <a class="btn ghost sm" href="/assets?channel={{ c.id }}">Review →</a>

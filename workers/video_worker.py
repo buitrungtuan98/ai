@@ -877,6 +877,21 @@ def _mark_channel_expired(db, campaign: Campaign, exc: Exception) -> bool:
     return True
 
 
+# The creative knobs a video was MADE with (R37). They live on the campaign and tuning changes them
+# over time, so without a per-episode copy "which style works at night" can never be measured.
+STYLE_KEYS = ("voice", "voice_delivery", "rate_pct", "color_grade", "music_mood", "music_mode",
+              "caption_theme", "subtitle_style", "motion", "visual_style", "visual_source",
+              "content_style", "video_format", "language")
+
+
+def style_snapshot(cfg: dict, topic: str | None = None) -> dict:
+    """{knob: value} for the set knobs, plus the episode's topic. Pure."""
+    out = {k: cfg[k] for k in STYLE_KEYS if cfg.get(k) not in (None, "")}
+    if topic:
+        out["topic"] = topic[:120]
+    return out
+
+
 def _fail_task(db, task: Task, user: User, campaign: Campaign, exc: Exception, job: str,
                journey: list[dict] | None = None) -> None:
     from services.facebook_service import scrub
@@ -1467,6 +1482,7 @@ def render_task(task_id: int) -> None:
         # (ADR-079) — without it, every completed episode is invisible to the slop gate.
         task.render_json = {"scenes": result.scene_map, "duration": result.duration,
                             "render_seconds": render_seconds, "journey": journey[:12],
+                            "style": style_snapshot(cfg, script.topic),
                             **slop_gate.script_fingerprint(script)}
         _set_status(db, task, TaskStatus.AUDIO_SYNCED, 88)
 

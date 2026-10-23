@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from core import flop, retention
 from database.models import Campaign, Channel, Task
@@ -217,6 +217,25 @@ def fetch_facebook_stats(channel: Channel, video_ids: list[str]) -> dict[str, di
 
 EARLY_REFRESH_MINUTES = 55  # young videos (< MIN_AGE_HOURS) get near-real-time views ~hourly
 
+# Views at fixed ages after publish (R37): (key, age_h, grace_h). A snapshot is stamped ONCE, on the
+# first refresh inside [age_h, age_h + grace_h) — so "views at 72h" means the same thing for every
+# video and videos of different ages can be compared fairly. A video first seen after the window
+# never gets that stamp: a 9-day count is not a 7-day count. `views_24h` predates this (ADR-079).
+SNAPSHOTS = (("views_2h", 2, 4), ("views_24h", flop.SNAPSHOT_AGE_H, 24),
+             ("views_72h", 72, 24), ("views_7d", 168, 24))
+SNAPSHOT_HORIZON_H = max(age + grace for _, age, grace in SNAPSHOTS)
+
+
+def published_time(task) -> datetime | None:
+    """When the episode went live: `published_at` (ADR-091), else `finished_at` — which the publish
+    step stamps too, but which any later step may overwrite. THE clock for ages and publish hours."""
+    return task.published_at or task.finished_at
+
+
+def pending_snapshots(stats: dict, age_h: float) -> list[str]:
+    """Snapshot keys whose window `age_h` is inside and that are not stamped yet. Pure."""
+    return [k for k, at, grace in SNAPSHOTS if stats.get(k) is None and at <= age_h < at + grace]
+
 
 def fetch_youtube_early_stats(channel: Channel, video_ids: list[str]) -> dict[str, dict]:
     """Return {video_id: {views, likes, comments}} via the YouTube **Data** API (v3
@@ -253,15 +272,23 @@ def collect_early_stats(db, now: datetime | None = None) -> int:
         select(Task).where(
             Task.status == TaskStatus.COMPLETED,
             Task.published_video_id.isnot(None),
-            Task.finished_at > now - timedelta(hours=MIN_AGE_HOURS),  # too young for retention
+            func.coalesce(Task.published_at, Task.finished_at)
+            > now - timedelta(hours=SNAPSHOT_HORIZON_H),
         )
     ).all()
-    due = [
-        t for t in tasks
-        if not (t.stats_json or {}).get("early_fetched_at")
-        or datetime.fromisoformat(t.stats_json["early_fetched_at"])
-        <= now - timedelta(minutes=EARLY_REFRESH_MINUTES)
-    ]
+
+    def _age_h(t) -> float:
+        return (now - published_time(t)).total_seconds() / 3600
+
+    def _due(t) -> bool:
+        st = t.stats_json or {}
+        if _age_h(t) >= MIN_AGE_HOURS:   # past the hourly window: only when a snapshot is owed
+            return bool(pending_snapshots(st, _age_h(t)))
+        return (not st.get("early_fetched_at") or datetime.fromisoformat(st["early_fetched_at"])
+                <= now - timedelta(minutes=EARLY_REFRESH_MINUTES)
+                or bool(pending_snapshots(st, _age_h(t))))
+
+    due = [t for t in tasks if published_time(t) is not None and _due(t)]
     if not due:
         return 0
     by_channel: dict[int, list[Task]] = {}
@@ -292,17 +319,18 @@ def collect_early_stats(db, now: datetime | None = None) -> int:
         for t in channel_tasks:
             if t.published_video_id not in stats:
                 continue
-            # Merge onto whatever is there; never clobber retention. `early` = no retention yet.
-            merged = {**(t.stats_json or {}), **stats[t.published_video_id],
-                      "early_fetched_at": now.isoformat()}
-            merged["early"] = merged.get("avg_pct_viewed") is None
-            # First-day snapshot (ADR-079): stamped ONCE on the first hourly refresh past 24h of
-            # age, so every episode's number means the same thing — "views at ~day one", the value
-            # flop judgments compare. Episodes are re-fetched hourly until 48h, so the 24-48h window
-            # guarantees the stamp lands.
-            if (merged.get("views_24h") is None and t.finished_at
-                    and (now - t.finished_at) >= timedelta(hours=flop.SNAPSHOT_AGE_H)):
-                merged["views_24h"] = int(merged.get("views") or 0)
+            fresh, age_h = stats[t.published_video_id], _age_h(t)
+            if age_h < MIN_AGE_HOURS:
+                # Merge onto whatever is there; never clobber retention. `early` = no retention yet.
+                merged = {**(t.stats_json or {}), **fresh, "early_fetched_at": now.isoformat()}
+                merged["early"] = merged.get("avg_pct_viewed") is None
+            else:
+                # Older: the mature pass owns `views` (Analytics, lagged); only stamp the snapshot.
+                merged = dict(t.stats_json or {})
+            # Age snapshots (R37; views_24h is ADR-079's first-day number that flop judgments
+            # compare): each stamped ONCE, inside its window, from this real-time count.
+            for key in pending_snapshots(merged, age_h):
+                merged[key] = int(fresh.get("views") or 0)
             t.stats_json = merged
             updated += 1
     if updated:
@@ -319,7 +347,15 @@ def collect_early_stats(db, now: datetime | None = None) -> int:
 
 def _publish_hour(task, campaign) -> int | None:
     """The local hour this episode went out, on the campaign's clock — evidence for the autopsy."""
-    if not task.finished_at:
+    local = publish_local(task, campaign)
+    return local.hour if local is not None else None
+
+
+def publish_local(task, campaign) -> datetime | None:
+    """When this episode went live, on the campaign's own clock (its timezone) — the weekday and
+    hour every timing analysis reads (R37)."""
+    when = published_time(task)
+    if when is None:
         return None
     from zoneinfo import ZoneInfo
 
@@ -327,9 +363,9 @@ def _publish_hour(task, campaign) -> int | None:
 
     tz_name = (campaign.config_json or {}).get("timezone") or _settings.TIMEZONE
     try:
-        return task.finished_at.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo(tz_name)).hour
-    except Exception:  # noqa: BLE001 — a bad zone loses one evidence field, not the autopsy
-        return task.finished_at.hour
+        return when.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo(tz_name))
+    except Exception:  # noqa: BLE001 — a bad zone loses the local view, not the analysis
+        return when
 
 
 def judge_flops(db, campaign) -> int:
@@ -365,8 +401,10 @@ def collect_stats(db, now: datetime | None = None) -> int:
         select(Task).where(
             Task.status == TaskStatus.COMPLETED,
             Task.published_video_id.isnot(None),
-            Task.finished_at <= now - timedelta(hours=MIN_AGE_HOURS),
-            Task.finished_at >= now - timedelta(days=MAX_AGE_DAYS),
+            func.coalesce(Task.published_at, Task.finished_at)
+            <= now - timedelta(hours=MIN_AGE_HOURS),
+            func.coalesce(Task.published_at, Task.finished_at)
+            >= now - timedelta(days=MAX_AGE_DAYS),
         )
     ).all()
     due = [

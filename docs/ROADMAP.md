@@ -2163,6 +2163,31 @@ R31's retag retry was deployed. The retry still had a hole: a clip with no retag
   .debs are now cached per runner image and installed offline (`--no-install-recommends`).
 - Verified: 5 new tests (index parse, retag-only, swap, nothing left, other errors untouched).
 
+## R37 — best time to post: the schedule learns when the audience shows up `DONE`
+
+The operator asked whether the analytics understand local time and weekdays ("Monday 6am has lots
+of people; this style is better at night") and whether publish times could improve on their own.
+Posting slots were in local time and weekdays were an on/off gate, but performance was never read
+by weekday. Videos were compared on lifetime numbers at mixed ages, and nothing recorded the
+style each video was made with (ADR-101).
+
+- **Same-age numbers:** views at 2h, 24h, 72h and 7 days after publish, each stamped once inside
+  its window from the real-time count. `published_at` is now the clock for every age and hour (the
+  publish step also stamps `finished_at`, so the old hours were right, but any later step could
+  overwrite it).
+- **Audience map:** weekday × six dayparts, scored as views-at-24h ÷ the channel's median, with
+  small cells shrunk toward normal. It is shown on the Channels page ("Best time to post").
+- **Engine:** at most one slot move per campaign per week, filed as the existing `slot_change`
+  action. Copilot proposes it; Full-auto applies it.
+  - A daily move needs ≥15% gain from ≥4 videos and must win on most weekdays.
+  - A single strong weekday gets its own slot (`slots_by_day`).
+  - One week in five tries an untested time, never with a campaign's only slot.
+  - Moves that did worse after 14 days are undone.
+- **Style snapshot:** each new episode records voice, rate, grade, music, captions, visuals, format
+  and topic. Style × time analysis needs a few weeks of these first; it is the follow-up.
+- Verified: 17 new tests. One caught a strong Monday dragging the whole week to mornings, which is
+  why daily moves must win on most days.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download
