@@ -2070,6 +2070,25 @@ Two production failures after R29 went live — ADR-097.
   normal path. Verified with ffprobe: `reserved` → `bt709`.
 - Verified: 806 tests pass (5 new in `tests/test_r27_tts_refusal.py`), ruff clean, docs guard green.
 
+## R32 — UI audit: dead ends, duplicates and a timeline that lied `DONE`
+
+The operator found the UI hard to use: "it duplicates steps, loops, and the FE has bugs". The real
+app was booted with seeded data in every state and crawled in headless Chromium on desktop and phone
+(62 pages): no server errors and no JavaScript errors, so the problems are in the flows:
+
+- **The loop:** content failures said "use Discard & re-render, which writes a fresh script", but a
+  failed episode with no video has no such button — only Retry, which rebuilds the SAME script and
+  fails the same way. New "Retry with a fresh script" (`retry?fresh=1` drops the checkpoint); the
+  fix copy now names it.
+- **Duplicates:** the dashboard listed one cause once per episode (three identical paragraphs, three
+  Retry buttons) — now one row per (campaign, cause) with "Retry all N". The Review page carried a
+  second chip row restating the stage tabs under other names ("Published (0)" under "Published
+  (23)") — removed; Review now opens on the review queue.
+- **A timeline that lied:** a failed episode showed its failure time as "render finished" and a
+  projected posting slot — now blank, "after a successful retry".
+- Inline favicon (every page logged a `/favicon.ico` 404).
+- Verified: 809 tests pass (3 new), ruff clean, docs guard green; re-crawled with no errors.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

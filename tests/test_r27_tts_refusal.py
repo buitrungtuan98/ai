@@ -239,7 +239,7 @@ def test_no_audio_received_is_named_and_stays_retryable():
            "parameters are correct.")
     d = failure.diagnose(msg)
     assert d["cause"] == "The voice service returned no audio for a line"
-    assert "Discard & re-render" in d["fix"]
+    assert "fresh script" in d["fix"]
     assert failure.is_transient(msg) is True   # the deterministic cause is fixed upstream (R30)
 
 
@@ -411,3 +411,63 @@ def test_a_reserved_colour_space_clip_comes_out_bt709(tmp_path):
                           "stream=color_space", "-of", "csv=p=0", fixed],
                          capture_output=True, text=True, check=True).stdout.strip()
     assert out == "bt709"
+
+
+# ── R32: UI dead ends and duplicates ─────────────────────────────────────────
+def _web(session, user, channel):
+    from database.models import Campaign, Task
+    from database.types import CampaignStatus, TaskStatus
+
+    camp = Campaign(user_id=user.id, channel_id=channel.id, topic_name="UI", total_episodes=9,
+                    current_episode=0, status=CampaignStatus.active,
+                    config_json={"posting_slots": ["20:00"]})
+    session.add(camp)
+    session.commit()
+    tasks = []
+    for ep in (2, 3, 4):
+        t = Task(campaign_id=camp.id, user_id=user.id, episode_number=ep, status=TaskStatus.FAILED,
+                 error_message="aiohttp.client_exceptions.WSServerHandshakeError: 403, x",
+                 finished_at=datetime.utcnow(), render_json={"script": {"scenes": []}})
+        session.add(t)
+        tasks.append(t)
+    session.commit()
+    return camp, tasks
+
+
+def test_retry_with_a_fresh_script_drops_the_saved_one(session, user, channel, monkeypatch):
+    from starlette.testclient import TestClient
+
+    import main
+    from workers import video_worker
+
+    monkeypatch.setattr(video_worker, "enqueue_task", lambda t: "job")
+    _, tasks = _web(session, user, channel)
+    with TestClient(main.app) as c:
+        page = c.get(f"/episodes/{tasks[0].id}").text
+        assert "Retry with a fresh script" in page
+        c.post(f"/api/tasks/{tasks[0].id}/retry", data={"fresh": "1"})
+        c.post(f"/api/tasks/{tasks[1].id}/retry")
+    session.expire_all()
+    assert "script" not in (tasks[0].render_json or {})        # fresh: a new script is written
+    assert "script" in tasks[1].render_json                     # plain retry: the same script
+
+
+def test_a_failed_episode_promises_no_render_and_no_slot(session, user, channel):
+    from core.timeline import episode_timeline
+
+    camp, tasks = _web(session, user, channel)
+    stages = {m.key: m for m in episode_timeline(session, tasks[0], camp)}
+    assert stages["rendered"].at is None                       # the failure time is not a render
+    assert stages["scheduled"].at is None and "retry" in stages["scheduled"].note
+
+
+def test_dashboard_groups_identical_failures_into_one_row(session, user, channel):
+    from starlette.testclient import TestClient
+
+    import main
+
+    _web(session, user, channel)
+    with TestClient(main.app) as c:
+        body = c.get("/").text
+    assert "UI · Ep 2, 3, 4</a></b> failed" in body and "Retry all 3" in body
+    assert body.count("The voice service refused the connection") == 1

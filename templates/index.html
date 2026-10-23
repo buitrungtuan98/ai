@@ -80,20 +80,20 @@
       <a class="btn sm" href="/autopilot">Review →</a>
     </li>
     {% endif %}
-    {% for t in attention_failed %}
-    {% set camp = camp_by_id.get(t.campaign_id) %}
+    {% for g in failed_groups %}
+    {% set camp = camp_by_id.get(g.campaign_id) %}
+    {% set t = g.tasks[0] %}{% set dg = g.dg %}
     <li>
       <span class="tri-dot failed"></span>
       <div class="grow">
-        {% set dg = fail_causes.get(t.id) %}
-        <b><a href="/episodes/{{ t.id }}">{{ camp.topic_name if camp else 'C' ~ t.campaign_id }} · Ep {{ t.episode_number }}</a></b> failed{% if dg %} — {{ dg.cause }}{% endif %}
+        <b>{% if g.tasks|length == 1 %}<a href="/episodes/{{ t.id }}">{{ camp.topic_name if camp else 'C' ~ t.campaign_id }} · Ep {{ t.episode_number }}</a>{% else %}<a href="/campaigns/{{ g.campaign_id }}/episodes?status=failed">{{ camp.topic_name if camp else 'C' ~ g.campaign_id }} · Ep {{ g.tasks|map(attribute='episode_number')|join(', ') }}</a>{% endif %}</b> failed{% if dg %} — {{ dg.cause }}{% endif %}
         <div class="meta">{{ dg.fix if dg else (t.error_message or 'Render failed — open the episode for details.')[:120] }}</div>
       </div>
       {# The classified fix gets its link here too (ADR-068), not only on the episode page — a
          quota/blacklist/token failure whose copy says "go to Settings/Credentials" must not offer
          Retry as the only clickable thing when retrying is exactly what won't help. #}
       {% if dg and dg.action %}<a class="btn sm" href="{{ dg.href }}">{{ dg.action }} →</a>{% endif %}
-      <form class="retry-form" data-task="{{ t.id }}"><button class="btn ghost sm" type="submit">↻ Retry</button></form>
+      <form class="retry-form" data-task="{{ g.tasks|map(attribute='id')|join(',') }}"><button class="btn ghost sm" type="submit">↻ Retry{% if g.tasks|length > 1 %} all {{ g.tasks|length }}{% endif %}</button></form>
     </li>
     {% endfor %}
     {% for i in attention_review %}
@@ -261,11 +261,16 @@
     document.querySelectorAll(".retry-form").forEach(function (f) {
       f.addEventListener("submit", function (e) {
         e.preventDefault();
-        var btn = f.querySelector("button"), id = f.dataset.task;
+        var btn = f.querySelector("button"), ids = f.dataset.task.split(",");
         window.ui.busyButton(btn, "↻ Retrying…", function () {
-          return fetch("/api/tasks/" + id + "/retry", { method: "POST" })
-            .then(function (r) { if (!r.ok) throw new Error(); return r.json(); })
-            .then(function (d) {
+          // A grouped row retries every episode in it (R32); one reply is enough to report.
+          return Promise.all(ids.map(function (id) {
+            return fetch("/api/tasks/" + id + "/retry", { method: "POST" })
+              .then(function (r) { if (!r.ok) throw new Error(); return r.json(); });
+          }))
+            .then(function (all) {
+              var d = all[0];
+              if (all.length > 1) d = { mode: "group", n: all.length };
               // Say what the server actually did (R22): "Retry queued." over a publish told the
               // operator a render was re-queued while an upload was already on its way.
               if (d.mode === "review") {
@@ -273,6 +278,8 @@
                 if (d.href) { window.location.href = d.href; return; }
               } else if (d.mode === "publish") {
                 window.ui.toast("Upload retry queued — the rendered video publishes to the channel (no re-render).", "success");
+              } else if (d.mode === "group") {
+                window.ui.toast(d.n + " episodes queued again.", "success");
               } else if (d.mode === "published") {
                 window.ui.toast("Already published — status corrected, nothing re-posted.", "success");
               } else {

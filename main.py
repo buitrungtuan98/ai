@@ -737,6 +737,19 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
     setup = _setup_state(user, channels, campaigns)
     # One failure reads the same in triage, in the bell and on the episode page (ADR-068).
     fail_causes = {t.id: _diagnose_failure(t.error_message) for t in attention_failed}
+    # One row per (campaign, cause) (R32): three episodes stopped by the same refused key read as
+    # three identical paragraphs with three Retry buttons — one problem, shown as three.
+    failed_groups: list[dict] = []
+    by_key: dict = {}
+    for t in attention_failed:
+        dg = fail_causes.get(t.id)
+        k = (t.campaign_id, dg["cause"] if dg else (t.error_message or "")[:80])
+        if k not in by_key:
+            by_key[k] = {"campaign_id": t.campaign_id, "dg": dg, "tasks": []}
+            failed_groups.append(by_key[k])
+        by_key[k]["tasks"].append(t)
+    for g in failed_groups:
+        g["tasks"].sort(key=lambda t: t.episode_number)
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -747,6 +760,7 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
             "counts": counts,
             "attention": _attention_count(db, user.id, counts),
             "attention_failed": attention_failed, "attention_review": attention_review,
+            "failed_groups": failed_groups,
             "review_ids": review_ids,
             "scorecard": _scorecard(db, user.id), "next_publish": _next_publish(db, user.id),
             "vitals": _factory_vitals(db, user.id),
@@ -2044,6 +2058,9 @@ def assets_page(request: Request, user: CurrentUser, db: DbDep,
                 campaign: int | None = None, channel: int | None = None,
                 status: str = "", page: int = 1, q: str = ""):
     q = q.strip()
+    # The page is "Review" (R32): with no filter it shows what waits for review, not every buffer
+    # row ever made. Links that ask for `ready`/`consumed` explicitly still get them.
+    status = status or "awaiting_review"
     # Scope conditions (channel/campaign drill-down) — chip counts are computed over THIS, without the
     # search, so the chips read as "how many exist here" (consistent with Campaigns/Channels). Search +
     # status narrow only the visible items and the paging count.
@@ -3038,7 +3055,8 @@ def api_search(user: CurrentUser, db: DbDep, q: str = ""):
 
 
 @app.post("/api/tasks/{task_id}/retry")
-def retry_task(task_id: int, user: CurrentUser, db: DbDep, return_to: str = Form("")):
+def retry_task(task_id: int, user: CurrentUser, db: DbDep, return_to: str = Form(""),
+               fresh: str = Form("")):
     """Retry a failed episode — retrying the step that actually failed (ADR-085). An APPROVED
     rendered file (`ready`) re-queues only the publish; a file still AWAITING REVIEW routes the
     operator to the review controls instead (R22: Retry must never publish unreviewed content —
@@ -3046,7 +3064,11 @@ def retry_task(task_id: int, user: CurrentUser, db: DbDep, return_to: str = Form
     no surviving file re-renders.
 
     Returns JSON for the Task Logs poller (fetch, no `return_to`); a form POST from the Episode view
-    passes `return_to` and gets a 303 back to that page instead."""
+    passes `return_to` and gets a 303 back to that page instead.
+
+    `fresh=1` re-renders from a NEW script (R32): a plain retry rebuilds the saved one, which is
+    right after a crash and wrong after a content failure — the fix copy for those says "write a
+    fresh script", and on a failed episode with no video there was no button that did."""
     from workers.reconcile import reconcile_task_outcome
 
     task = db.get(Task, task_id)
@@ -3085,6 +3107,8 @@ def retry_task(task_id: int, user: CurrentUser, db: DbDep, return_to: str = Form
     task.error_message = None
     task.retry_count += 1
     task.progress_pct = 0
+    if fresh == "1":
+        video_worker.drop_script_checkpoint(task)
     task.status = TaskStatus.PENDING_QUEUE
     db.commit()
     task.rq_job_id = video_worker.enqueue_task(task)   # kind-aware: compilations re-concat

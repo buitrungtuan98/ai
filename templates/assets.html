@@ -42,7 +42,9 @@
 {% endif %}
 
 {% if pool_total %}
-{{ ui.filter_bar('/assets', chips, current=status, q=q, placeholder='🔎 Search assets…', hidden=scope_hidden) }}
+{# Search only (R32): a second chip row restated the stage tabs above under other names —
+   "Ready" was Scheduled, and "Published (0)" counted surviving files under "Published (23)". #}
+{{ ui.filter_bar('/assets', [], current=status, q=q, placeholder='🔎 Search review…', hidden=scope_hidden) }}
 <p class="hint" style="margin:-8px 0 16px">Keyboard: <b>J</b>/<b>K</b> move · <b>A</b> approve · <b>R</b> reject.</p>
 {% if items %}
 <div class="grid cols-3">

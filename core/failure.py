@@ -36,7 +36,8 @@ PATTERNS: tuple[tuple[tuple[str, ...], str, str, str, str, bool], ...] = (
     (("rejected in review",),
      "Rejected in review",
      "A reviewer (you or the auto-reviewer) rejected this render; the reason is recorded below and "
-     "already steers the next script. Use Discard & re-render on the episode page for a fresh take.",
+     "already steers the next script. Use “Retry with a fresh script” on the episode page for "
+     "a fresh take.",
      "", "", False),
     # Pre-render quality gate (ADR-079). NOT transient: the autopilot's retry regenerates against
     # the same recent episodes with the same avoid-notes, so it would spend AI calls to fail the
@@ -174,7 +175,7 @@ PATTERNS: tuple[tuple[tuple[str, ...], str, str, str, str, bool], ...] = (
      "The voice service returned no audio for a line",
      "Usually a passing hiccup on Microsoft's side — Retry it. If it repeats, a narration line is "
      "one the voice cannot say (the error quotes it — e.g. written wholly in another script): open "
-     "the episode and use Discard & re-render, which writes a fresh script.", "", "", True),
+     "the episode and use “Retry with a fresh script”.", "", "", True),
     # "rate limit"/"exceeded" moved here from the quota class (R22): per-minute throttles and
     # requests' "Max retries exceeded with url" recover in minutes, not at the Pacific reset.
     (("timed out", "timeout", "connection", "network", "temporarily unavailable", "rate limit",
@@ -186,9 +187,9 @@ PATTERNS: tuple[tuple[tuple[str, ...], str, str, str, str, bool], ...] = (
     (("safety", "blocked", "policy", "profanity", "gemini blocked", "prompt_feedback",
       "recitation", "no candidates"),
      "The safety filter blocked the content",
-     "The generated script tripped the brand-safety filter. Open the episode and use Discard & "
-     "re-render — it writes a fresh script, where a plain Retry reuses the blocked one. If it "
-     "keeps happening, soften the campaign's topic or persona.", "", "", False),
+     "The generated script tripped the brand-safety filter. Open the episode and use “Retry "
+     "with a fresh script” — a plain Retry reuses the blocked one. If it keeps happening, soften "
+     "the campaign's topic or persona.", "", "", False),
 )
 
 

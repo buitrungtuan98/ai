@@ -111,6 +111,7 @@ def episode_timeline(db, task, campaign, buffer=None) -> list[Milestone]:
     tz = _tz(campaign)
     status = task.status.value if hasattr(task.status, "value") else task.status
     completed = status == TaskStatus.COMPLETED.value
+    stopped = status in (TaskStatus.FAILED.value, TaskStatus.CANCELLED.value)
     finished = task.finished_at
 
     published_at = task.published_at or (buffer.consumed_at if buffer is not None else None)
@@ -120,7 +121,9 @@ def episode_timeline(db, task, campaign, buffer=None) -> list[Milestone]:
     # that has not published. Once it has, that value IS the publish time and must not be reported
     # twice under two different labels.
     rendered_at = task.rendered_at
-    if rendered_at is None and finished is not None and not completed:
+    # A failed/cancelled task's `finished_at` is when it STOPPED (R32) — reading it as a render
+    # finish showed a failed episode as "master finished encoding" at the moment it failed.
+    if rendered_at is None and finished is not None and not completed and not stopped:
         rendered_at = finished
     reviewed_at = task.reviewed_at
     if reviewed_at is None and buffer is not None and buffer.status != BufferStatus.awaiting_review:
@@ -147,7 +150,12 @@ def episode_timeline(db, task, campaign, buffer=None) -> list[Milestone]:
         out.append(Milestone("published", STAGE_LABELS["published"], published_at,
                              _local(published_at, tz), note="live on the platform"))
         return out
-    due, note = _scheduled_for(db, task, campaign, buffer)
+    if stopped and buffer is None:
+        # Nothing to publish (R32): projecting the next slot "if it renders in time" over a failed
+        # episode promised a post that cannot happen without a retry.
+        due, note = None, "after a successful retry"
+    else:
+        due, note = _scheduled_for(db, task, campaign, buffer)
     out.append(Milestone("scheduled", STAGE_LABELS["scheduled"], due, _local(due, tz),
                          estimated=True, note=note))
     out.append(Milestone("published", STAGE_LABELS["published"], None, None, estimated=True))
