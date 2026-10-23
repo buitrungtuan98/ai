@@ -11,6 +11,8 @@ before captions so text/branding is never mirrored, and is NOT tuned for detecti
 from __future__ import annotations
 
 import logging
+import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from math import ceil
 
@@ -271,6 +273,53 @@ def retag_clips_bt709(clip_paths: list[str]) -> list[str]:
     return out
 
 
+
+# "[graph 0 input from stream 2:0 @ 0x…] Invalid color space" names the input ffmpeg refused (R36).
+_BAD_INPUT_RE = re.compile(r"input from stream (\d+):\d+[^\]]*\]\s*invalid colou?r space")
+
+
+def _is_colour_space_error(exc: Exception) -> bool:
+    return "invalid color space" in str(exc).lower()
+
+
+def bad_colour_input(message: str) -> int | None:
+    """Index of the ffmpeg input an "Invalid color space" error names, or None."""
+    m = _BAD_INPUT_RE.search(message.lower())
+    return int(m.group(1)) if m else None
+
+
+def render_scene_resilient(render: Callable[[list[str]], None], clip_paths: list[str]) -> None:
+    """Run `render(clips)` and recover from a stock clip ffmpeg refuses for its colour space.
+
+    First retry (R31): every clip retagged to bt709 by stream copy. If ffmpeg still names a bad
+    input (R36: a codec with no retag filter, or a clip broken in a way retagging can't fix), that
+    clip is swapped for its nearest usable sibling in the same scene, so the shot count and cut
+    rhythm stay the same. Bounded: each clip can be ruled out once; when none is left, the error
+    is raised as before. Clip inputs come first in `build_scene_args`, so input N is clips[N]."""
+    try:
+        render(clip_paths)
+        return
+    except FFmpegError as exc:
+        if not _is_colour_space_error(exc):
+            raise
+    logger.warning("A clip has an invalid colour space — retagging the scene's clips to bt709")
+    clips = retag_clips_bt709(clip_paths)
+    bad: set[str] = set()
+    while True:
+        try:
+            render(clips)
+            return
+        except FFmpegError as exc:
+            idx = bad_colour_input(str(exc)) if _is_colour_space_error(exc) else None
+            if idx is None or idx >= len(clips):
+                raise
+            bad.add(clips[idx])
+            usable = [i for i, c in enumerate(clips) if c not in bad]
+            if not usable:
+                raise
+            logger.warning("Clip input %d still has an invalid colour space — using a sibling", idx)
+            clips = [c if c not in bad else clips[min(usable, key=lambda j: abs(j - i))]
+                     for i, c in enumerate(clips)]
 def build_scene_args(
     clip_paths: list[str],
     audio_path: str,
@@ -847,17 +896,11 @@ def produce(
             def _progress(p: float, s: int = si) -> None:
                 report("scenes", 30 + (s + p / 100) / n_scenes * 70)
 
-            try:
-                run_ffmpeg(_scene_args(clip_paths), total_duration=d_i, on_progress=_progress)
-            except FFmpegError as exc:
-                if "invalid color space" not in str(exc).lower():
-                    raise
-                # One stock clip with reserved colour tags (R31): retag every clip of this scene
-                # to bt709 by stream copy and draw the scene once more.
-                logger.warning("Scene %d: a clip has an invalid colour space — retagging to bt709",
-                               si)
-                run_ffmpeg(_scene_args(retag_clips_bt709(clip_paths)), total_duration=d_i,
-                           on_progress=_progress)
+            # A stock clip with odd colour tags is retagged, then swapped out (R31/R36).
+            render_scene_resilient(
+                lambda clips: run_ffmpeg(_scene_args(clips), total_duration=d_i,
+                                         on_progress=_progress),
+                clip_paths)
             scene_files.append(scene_out)
             report("scenes", 30 + (si + 1) / n_scenes * 70)
 
