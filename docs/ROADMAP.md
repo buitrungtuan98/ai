@@ -2112,6 +2112,25 @@ The operator chose two simplifications from the R32 audit — ADR-098.
 - Verified: 812 tests pass, ruff clean, docs guard green; wizard driven end to end in Chromium
   (created a campaign); re-crawl of 118 page visits (desktop + phone): 0 errors.
 
+## R34 — disk retention: published videos were not the only thing on disk `DONE`
+
+The operator saw disk use climb every day although "every video is removed after publish".
+Published uploads ARE deleted from the buffer — but four other stores grew without a limit (ADR-099):
+
+- **Compilation library** (ADR-082): the newest 24 masters per campaign are kept for best-of
+  compilations — and were never freed, not when the campaign completed, not when it was deleted.
+  With auto-create starting new campaigns, that is up to ~1.2 GB per campaign, forever.
+- **Deleted campaigns:** deleting a campaign removed its rows, never its `buffer/` and `library/`
+  folders.
+- **Music cache:** one MP3 per background track ever used, never pruned.
+- **Docker images:** each deploy pulls a new sha tag; the old image keeps its tag, so `prune -f`
+  (dangling only) never freed it — about one image per deploy.
+- Also: R30's hold kept a paused campaign's videos indefinitely; now at most 14 days.
+- Fix: `prune_media` every scheduler tick (deleted campaigns' folders; a completed campaign's
+  library 14 days after its newest master; music unused 30 days — a cache hit refreshes the
+  age); deploy prunes unused images older than 3 days; RUNBOOK lists every store and its limit.
+- Verified: 814 tests pass (2 new), ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

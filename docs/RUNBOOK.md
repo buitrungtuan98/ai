@@ -280,7 +280,17 @@ follow each platform's synthetic/altered-content disclosure rules (YouTube requi
 realistic synthetic content).
 
 ## Disk pressure (200 GB SSD)
-- Check: `df -h /data` and `du -sh /data/media/*`.
+- Check: `df -h /data`, `du -sh /data/media/*` and `docker system df` (images live outside /data).
+- What is kept on purpose, and for how long (R34, ADR-099):
+  - `library/<campaign>` — the newest 24 published masters per campaign, for best-of
+    compilations. Freed 14 days after the campaign completes, or as soon as it is deleted.
+  - `buffer/<campaign>` — rendered videos waiting for review or a slot. A paused campaign holds
+    its videos for at most 14 days. A deleted campaign's folder is freed on the next tick.
+  - `music_cache` — background tracks; any track unused for 30 days is deleted.
+  - Docker images — `deploy.sh` removes unused images older than 3 days (each deploy used to
+    leave the previous image behind).
+- Force the retention sweep now:
+  `docker compose exec worker python -c "from database.db_session import SessionLocal; from workers.scheduler import prune_media; print(prune_media(SessionLocal()))"`.
 - The worker removes each job workspace on completion/error; `sweep_orphans` clears anything > 60 min.
   To force it: `docker compose exec worker python -c "from core.cleanup import sweep_orphans; sweep_orphans()"`.
 - If `no space left on device`: delete stale media under `/data/media` first (deletes still succeed

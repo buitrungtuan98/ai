@@ -273,3 +273,73 @@ def test_resume_reads_the_real_cause_and_respects_max_active(session, user, chan
     busy.status = CampaignStatus.completed
     session.commit()
     assert scheduler.autopilot_resume_channel(session, channel) == 1      # the reject didn't block it
+
+
+# ── R34: disk retention ──────────────────────────────────────────────────────
+def test_prune_media_frees_dead_libraries_orphan_buffers_and_stale_music(session, user, channel,
+                                                                         tmp_path, monkeypatch):
+    import os
+    import time
+
+    from core.config import settings
+    from database.types import CampaignStatus
+    from workers import scheduler
+
+    monkeypatch.setattr(settings, "MEDIA_ROOT", str(tmp_path))
+    live = _campaign(session, user, channel, CampaignStatus.active)
+    done_old = _campaign(session, user, channel, CampaignStatus.completed, topic="Old")
+    done_new = _campaign(session, user, channel, CampaignStatus.completed, topic="New")
+    old = time.time() - 30 * 86400
+
+    def lib(cid, aged=False):
+        d = tmp_path / "library" / str(cid)
+        d.mkdir(parents=True)
+        f = d / "ep_1.mp4"
+        f.write_bytes(b"v")
+        if aged:
+            os.utime(f, (old, old))
+        return d
+
+    keep_live, keep_new = lib(live.id, aged=True), lib(done_new.id)
+    gone_done, gone_deleted = lib(done_old.id, aged=True), lib(9999)
+    orphan_buf = tmp_path / "buffer" / "9999"
+    orphan_buf.mkdir(parents=True)
+    live_buf = tmp_path / "buffer" / str(live.id)
+    live_buf.mkdir(parents=True)
+    music = tmp_path / "music_cache"
+    music.mkdir()
+    (music / "fresh.mp3").write_bytes(b"m")
+    stale = music / "stale.mp3"
+    stale.write_bytes(b"m")
+    os.utime(stale, (old, old))
+
+    out = scheduler.prune_media(session)
+    assert out == {"library": 2, "buffer": 1, "music": 1}
+    assert keep_live.exists() and keep_new.exists() and live_buf.exists()
+    assert not gone_done.exists() and not gone_deleted.exists() and not orphan_buf.exists()
+    assert (music / "fresh.mp3").exists() and not stale.exists()
+
+
+def test_a_paused_campaign_holds_its_videos_for_two_weeks_not_forever(session, user, channel,
+                                                                      tmp_path, monkeypatch):
+    from database.models import BufferPoolItem
+    from database.types import BufferStatus, CampaignStatus
+    from workers import scheduler, task_queue
+
+    monkeypatch.setattr(task_queue, "queued_publish_buffer_ids", lambda: set())
+    camp = _campaign(session, user, channel, CampaignStatus.failed)
+    f = tmp_path / "v.mp4"
+    f.write_bytes(b"v")
+    t0 = datetime.utcnow()
+    item = BufferPoolItem(campaign_id=camp.id, channel_id=channel.id, episode_number=1,
+                          video_path=str(f), status=BufferStatus.ready, metadata_json={},
+                          ready_at=t0 - timedelta(days=1))
+    session.add(item)
+    session.commit()
+    scheduler.expire_stale_buffers(session, now=t0)                          # hold starts
+    scheduler.expire_stale_buffers(session, now=t0 + timedelta(days=10))     # still held
+    session.refresh(item)
+    assert item.status == BufferStatus.ready
+    scheduler.expire_stale_buffers(session, now=t0 + timedelta(days=15))     # hold is over
+    session.refresh(item)
+    assert item.status == BufferStatus.expired and not f.exists()

@@ -2692,3 +2692,23 @@ overlapping filters, failures and approvals in different places, and a 779-line 
 **Rejected:** a separate wizard endpoint/form (two definitions of a campaign to keep in sync);
 deleting rarely used fields (every field is honoured by the pipeline — they are folded, not cut).
 
+### ADR-099 — Every store on disk has a retention limit
+
+**Context.** Disk use rose daily. Buffer files are deleted at publish, but ADR-082 moves each
+published master into a per-campaign library (24 newest) for best-of compilations, and nothing ever
+freed a library — not at completion, not at deletion. Deleting a campaign also orphaned its buffer
+folder. The music cache kept every track forever, and deploys left every previous app image behind
+because `docker image prune -f` only removes untagged images while each deploy pulls a new tag.
+ADR-096's hold added one more unbounded case: a paused campaign that is never restarted.
+
+**Decision.** One rule — nothing on disk is kept without a limit — applied per store:
+library: freed when the campaign is deleted, or 14 days after its newest master once completed
+(compilations are only proposed for running campaigns); buffer folders of deleted campaigns: freed
+on the next tick; music cache: tracks unused for 30 days (a hit refreshes the age); paused-campaign
+hold: 14 days; app images: unused ones older than 3 days at each deploy (GHCR keeps every version
+for rollback). `prune_media` runs in the existing disk-hygiene step of the scheduler tick.
+
+**Rejected:** a size quota with LRU eviction across stores — more code than per-store age rules,
+and it would let one store starve another; deleting the library at publish (it is the raw material
+of the compilation feature, ADR-082).
+

@@ -175,8 +175,16 @@ def expire_stale_buffers(db, *, max_age_hours: int | None = None, now: datetime 
             if "held_since" not in md:
                 item.metadata_json = {**md, "held_since": now.isoformat()}
                 held_changed = True
-            continue
-        if "held_since" in md:   # released — bank how long it was held, then age normally
+                continue
+            # Held, but not forever (R34): a campaign nobody restarts for HOLD_MAX_DAYS would keep
+            # its videos on disk for good. Past that, it ages normally — the marker stays, so the
+            # hold is not re-armed, and the held time is not credited.
+            if now - datetime.fromisoformat(md["held_since"]) < timedelta(days=HOLD_MAX_DAYS):
+                continue
+            hold_over = True
+        else:
+            hold_over = False
+        if "held_since" in md and not hold_over:   # released — bank the held time, age normally
             since = datetime.fromisoformat(md.pop("held_since"))
             md["held_hours"] = round(float(md.get("held_hours") or 0)
                                      + max(0.0, (now - since).total_seconds() / 3600), 2)
@@ -315,6 +323,67 @@ def finish_stranded_campaign(db, campaign) -> bool:
     logger.warning("Campaign %s completed stranded at %s/%s", campaign.id,
                    campaign.current_episode, total)
     return True
+
+
+# Disk retention (R34). Published videos were "removed after publish" in the operator's mind, but
+# three stores kept growing: the per-campaign compilation library (24 masters, never freed), the
+# files of deleted campaigns, and the music cache (one MP3 per track ever used).
+LIBRARY_KEEP_AFTER_DONE_DAYS = 14   # a finished campaign's library: a best-of window, then freed
+MUSIC_CACHE_MAX_AGE_DAYS = 30       # unused that long → re-downloaded on demand if ever picked again
+HOLD_MAX_DAYS = 14                  # a breaker-stopped campaign holds its finished videos this long
+
+
+def _newest_mtime(path: str) -> float:
+    try:
+        return max((e.stat().st_mtime for e in os.scandir(path)), default=os.path.getmtime(path))
+    except OSError:
+        return 0.0
+
+
+def prune_media(db, now: datetime | None = None) -> dict:
+    """Free what no feature will read again (R34). Returns counts per store.
+
+    * library/<campaign>: gone when the campaign is deleted, or finished and its newest master is
+      older than LIBRARY_KEEP_AFTER_DONE_DAYS (best-of compilations are only proposed for running
+      campaigns, so a finished campaign's library is dead weight);
+    * buffer/<campaign>: gone when the campaign is deleted (deleting a campaign removed its rows,
+      never its files);
+    * music_cache: tracks unused for MUSIC_CACHE_MAX_AGE_DAYS (a cache hit refreshes the age)."""
+    now = now or datetime.utcnow()
+    out = {"library": 0, "buffer": 0, "music": 0}
+    campaigns = {c.id: c for c in db.scalars(select(Campaign)).all()}
+    root = settings.MEDIA_ROOT
+
+    def subdirs(name: str):
+        d = os.path.join(root, name)
+        try:
+            return [e for e in os.scandir(d) if e.is_dir() and e.name.isdigit()]
+        except OSError:
+            return []
+
+    lib_cutoff = (now - timedelta(days=LIBRARY_KEEP_AFTER_DONE_DAYS)).timestamp()
+    for e in subdirs("library"):
+        c = campaigns.get(int(e.name))
+        done = c is not None and c.status == CampaignStatus.completed \
+            and _newest_mtime(e.path) < lib_cutoff
+        if c is None or done:
+            shutil.rmtree(e.path, ignore_errors=True)
+            out["library"] += 1
+    for e in subdirs("buffer"):
+        if int(e.name) not in campaigns:
+            shutil.rmtree(e.path, ignore_errors=True)
+            out["buffer"] += 1
+    music_cutoff = (now - timedelta(days=MUSIC_CACHE_MAX_AGE_DAYS)).timestamp()
+    try:
+        for e in os.scandir(os.path.join(root, "music_cache")):
+            if e.is_file() and e.stat().st_mtime < music_cutoff:
+                os.remove(e.path)
+                out["music"] += 1
+    except OSError:
+        pass
+    if any(out.values()):
+        logger.info("Disk retention freed %s", out)
+    return out
 
 
 def disk_usage_pct(path: str) -> float:
@@ -1997,6 +2066,7 @@ def periodic_tick(db=None, now: datetime | None = None) -> dict:
             logger.warning("Disk pressure high on %s — sweeping aggressively", settings.MEDIA_ROOT)
             summary["swept"] += sweep_orphans(max_age_minutes=5, skip=active)
         summary["expired"] = expire_stale_buffers(db)
+        summary["pruned"] = prune_media(db)
 
         campaigns = db.scalars(select(Campaign).where(Campaign.status == CampaignStatus.active)).all()
         summary["stalled_channels"] = 0

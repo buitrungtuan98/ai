@@ -48,7 +48,10 @@ if [[ "$status" != "healthy" ]]; then
 fi
 
 echo "[deploy] Pruning dangling images to reclaim disk…"
-docker image prune -f >/dev/null || true
+# Every deploy pulls a NEW tag (the git sha), so the previous app image is not "dangling" and
+# a plain `prune -f` never freed it — each deploy left about one image behind (R34). Remove unused
+# images older than 3 days: recent ones stay for a fast local rollback, GHCR keeps them all.
+docker image prune -af --filter "until=72h" >/dev/null || true
 
 docker compose ps
 echo "[deploy] Done."

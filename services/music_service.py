@@ -74,6 +74,8 @@ def pick_music(mood: str, api_key: str, cache_dir: str) -> tuple[str, dict] | No
                     for chunk in dl.iter_content(chunk_size=1 << 16):
                         f.write(chunk)
             os.replace(tmp, path)
+        else:
+            os.utime(path)   # a reused track stays "recent" for the cache sweep (R34)
         credit = {
             "source": "freesound",
             "id": track["id"],
