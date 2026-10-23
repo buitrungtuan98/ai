@@ -140,6 +140,47 @@
     setThemeLabels();
   }
 
+  // ── Retry from a grouped failure row (dashboard triage + Review queue, R33) ──
+  // Moved here from index.html so both pages share one handler.
+  // Inline retry from the triage inbox (reuses the task retry endpoint).
+  document.querySelectorAll(".retry-form").forEach(function (f) {
+    f.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var btn = f.querySelector("button"), ids = f.dataset.task.split(",");
+      window.ui.busyButton(btn, "↻ Retrying…", function () {
+        // A grouped row retries every episode in it (R32); one reply is enough to report.
+        return Promise.all(ids.map(function (id) {
+          return fetch("/api/tasks/" + id + "/retry", { method: "POST" })
+            .then(function (r) { if (!r.ok) throw new Error(); return r.json(); });
+        }))
+          .then(function (all) {
+            var d = all[0];
+            if (all.length > 1) d = { mode: "group", n: all.length };
+            // Say what the server actually did (R22): "Retry queued." over a publish told the
+            // operator a render was re-queued while an upload was already on its way.
+            if (d.mode === "review") {
+              window.ui.toast("The video is already rendered — it's waiting for your review.", "success");
+              if (d.href) { window.location.href = d.href; return; }
+            } else if (d.mode === "publish") {
+              window.ui.toast("Upload retry queued — the rendered video publishes to the channel (no re-render).", "success");
+            } else if (d.mode === "group") {
+              window.ui.toast(d.n + " episodes queued again.", "success");
+            } else if (d.mode === "published") {
+              window.ui.toast("Already published — status corrected, nothing re-posted.", "success");
+            } else {
+              window.ui.toast("Re-render queued.", "success");
+            }
+            var li = f.closest("li"); if (li) li.remove();
+            if (!document.querySelectorAll("#triage-list li").length) {
+              var tc = document.getElementById("triage-card"), ac = document.getElementById("allclear-card");
+              if (tc) tc.hidden = true; if (ac) ac.hidden = false;
+            }
+          })
+          .catch(function () { window.ui.toast("Couldn't retry — open the episode for details.", "danger"); });
+      });
+    });
+  });
+
   // ── Live summary: cross-page attention badge + dashboard auto-refresh ──────
   var pollFails = 0, wasDown = false;
   function setBadge(key, n) {
@@ -200,6 +241,8 @@
     var c = d.counts || {};
     setBadge("failed", c.failed || 0);
     setBadge("awaiting_review", c.awaiting_review || 0);
+    // The Review section is one queue (R33): approvals AND failures both wait on the operator.
+    setBadge("review_queue", (c.awaiting_review || 0) + (c.failed || 0));
     setBadge("autopilot_proposed", d.autopilot_proposed || 0);
     // ONE attention number, computed server-side, rendered by every badge that answers "what needs
     // me" — hamburger, Dashboard rail item, bell and the triage card (ADR-064).

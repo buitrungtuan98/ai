@@ -210,10 +210,19 @@
       {% elif failed or cancelled %}
       {# CANCELLED is retryable by design (ADR-064) — every other surface says "Use Retry", so the
          one page that can carry the button must actually render it (R22). #}
-      <form method="post" action="/api/tasks/{{ task.id }}/retry" class="mt">
-        <input type="hidden" name="return_to" value="/episodes/{{ task.id }}">
-        <button class="btn sm" type="submit">↻ Retry</button>
-      </form>
+      <div class="mt" style="display:flex;gap:var(--sp-2);flex-wrap:wrap">
+        <form method="post" action="/api/tasks/{{ task.id }}/retry">
+          <input type="hidden" name="return_to" value="/episodes/{{ task.id }}">
+          <button class="btn sm" type="submit" title="Render again from the same script">↻ Retry</button>
+        </form>
+        {# A content failure needs NEW content (R32): the fix copy says "fresh script", so the
+           button that does it lives right here, not on a review card this episode never had. #}
+        <form method="post" action="/api/tasks/{{ task.id }}/retry">
+          <input type="hidden" name="return_to" value="/episodes/{{ task.id }}">
+          <input type="hidden" name="fresh" value="1">
+          <button class="btn ghost sm" type="submit" title="Throw away this episode's script and write a new one">✎ Retry with a fresh script</button>
+        </form>
+      </div>
       {% endif %}
     </div>
   </div>

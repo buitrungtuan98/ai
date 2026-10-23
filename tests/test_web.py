@@ -424,12 +424,14 @@ def test_episode_surface_unified_no_lateral_loop(client):
 
     # The three lens pages all render the ONE shared stage-tab bar (not a switcher + a duplicate
     # chip bar) — one coherent surface, one control.
-    for path in ("/episodes", "/assets", "/tasks"):
+    for path in ("/episodes", "/tasks"):   # Review (/assets) is its own section since R33
         page = client.get(path).text
         assert 'aria-label="Episode stages"' in page, f"{path} missing the shared stage-tab bar"
         assert page.count('aria-label="Episode stages"') == 1, f"{path} has a duplicate tab bar"
     # The episode detail no longer links sideways to the render log / review list (the old loop).
     detail = client.get(f"/episodes/{tid}").text
+    # The page body only — the primary menu links Review (/assets) on every page (R33).
+    detail = detail.split('id="main"', 1)[1].split("</main>", 1)[0]
     assert 'href="/tasks"' not in detail and 'href="/assets"' not in detail
     # Legacy duplicate campaign URLs are permanent (301) redirects to the canonical hub.
     assert client.get(f"/campaigns/{cam.id}/performance", follow_redirects=False).status_code == 301

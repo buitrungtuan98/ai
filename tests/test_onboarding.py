@@ -392,7 +392,7 @@ def test_the_confirm_button_is_labelled_with_the_action(client, session, user, c
     session.add(item)
     session.commit()
 
-    body = client.get("/assets").text
+    body = client.get("/assets?status=ready").text   # the default view is the review queue (R32)
     form = body.split(f'action="/assets/{item.id}/publish-now"', 1)[1].split(">", 1)[0]
     assert 'data-confirm-verb="Publish now"' in form
     # And it names the episode: a grid of cards makes "this episode" ambiguous.

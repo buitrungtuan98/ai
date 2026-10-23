@@ -184,9 +184,16 @@ def factory_settings(channel) -> dict:
     return out
 
 
-# Parent ranking for auto-create: the formula worth carrying forward. A laggard is never a parent —
-# cloning a failing angle into a fresh campaign is how a factory scales its own mistakes.
-_PARENT_RANK = {"winner": 0, "healthy": 1, "too_early": 2, "unmeasured": 3}
+# Parent ranking for auto-create: the formula worth carrying forward. A laggard ranks LAST and is
+# only a last resort — a channel whose one campaign was stopped would otherwise never get another
+# (R29) — and the caller then demands a fresh AI-designed angle: a plain clone of a failing angle
+# is how a factory scales its own mistakes.
+_PARENT_RANK = {"winner": 0, "healthy": 1, "too_early": 2, "unmeasured": 3, "underperforming": 4}
+
+
+def is_proven_parent(classification: dict) -> bool:
+    """May this campaign's formula be carried forward as-is (vs. only under a fresh angle)?"""
+    return classification.get("label") != "underperforming"
 
 
 def pick_refill_parent(campaigns, classes: dict[int, dict]):

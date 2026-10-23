@@ -9,8 +9,9 @@
 {%- endif %}
 {% endblock %}
 {% block content %}
-{% call ui.page_head('Review', 'Pre-rendered episodes waiting for approval — watch each one before it publishes.') %}{% endcall %}
-{{ ui.stage_tabs(stage_counts, 'review', scope_channel.id if scope_channel else None) }}
+{% call ui.page_head('Review', 'Everything waiting on you: episodes that failed, and finished videos to approve before they publish.') %}{% endcall %}
+{# No Episode stage tabs here (R33): Review is its own section, and those tabs jumped into
+   Campaigns › Episodes — a lateral loop out of the queue. #}
 
 {% if flash == 'scheduled' %}
 {% call ui.banner('success') %}✓ <b>Approved{% if flash_reason %} — publishes {{ flash_reason }}{% endif %}.</b>
@@ -41,8 +42,21 @@
 {{ ui.scope_note('Review queue for channel', scope_channel.channel_name, '/assets') }}
 {% endif %}
 
+{% if failed_groups %}
+{# The Review section is ONE queue (R33): what failed needs you as much as what waits for approval. #}
+<div class="card triage" style="margin-bottom:var(--sp-5)">
+  <div class="card-head"><h3>Failed — needs a retry or a fix</h3>
+    <span class="pill failed">{{ failed_groups|map(attribute='tasks')|map('length')|sum }}</span></div>
+  <ul class="triage-list">
+    {% include "_failed_groups.html" %}
+  </ul>
+</div>
+{% endif %}
+
 {% if pool_total %}
-{{ ui.filter_bar('/assets', chips, current=status, q=q, placeholder='🔎 Search assets…', hidden=scope_hidden) }}
+{# Search only (R32): a second chip row restated the stage tabs above under other names —
+   "Ready" was Scheduled, and "Published (0)" counted surviving files under "Published (23)". #}
+{{ ui.filter_bar('/assets', [], current=status, q=q, placeholder='🔎 Search review…', hidden=scope_hidden) }}
 <p class="hint" style="margin:-8px 0 16px">Keyboard: <b>J</b>/<b>K</b> move · <b>A</b> approve · <b>R</b> reject.</p>
 {% if items %}
 <div class="grid cols-3">
@@ -151,10 +165,15 @@
 </div>
 {{ ui.pager('/assets', page, pages, hidden=scope_hidden, status=status, q=q) }}
 {% else %}
-<div class="empty" style="padding:var(--sp-8)">No items match this filter. <a href="/assets?{{ query_string(**scope_hidden) }}">Show all →</a></div>
+{% if status == 'awaiting_review' and not q %}
+{# Not "Show all" (R33): the page's default IS the review queue, so that link led back here. #}
+<div class="empty" style="padding:var(--sp-8)">✓ No videos waiting for approval right now. <a href="/episodes{{ '?channel=' ~ scope_hidden.channel if scope_hidden.get('channel') else '' }}">See all episodes →</a></div>
+{% else %}
+<div class="empty" style="padding:var(--sp-8)">No items match this filter. <a href="/assets?{{ query_string(**scope_hidden) }}">Back to the review queue →</a></div>
+{% endif %}
 {% endif %}
 {% else %}
-{% call ui.empty('▦', 'Buffer pool is empty', 'Active campaigns pre-render episodes here; review-mode campaigns park each video here for your approval before it publishes.', '/campaigns', 'View campaigns') %}{% endcall %}
+{% if not failed_groups %}{% call ui.empty('✓', 'Nothing is waiting on you', 'Failed episodes and finished videos that need your approval show up here.', '/episodes', 'See all episodes') %}{% endcall %}{% endif %}
 {% endif %}
 {% endblock %}
 {% block scripts %}

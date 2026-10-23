@@ -2609,3 +2609,106 @@ and an episode about Orwell scored 10/10 from the vision judge yet "FAILED Auto-
 **Rejected:** skipping the deterministic black check when the vision judge scores high — the free
 check exists precisely for the frames the judge's few samples miss.
 
+### ADR-096 — Stopping a campaign finishes it; a flop is a parent only under a fresh angle
+
+**Context.** The operator asked whether full-auto, after stopping a weak campaign, creates a new
+one. Reading the path end to end, it never would: `wind_down` sets `total_episodes` to the
+published count, but a campaign became `completed` only inside `advance_campaign` — on a publish —
+and a stopped campaign publishes nothing more. `finish_stranded_campaign` skips anything already at
+N/N. So the campaign stayed `active` forever, auto-create (ADR-094) counted it as running, and the
+channel went quiet. Separately, ADR-094 never let a laggard be auto-create's parent, so a channel
+whose only campaign flopped had nothing to build from.
+
+**Decision.**
+1. An applied `wind_down` completes the campaign at once. "Complete + activate the user's next
+   pending campaign" existed twice already; it is now `video_worker.complete_campaign`, used by
+   all three finishing paths (DRY). Rendered extras past the cut age out through the normal sweep.
+2. A laggard ranks last as a parent and is used only as a last resort, and then only with a fresh
+   AI design (`_design_successor`) passed through to `_create_successor`. If the design is
+   unavailable (no key, budget reserve), auto-create waits for a later pass. A plain clone of a
+   failing angle is never created.
+
+**Trade-off.** Completing on wind-down makes the stop slightly less reversible than "extend
+re-opens it": a completed campaign gets no further extend proposals. ▶ Start still re-opens it by
+hand, and the honest state ("completed", not "active at N/N") is what every surface needed.
+
+**Addendum (same round).** The replacement takes the fresh design's planned length — a wound-down
+parent's `total_episodes` records where it stopped, not a plan. And Auto-QC's "unavailable" reason
+stops collapsing every unclassified error into "the vision API could not be reached": a refused
+key, a timeout and a rejected request are named, anything else carries a scrubbed error tail
+(URLs, `key=` and API-key-shaped strings removed), and a call refused with the audio track
+attached is retried once on frames alone — a verdict from frames beats no verdict.
+
+**Revision after an independent review (same round).** Decision 1 is revised: a wind-down does NOT
+complete the campaign at once — that deleted its already-rendered extras ("nothing is deleted").
+Instead `finish_stranded_campaign` closes an active campaign at N/N once no ready/awaiting item or
+in-flight render remains; an extra that publishes completes it through `advance_campaign` as
+before. Also from that review: the breaker hold stops the expiry clock (`held_since` → `held_hours`)
+rather than merely skipping, a `failed` campaign occupies an auto-create slot, auto-resume respects
+`max_active` and reads the newest breaker-counted failure, any wound-down parent requires a fresh
+design, and the vision QC leg is bounded (2 tries; no frames-only retry after a timeout; blocks
+raise instead of being repaired).
+
+### ADR-097 — Self-heal an unsayable line and a mistagged clip; name what failed
+
+**Context.** With ADR-095's split fix deployed, renders still failed with edge-tts
+`NoAudioReceived` — so the refused line had words, just none the voice could say alone (a sentence
+wholly in another script). A second render failed in ffmpeg 7.1 with "Invalid color space" at the
+filter-graph input for one stock clip. Both killed a whole episode over one line or one clip, and
+the TTS error did not even say which line.
+
+**Decision.**
+1. A sentence that gets no audio is merged with its neighbour (the last one folds into the one
+   before) and synthesized again; each merge removes a sentence, so the loop ends. Only when the
+   whole narration is refused does it raise — `NoAudioError`, quoting the line, voice, rate and
+   pitch, still matched by `core.failure`'s NoAudioReceived class.
+2. A scene that fails with "Invalid color space" is retried once with its clips retagged to bt709
+   by stream copy (`h264_metadata` / `hevc_metadata`). The error is raised at the graph's input,
+   so no filter (`setparams`, `colorspace`) can reach it — only the bitstream can be fixed.
+
+**Rejected:** retagging every clip pre-emptively (a remux per clip on every render, for a rare
+fault); dropping the unsayable sentence (silent content loss); re-encoding the clip (the decode
+itself is what fails, and it costs minutes on this CPU-only box).
+
+### ADR-098 — Five sections, one review queue, and a wizard over the campaign form
+
+**Context.** The operator found the app hard to use: steps felt duplicated and looping. A crawl of
+every page (R32) found no crashes — the cost was structural: eight rail items plus a Calendar
+reachable from almost nowhere, a "Review" page that was also an Episodes view with two rows of
+overlapping filters, failures and approvals in different places, and a 779-line campaign form.
+
+**Decision.**
+1. **Sections, defined once.** `base.html` holds the section map: five rail/tab-bar entries, which
+   page `nav` belongs to which section, and each section's tabs. Tabs render on a section's list
+   pages only; detail pages (a campaign, an episode) keep their own tabs — two stacked tab rows were
+   part of the clutter.
+2. **Review = everything waiting on the operator.** Failed episodes (grouped by campaign and cause)
+   above the videos to approve, from the same `_failed_groups` the dashboard uses (DRY).
+3. **The wizard is a layer, not a second form.** Steps show and hide parts of the one form; every
+   field still submits, so the server contract and its validation are untouched, and "Customize
+   everything" is always one click away. Only a brand-new campaign gets it — an edit or a duplicate
+   already has its values.
+
+**Rejected:** a separate wizard endpoint/form (two definitions of a campaign to keep in sync);
+deleting rarely used fields (every field is honoured by the pipeline — they are folded, not cut).
+
+### ADR-099 — Every store on disk has a retention limit
+
+**Context.** Disk use rose daily. Buffer files are deleted at publish, but ADR-082 moves each
+published master into a per-campaign library (24 newest) for best-of compilations, and nothing ever
+freed a library — not at completion, not at deletion. Deleting a campaign also orphaned its buffer
+folder. The music cache kept every track forever, and deploys left every previous app image behind
+because `docker image prune -f` only removes untagged images while each deploy pulls a new tag.
+ADR-096's hold added one more unbounded case: a paused campaign that is never restarted.
+
+**Decision.** One rule — nothing on disk is kept without a limit — applied per store:
+library: freed when the campaign is deleted, or 14 days after its newest master once completed
+(compilations are only proposed for running campaigns); buffer folders of deleted campaigns: freed
+on the next tick; music cache: tracks unused for 30 days (a hit refreshes the age); paused-campaign
+hold: 14 days; app images: unused ones older than 3 days at each deploy (GHCR keeps every version
+for rollback). `prune_media` runs in the existing disk-hygiene step of the scheduler tick.
+
+**Rejected:** a size quota with LRU eviction across stores — more code than per-store age rules,
+and it would let one store starve another; deleting the library at publish (it is the raw material
+of the compilation feature, ADR-082).
+

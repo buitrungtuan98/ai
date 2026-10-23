@@ -1989,7 +1989,7 @@ waited on a human. Each is now a per-channel switch on the Channels page, Full a
 default — ADR-094 has the write-up.
 
 - **Auto-create** (`autopilot_refill_channel`): fewer than `min_active` campaigns running → start a
-  new one from the channel's best campaign (`pick_refill_parent` — never a laggard), through the
+  new one from the channel's best campaign (`pick_refill_parent` — a laggard only as a last resort, see R30), through the
   existing successor path: AI-designed angle, review-first. One per channel per 3 days, capped by
   `max_active`, skipped when a human's pending campaign is waiting. A channel's FIRST campaign is
   still the operator's: there is no proven formula to carry yet.
@@ -2013,6 +2013,123 @@ First renders after R27's deploy: the 403 was gone, but two new reports — ADR-
   so the episode parked for a human. Now `pix_th=0.03` (truly black); pure black is still caught.
 - `NoAudioReceived` gets its own non-transient failure class pointing at Discard & re-render.
 - Verified: 794 tests pass (3 new in `tests/test_r27_tts_refusal.py`), ruff clean, docs guard green.
+
+## R30 — a stopped campaign is finished, and auto-create replaces it `DONE`
+
+The operator asked: after full-auto stops a campaign, does it create a new one? It didn't — ADR-096.
+
+- **A wind-down never completed the campaign.** It sets `total_episodes` to the published count, but
+  completion only ever ran on a publish, and nothing publishes after a stop — so the campaign sat
+  `active` at N/N forever and auto-create counted it as running. An applied wind-down now completes
+  it through the new `video_worker.complete_campaign` (also used by `advance_campaign` and
+  `finish_stranded_campaign` — the third copy of "complete + activate the next pending" is gone).
+- **A channel whose only campaign flopped had no parent.** A laggard may now be auto-create's parent
+  as a last resort, but only under a fresh AI-designed angle; with no AI design it waits.
+- **A replacement inherited the flop's cut-down length.** With a fresh design, the new campaign
+  takes the design's `total_episodes`, not the stopped parent's (which is where it stopped).
+- **"Auto-QC could not run — the vision API could not be reached" hid the real cause.** Every error
+  that was not quota/404 read that one sentence — a test against Gemini with an invalid key showed
+  it too. `_unavailable_reason` now names a refused key, a timeout or a rejected request, and
+  otherwise appends a scrubbed error tail; a call that fails with the audio track attached is
+  retried frames-only (never for quota, rate limits or a refused key).
+- **Independent pre-merge review (all verified, all fixed):**
+  - *A paused campaign's videos still aged out* — the R27 hold only skipped them; the first sweep
+    after ▶ Start/resume (it runs before the publish loop) found them days old and deleted them.
+    The clock now stops: `held_since` while paused, banked into `held_hours` on release.
+  - *Auto-create replaced a breaker-stopped campaign* — a dead key spawned a fresh failing campaign
+    every 3 days, and auto-resume then pushed the channel past `max_active`. A `failed` campaign now
+    occupies its slot; resume respects `max_active`.
+  - *A flop-breaker stop could be cloned with a 1–3 episode total* — the flop breaker and the
+    council stop campaigns still labelled "healthy". Any parent with an applied wind-down is now
+    unproven (fresh AI design required, its planned length used).
+  - *Auto-resume read the wrong failure* — a later review reject blocked it, a worker-restart row
+    hid a dead key. It now reads the newest failure the breaker counted, like
+    `consecutive_failures`.
+  - *A wind-down deleted its rendered extras* — it now leaves them to publish (the one that does
+    completes the campaign normally); `finish_stranded_campaign` closes an N/N campaign once nothing
+    is left. Requalify skips non-active campaigns (their parks were re-judged for nobody).
+  - *QC worst case ~19 min inside the render lock* — vision uses 2 tries, the frames-only retry is
+    skipped after a timeout, and a blocked vision response raises `GeminiBlockedError` (shared
+    `_response_text`) instead of being "repaired" twice more.
+  - *`NoAudioReceived` non-transient* — with the split fix its remaining cause is a service hiccup:
+    retryable again, fresh-script escape named in the fix copy.
+- Verified: 801 tests pass, ruff clean, docs guard green.
+
+## R31 — an unsayable line and an oddly tagged clip no longer fail a render `DONE`
+
+Two production failures after R29 went live — ADR-097.
+
+- **`NoAudioReceived` with the split fix live.** The failing line had real words — but words the
+  voice cannot say on their own (a sentence wholly in another script, e.g. Jung's Greek
+  "ἐναντιοδρομία" for an English voice). `synthesize_paced` now merges such a sentence with its
+  neighbour, so the speakable words carry it; if even that is refused, `NoAudioError` quotes the
+  line, voice, rate and pitch (the bare edge-tts error named nothing).
+- **`FFmpegError … Invalid color space`.** ffmpeg 7 rejects a stock clip whose stream declares a
+  reserved colour space at the filter-graph input. On that error the scene is retried once with
+  every clip retagged to bt709 by stream copy (`retag_clips_bt709`) — no re-encode, no cost on the
+  normal path. Verified with ffprobe: `reserved` → `bt709`.
+- Verified: 806 tests pass (5 new in `tests/test_r27_tts_refusal.py`), ruff clean, docs guard green.
+
+## R32 — UI audit: dead ends, duplicates and a timeline that lied `DONE`
+
+The operator found the UI hard to use: "it duplicates steps, loops, and the FE has bugs". The real
+app was booted with seeded data in every state and crawled in headless Chromium on desktop and phone
+(62 pages): no server errors and no JavaScript errors, so the problems are in the flows:
+
+- **The loop:** content failures said "use Discard & re-render, which writes a fresh script", but a
+  failed episode with no video has no such button — only Retry, which rebuilds the SAME script and
+  fails the same way. New "Retry with a fresh script" (`retry?fresh=1` drops the checkpoint); the
+  fix copy now names it.
+- **Duplicates:** the dashboard listed one cause once per episode (three identical paragraphs, three
+  Retry buttons) — now one row per (campaign, cause) with "Retry all N". The Review page carried a
+  second chip row restating the stage tabs under other names ("Published (0)" under "Published
+  (23)") — removed; Review now opens on the review queue.
+- **A timeline that lied:** a failed episode showed its failure time as "render finished" and a
+  projected posting slot — now blank, "after a successful retry".
+- Inline favicon (every page logged a `/favicon.ico` 404).
+- Verified: 809 tests pass (3 new), ruff clean, docs guard green; re-crawled with no errors.
+
+## R33 — five sections, one review queue, a three-step campaign wizard `DONE`
+
+The operator chose two simplifications from the R32 audit — ADR-098.
+
+- **Five sections instead of eight menu items + a hidden Calendar:** Home · Review · Campaigns ·
+  Channels · Setup, identical on the desktop rail and the phone tab bar (no "More"). Sibling pages
+  are tabs at the top of each section's list pages: Campaigns/Episodes/Calendar,
+  Channels/Autopilot, Credentials/Settings/Operations. Badges: Review = failed + awaiting review,
+  Channels = autopilot proposals, Setup = worker down.
+- **Review is one queue:** failed episodes (grouped by campaign + cause, `_failed_groups`, shared
+  with the dashboard) sit above the videos to approve; the Episode stage tabs left the page (they
+  jumped into Campaigns — a lateral loop) and its empty state no longer links back to itself.
+- **New-campaign wizard:** 1) topic, channel, episodes, language, format → 2) AI designs it →
+  3) review & start. Same form and POST underneath; "Set it up myself" / "Customize everything"
+  reveal every field; editing and duplicating keep the full form.
+- Found while recording the demo, fixed: a failed episode re-queued by Retry still showed its old
+  stop time as "render finished" (the timeline now trusts `finished_at` as a render finish only in
+  review/scheduled/publishing); the 🏭 Factory box was an unstyled browser fieldset; its
+  Auto-create copy still said "never from a flopping campaign" (R30 changed that); the Home page
+  was still titled "Dashboard".
+- Verified: 812 tests pass, ruff clean, docs guard green; wizard driven end to end in Chromium
+  (created a campaign); re-crawl of 118 page visits (desktop + phone): 0 errors.
+
+## R34 — disk retention: published videos were not the only thing on disk `DONE`
+
+The operator saw disk use climb every day although "every video is removed after publish".
+Published uploads ARE deleted from the buffer — but four other stores grew without a limit (ADR-099):
+
+- **Compilation library** (ADR-082): the newest 24 masters per campaign are kept for best-of
+  compilations — and were never freed, not when the campaign completed, not when it was deleted.
+  With auto-create starting new campaigns, that is up to ~1.2 GB per campaign, forever.
+- **Deleted campaigns:** deleting a campaign removed its rows, never its `buffer/` and `library/`
+  folders.
+- **Music cache:** one MP3 per background track ever used, never pruned.
+- **Docker images:** each deploy pulls a new sha tag; the old image keeps its tag, so `prune -f`
+  (dangling only) never freed it — about one image per deploy.
+- Also: R30's hold kept a paused campaign's videos indefinitely; now at most 14 days.
+- Fix: `prune_media` every scheduler tick (deleted campaigns' folders; a completed campaign's
+  library 14 days after its newest master; music unused 30 days — a cache hit refreshes the
+  age); deploy prunes unused images older than 3 days; RUNBOOK lists every store and its limit.
+- Verified: 814 tests pass (2 new), ruff clean, docs guard green.
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation

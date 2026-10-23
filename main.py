@@ -706,13 +706,8 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
     # finished video waits in the review queue appears ONLY as a review row (R22): listing its
     # stale FAILED task too showed one episode as two problems, and that row's Retry button
     # published the unreviewed video while toasting "Retry queued.".
-    review_key_set = _review_episode_keys(db, user.id)
-    attention_failed = [
-        t for t in db.scalars(
-            select(Task).where(Task.user_id == user.id, Task.status == TaskStatus.FAILED)
-            .order_by(Task.updated_at.desc()).limit(16)).all()
-        if (t.campaign_id, t.episode_number) not in review_key_set
-    ][:8]
+    failed_groups = _failed_groups(db, user.id)
+    attention_failed = [t for g in failed_groups for t in g["tasks"]]
     attention_review = db.scalars(
         select(BufferPoolItem)
         .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
@@ -736,7 +731,7 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
     counts = _task_counts(db, user.id)
     setup = _setup_state(user, channels, campaigns)
     # One failure reads the same in triage, in the bell and on the episode page (ADR-068).
-    fail_causes = {t.id: _diagnose_failure(t.error_message) for t in attention_failed}
+    fail_causes = {t.id: g["dg"] for g in failed_groups for t in g["tasks"]}
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -747,6 +742,7 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
             "counts": counts,
             "attention": _attention_count(db, user.id, counts),
             "attention_failed": attention_failed, "attention_review": attention_review,
+            "failed_groups": failed_groups,
             "review_ids": review_ids,
             "scorecard": _scorecard(db, user.id), "next_publish": _next_publish(db, user.id),
             "vitals": _factory_vitals(db, user.id),
@@ -2044,6 +2040,9 @@ def assets_page(request: Request, user: CurrentUser, db: DbDep,
                 campaign: int | None = None, channel: int | None = None,
                 status: str = "", page: int = 1, q: str = ""):
     q = q.strip()
+    # The page is "Review" (R32): with no filter it shows what waits for review, not every buffer
+    # row ever made. Links that ask for `ready`/`consumed` explicitly still get them.
+    status = status or "awaiting_review"
     # Scope conditions (channel/campaign drill-down) — chip counts are computed over THIS, without the
     # search, so the chips read as "how many exist here" (consistent with Campaigns/Channels). Search +
     # status narrow only the visible items and the paging count.
@@ -2109,6 +2108,9 @@ def assets_page(request: Request, user: CurrentUser, db: DbDep,
         {"request": request, "user": user, "items": items, "nav": "assets",
          "camp_by_id": camp_by_id, "chan_by_id": chan_by_id, "previewable": previewable,
          "task_by_ep": task_by_ep,
+         # One queue for "waiting on you" (R33): failures sit above the videos to approve.
+         "failed_groups": (_failed_groups(db, user.id, campaign=campaign, channel=channel, limit=20)
+                           if status == "awaiting_review" and page == 1 and not q else []),
          "scope_campaign": camp_by_id.get(campaign) if campaign else None,
          "scope_channel": chan_by_id.get(channel) if channel else None,
          "status": status, "status_counts": status_counts, "total_all": total_all,
@@ -2338,6 +2340,35 @@ _STAGE_STATUSES: dict[str, tuple[str, ...]] = {
 }
 _STATUS_TO_STAGE = {st: stage for stage, sts in _STAGE_STATUSES.items() for st in sts}
 _EPISODES_LIST_PER_PAGE = 25
+
+
+def _failed_groups(db, user_id: int, *, campaign: int | None = None,
+                   channel: int | None = None, limit: int = 8) -> list[dict]:
+    """Failed episodes, one entry per (campaign, cause): {campaign_id, dg, tasks}. Shared by the
+    dashboard triage and the Review queue (R32/R33) — three episodes stopped by one refused key are
+    one problem, not three identical paragraphs with three Retry buttons. An episode whose video
+    waits in the review queue is a review item, not a failure (R22), so it is left out."""
+    review_keys = _review_episode_keys(db, user_id, campaign=campaign, channel=channel)
+    stmt = select(Task).where(Task.user_id == user_id, Task.status == TaskStatus.FAILED)
+    if campaign:
+        stmt = stmt.where(Task.campaign_id == campaign)
+    if channel:
+        stmt = stmt.join(Campaign, Task.campaign_id == Campaign.id).where(
+            Campaign.channel_id == channel)
+    failed = [t for t in db.scalars(stmt.order_by(Task.updated_at.desc()).limit(limit * 2)).all()
+              if (t.campaign_id, t.episode_number) not in review_keys][:limit]
+    groups: list[dict] = []
+    by_key: dict = {}
+    for t in failed:
+        dg = _diagnose_failure(t.error_message)
+        k = (t.campaign_id, dg["cause"] if dg else (t.error_message or "")[:80])
+        if k not in by_key:
+            by_key[k] = {"campaign_id": t.campaign_id, "dg": dg, "tasks": []}
+            groups.append(by_key[k])
+        by_key[k]["tasks"].append(t)
+    for g in groups:
+        g["tasks"].sort(key=lambda t: t.episode_number)
+    return groups
 
 
 def _review_episode_keys(db, user_id: int, *, campaign: int | None = None,
@@ -3038,7 +3069,8 @@ def api_search(user: CurrentUser, db: DbDep, q: str = ""):
 
 
 @app.post("/api/tasks/{task_id}/retry")
-def retry_task(task_id: int, user: CurrentUser, db: DbDep, return_to: str = Form("")):
+def retry_task(task_id: int, user: CurrentUser, db: DbDep, return_to: str = Form(""),
+               fresh: str = Form("")):
     """Retry a failed episode — retrying the step that actually failed (ADR-085). An APPROVED
     rendered file (`ready`) re-queues only the publish; a file still AWAITING REVIEW routes the
     operator to the review controls instead (R22: Retry must never publish unreviewed content —
@@ -3046,7 +3078,11 @@ def retry_task(task_id: int, user: CurrentUser, db: DbDep, return_to: str = Form
     no surviving file re-renders.
 
     Returns JSON for the Task Logs poller (fetch, no `return_to`); a form POST from the Episode view
-    passes `return_to` and gets a 303 back to that page instead."""
+    passes `return_to` and gets a 303 back to that page instead.
+
+    `fresh=1` re-renders from a NEW script (R32): a plain retry rebuilds the saved one, which is
+    right after a crash and wrong after a content failure — the fix copy for those says "write a
+    fresh script", and on a failed episode with no video there was no button that did."""
     from workers.reconcile import reconcile_task_outcome
 
     task = db.get(Task, task_id)
@@ -3085,6 +3121,8 @@ def retry_task(task_id: int, user: CurrentUser, db: DbDep, return_to: str = Form
     task.error_message = None
     task.retry_count += 1
     task.progress_pct = 0
+    if fresh == "1":
+        video_worker.drop_script_checkpoint(task)
     task.status = TaskStatus.PENDING_QUEUE
     db.commit()
     task.rq_job_id = video_worker.enqueue_task(task)   # kind-aware: compilations re-concat

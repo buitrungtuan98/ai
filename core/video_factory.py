@@ -19,7 +19,7 @@ from core.ai_engine import VideoScript
 from core.captions import HEADLINE_FLASH_S, build_ass
 from core.cleanup import RenderWorkspace
 from core.config import settings
-from core.ffmpeg_runner import run_ffmpeg
+from core.ffmpeg_runner import FFmpegError, run_ffmpeg
 from core.thumbnail import generate_thumbnail
 
 logger = logging.getLogger(__name__)
@@ -231,6 +231,44 @@ def still_to_clip(
         out_path,
     ])
     return out_path
+
+
+# Bitstream filters that rewrite a clip's colour tags to plain bt709 without re-encoding (R31).
+_BT709_TAGS = "colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1"
+_RETAG_BSF = {"h264": f"h264_metadata={_BT709_TAGS}", "hevc": f"hevc_metadata={_BT709_TAGS}"}
+
+
+def build_retag_args(in_path: str, out_path: str, codec: str | None) -> list[str] | None:
+    """ffmpeg args (after the binary) that copy a clip's video with its colour tags rewritten to
+    bt709, or None for a codec with no metadata filter. Pure — unit-tested without ffmpeg.
+
+    Why (R31): ffmpeg 7 refuses a frame whose stream declares a reserved/unknown colour space at
+    the filter-graph INPUT ("Invalid color space"), so one oddly tagged stock clip failed the whole
+    scene — and no filter can help, because it never gets past the graph's front door. The audio is
+    dropped: a scene only ever uses the narration track."""
+    bsf = _RETAG_BSF.get(codec or "")
+    if bsf is None:
+        return None
+    return ["-i", in_path, "-map", "0:v:0", "-c", "copy", "-bsf:v", bsf, out_path]
+
+
+def retag_clips_bt709(clip_paths: list[str]) -> list[str]:
+    """Each clip with bt709 colour tags (a stream copy, seconds even on this box); a clip that
+    cannot be retagged is passed through unchanged."""
+    out: list[str] = []
+    for path in clip_paths:
+        fixed = f"{path}.bt709.mp4"
+        try:
+            args = build_retag_args(path, fixed, media.probe_video_meta(path).get("codec"))
+            if args is None:
+                out.append(path)
+                continue
+            run_ffmpeg(args)
+            out.append(fixed)
+        except Exception:  # noqa: BLE001 — a clip we cannot fix is tried as-is
+            logger.warning("Could not retag %s to bt709", path, exc_info=True)
+            out.append(path)
+    return out
 
 
 def build_scene_args(
@@ -800,13 +838,26 @@ def produce(
             # Long-form gets a real ending: fade the final scene's tail. Shorts stay abrupt so the
             # last frame cuts back to the first — the seamless loop is what drives Shorts rewatches.
             fade = min(1.5, d_i) if profile.name == "long" and si == len(plans) - 1 else 0.0
-            args = build_scene_args(clip_paths, plan["audio"], ass_path, scene_out, d_i, branding,
-                                    motion_effect=effect, color_grade=color_grade,
-                                    shot_durations=shot_durations, profile=profile, fade_out_s=fade)
-            run_ffmpeg(
-                args, total_duration=d_i,
-                on_progress=lambda p, s=si: report("scenes", 30 + (s + p / 100) / n_scenes * 70),
-            )
+            def _scene_args(clips: list[str]) -> list[str]:
+                return build_scene_args(clips, plan["audio"], ass_path, scene_out, d_i, branding,
+                                        motion_effect=effect, color_grade=color_grade,
+                                        shot_durations=shot_durations, profile=profile,
+                                        fade_out_s=fade)
+
+            def _progress(p: float, s: int = si) -> None:
+                report("scenes", 30 + (s + p / 100) / n_scenes * 70)
+
+            try:
+                run_ffmpeg(_scene_args(clip_paths), total_duration=d_i, on_progress=_progress)
+            except FFmpegError as exc:
+                if "invalid color space" not in str(exc).lower():
+                    raise
+                # One stock clip with reserved colour tags (R31): retag every clip of this scene
+                # to bt709 by stream copy and draw the scene once more.
+                logger.warning("Scene %d: a clip has an invalid colour space — retagging to bt709",
+                               si)
+                run_ffmpeg(_scene_args(retag_clips_bt709(clip_paths)), total_duration=d_i,
+                           on_progress=_progress)
             scene_files.append(scene_out)
             report("scenes", 30 + (si + 1) / n_scenes * 70)
 

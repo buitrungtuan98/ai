@@ -1,0 +1,19 @@
+{# Grouped failed episodes (R32/R33): one <li> per (campaign, cause), shared by the dashboard
+   triage and the Review queue. Needs `failed_groups` and `camp_by_id`; the Retry form is
+   wired once, in ui.js. #}
+    {% for g in failed_groups %}
+    {% set camp = camp_by_id.get(g.campaign_id) %}
+    {% set t = g.tasks[0] %}{% set dg = g.dg %}
+    <li>
+      <span class="tri-dot failed"></span>
+      <div class="grow">
+        <b>{% if g.tasks|length == 1 %}<a href="/episodes/{{ t.id }}">{{ camp.topic_name if camp else 'C' ~ t.campaign_id }} · Ep {{ t.episode_number }}</a>{% else %}<a href="/campaigns/{{ g.campaign_id }}/episodes?status=failed">{{ camp.topic_name if camp else 'C' ~ g.campaign_id }} · Ep {{ g.tasks|map(attribute='episode_number')|join(', ') }}</a>{% endif %}</b> failed{% if dg %} — {{ dg.cause }}{% endif %}
+        <div class="meta">{{ dg.fix if dg else (t.error_message or 'Render failed — open the episode for details.')[:120] }}</div>
+      </div>
+      {# The classified fix gets its link here too (ADR-068), not only on the episode page — a
+         quota/blacklist/token failure whose copy says "go to Settings/Credentials" must not offer
+         Retry as the only clickable thing when retrying is exactly what won't help. #}
+      {% if dg and dg.action %}<a class="btn sm" href="{{ dg.href }}">{{ dg.action }} →</a>{% endif %}
+      <form class="retry-form" data-task="{{ g.tasks|map(attribute='id')|join(',') }}"><button class="btn ghost sm" type="submit">↻ Retry{% if g.tasks|length > 1 %} all {{ g.tasks|length }}{% endif %}</button></form>
+    </li>
+    {% endfor %}

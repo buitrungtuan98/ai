@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 {% import "macros.html" as ui %}
-{% block title %}Dashboard · AI Video Factory{% endblock %}
+{% block title %}Home · AI Video Factory{% endblock %}
 {% block content %}
-{% call ui.page_head('Dashboard', 'Automated vertical-video generation, running on your zero-cost box.') %}
+{% call ui.page_head('Home', 'What the factory is doing and what needs you — across every channel.') %}
   <a class="btn" href="/campaigns/new">+ New Campaign</a>
 {% endcall %}
 
@@ -80,22 +80,7 @@
       <a class="btn sm" href="/autopilot">Review →</a>
     </li>
     {% endif %}
-    {% for t in attention_failed %}
-    {% set camp = camp_by_id.get(t.campaign_id) %}
-    <li>
-      <span class="tri-dot failed"></span>
-      <div class="grow">
-        {% set dg = fail_causes.get(t.id) %}
-        <b><a href="/episodes/{{ t.id }}">{{ camp.topic_name if camp else 'C' ~ t.campaign_id }} · Ep {{ t.episode_number }}</a></b> failed{% if dg %} — {{ dg.cause }}{% endif %}
-        <div class="meta">{{ dg.fix if dg else (t.error_message or 'Render failed — open the episode for details.')[:120] }}</div>
-      </div>
-      {# The classified fix gets its link here too (ADR-068), not only on the episode page — a
-         quota/blacklist/token failure whose copy says "go to Settings/Credentials" must not offer
-         Retry as the only clickable thing when retrying is exactly what won't help. #}
-      {% if dg and dg.action %}<a class="btn sm" href="{{ dg.href }}">{{ dg.action }} →</a>{% endif %}
-      <form class="retry-form" data-task="{{ t.id }}"><button class="btn ghost sm" type="submit">↻ Retry</button></form>
-    </li>
-    {% endfor %}
+    {% include "_failed_groups.html" %}
     {% for i in attention_review %}
     {% set camp = camp_by_id.get(i.campaign_id) %}
     <li>
@@ -257,37 +242,6 @@
 {% block scripts %}
 <script>
   (function () {
-    // Inline retry from the triage inbox (reuses the task retry endpoint).
-    document.querySelectorAll(".retry-form").forEach(function (f) {
-      f.addEventListener("submit", function (e) {
-        e.preventDefault();
-        var btn = f.querySelector("button"), id = f.dataset.task;
-        window.ui.busyButton(btn, "↻ Retrying…", function () {
-          return fetch("/api/tasks/" + id + "/retry", { method: "POST" })
-            .then(function (r) { if (!r.ok) throw new Error(); return r.json(); })
-            .then(function (d) {
-              // Say what the server actually did (R22): "Retry queued." over a publish told the
-              // operator a render was re-queued while an upload was already on its way.
-              if (d.mode === "review") {
-                window.ui.toast("The video is already rendered — it's waiting for your review.", "success");
-                if (d.href) { window.location.href = d.href; return; }
-              } else if (d.mode === "publish") {
-                window.ui.toast("Upload retry queued — the rendered video publishes to the channel (no re-render).", "success");
-              } else if (d.mode === "published") {
-                window.ui.toast("Already published — status corrected, nothing re-posted.", "success");
-              } else {
-                window.ui.toast("Re-render queued.", "success");
-              }
-              var li = f.closest("li"); if (li) li.remove();
-              if (!document.querySelectorAll("#triage-list li").length) {
-                var tc = document.getElementById("triage-card"), ac = document.getElementById("allclear-card");
-                if (tc) tc.hidden = true; if (ac) ac.hidden = false;
-              }
-            })
-            .catch(function () { window.ui.toast("Couldn't retry — open the episode for details.", "danger"); });
-        });
-      });
-    });
     // "New since your last visit" — mark activity newer than the last check.
     try {
       var key = "aivf_last_visit", last = parseFloat(localStorage.getItem(key) || "0"), n = 0;

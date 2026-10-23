@@ -170,6 +170,24 @@ class AdvanceEvents:
     activated_campaign_id: int | None = None
 
 
+def complete_campaign(db, campaign: Campaign) -> int | None:
+    """Mark a campaign completed and activate the user's next pending campaign — the lifecycle
+    promise every way of finishing keeps (a final publish, a stranded run, a wind-down). Returns the
+    activated campaign's id, if any. ONE definition: there were already two copies (R29)."""
+    campaign.status = CampaignStatus.completed
+    db.commit()
+    nxt = db.scalar(
+        select(Campaign)
+        .where(Campaign.user_id == campaign.user_id, Campaign.status == CampaignStatus.pending)
+        .order_by(Campaign.id)
+    )
+    if nxt is None:
+        return None
+    nxt.status = CampaignStatus.active
+    db.commit()
+    return nxt.id
+
+
 def advance_campaign(db, campaign: Campaign) -> AdvanceEvents:
     """Increment the episode counter and apply lifecycle transitions.
 
@@ -189,20 +207,13 @@ def advance_campaign(db, campaign: Campaign) -> AdvanceEvents:
     # and the campaign would sit "active" at N/N forever, never completing or activating the next.
     if campaign.current_episode >= campaign.total_episodes:
         already_completed = campaign.status == CampaignStatus.completed
-        campaign.status = CampaignStatus.completed
-        db.commit()
         events.completed = not already_completed
         # Activate the next pending campaign only on the TRANSITION into completed — a late
         # publish on a finished campaign must not start yet another queued-up future campaign.
-        nxt = None if already_completed else db.scalar(
-            select(Campaign)
-            .where(Campaign.user_id == campaign.user_id, Campaign.status == CampaignStatus.pending)
-            .order_by(Campaign.id)
-        )
-        if nxt is not None:
-            nxt.status = CampaignStatus.active
+        if already_completed:
             db.commit()
-            events.activated_campaign_id = nxt.id
+        else:
+            events.activated_campaign_id = complete_campaign(db, campaign)
     else:
         if campaign.status != CampaignStatus.active:
             campaign.status = CampaignStatus.active
