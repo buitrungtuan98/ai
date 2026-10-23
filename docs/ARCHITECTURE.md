@@ -2670,3 +2670,25 @@ the TTS error did not even say which line.
 fault); dropping the unsayable sentence (silent content loss); re-encoding the clip (the decode
 itself is what fails, and it costs minutes on this CPU-only box).
 
+### ADR-098 — Five sections, one review queue, and a wizard over the campaign form
+
+**Context.** The operator found the app hard to use: steps felt duplicated and looping. A crawl of
+every page (R32) found no crashes — the cost was structural: eight rail items plus a Calendar
+reachable from almost nowhere, a "Review" page that was also an Episodes view with two rows of
+overlapping filters, failures and approvals in different places, and a 779-line campaign form.
+
+**Decision.**
+1. **Sections, defined once.** `base.html` holds the section map: five rail/tab-bar entries, which
+   page `nav` belongs to which section, and each section's tabs. Tabs render on a section's list
+   pages only; detail pages (a campaign, an episode) keep their own tabs — two stacked tab rows were
+   part of the clutter.
+2. **Review = everything waiting on the operator.** Failed episodes (grouped by campaign and cause)
+   above the videos to approve, from the same `_failed_groups` the dashboard uses (DRY).
+3. **The wizard is a layer, not a second form.** Steps show and hide parts of the one form; every
+   field still submits, so the server contract and its validation are untouched, and "Customize
+   everything" is always one click away. Only a brand-new campaign gets it — an edit or a duplicate
+   already has its values.
+
+**Rejected:** a separate wizard endpoint/form (two definitions of a campaign to keep in sync);
+deleting rarely used fields (every field is honoured by the pipeline — they are folded, not cut).
+

@@ -706,13 +706,8 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
     # finished video waits in the review queue appears ONLY as a review row (R22): listing its
     # stale FAILED task too showed one episode as two problems, and that row's Retry button
     # published the unreviewed video while toasting "Retry queued.".
-    review_key_set = _review_episode_keys(db, user.id)
-    attention_failed = [
-        t for t in db.scalars(
-            select(Task).where(Task.user_id == user.id, Task.status == TaskStatus.FAILED)
-            .order_by(Task.updated_at.desc()).limit(16)).all()
-        if (t.campaign_id, t.episode_number) not in review_key_set
-    ][:8]
+    failed_groups = _failed_groups(db, user.id)
+    attention_failed = [t for g in failed_groups for t in g["tasks"]]
     attention_review = db.scalars(
         select(BufferPoolItem)
         .join(Campaign, BufferPoolItem.campaign_id == Campaign.id)
@@ -736,20 +731,7 @@ def dashboard(request: Request, user: CurrentUser, db: DbDep):
     counts = _task_counts(db, user.id)
     setup = _setup_state(user, channels, campaigns)
     # One failure reads the same in triage, in the bell and on the episode page (ADR-068).
-    fail_causes = {t.id: _diagnose_failure(t.error_message) for t in attention_failed}
-    # One row per (campaign, cause) (R32): three episodes stopped by the same refused key read as
-    # three identical paragraphs with three Retry buttons — one problem, shown as three.
-    failed_groups: list[dict] = []
-    by_key: dict = {}
-    for t in attention_failed:
-        dg = fail_causes.get(t.id)
-        k = (t.campaign_id, dg["cause"] if dg else (t.error_message or "")[:80])
-        if k not in by_key:
-            by_key[k] = {"campaign_id": t.campaign_id, "dg": dg, "tasks": []}
-            failed_groups.append(by_key[k])
-        by_key[k]["tasks"].append(t)
-    for g in failed_groups:
-        g["tasks"].sort(key=lambda t: t.episode_number)
+    fail_causes = {t.id: g["dg"] for g in failed_groups for t in g["tasks"]}
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -2126,6 +2108,9 @@ def assets_page(request: Request, user: CurrentUser, db: DbDep,
         {"request": request, "user": user, "items": items, "nav": "assets",
          "camp_by_id": camp_by_id, "chan_by_id": chan_by_id, "previewable": previewable,
          "task_by_ep": task_by_ep,
+         # One queue for "waiting on you" (R33): failures sit above the videos to approve.
+         "failed_groups": (_failed_groups(db, user.id, campaign=campaign, channel=channel, limit=20)
+                           if status == "awaiting_review" and page == 1 and not q else []),
          "scope_campaign": camp_by_id.get(campaign) if campaign else None,
          "scope_channel": chan_by_id.get(channel) if channel else None,
          "status": status, "status_counts": status_counts, "total_all": total_all,
@@ -2355,6 +2340,35 @@ _STAGE_STATUSES: dict[str, tuple[str, ...]] = {
 }
 _STATUS_TO_STAGE = {st: stage for stage, sts in _STAGE_STATUSES.items() for st in sts}
 _EPISODES_LIST_PER_PAGE = 25
+
+
+def _failed_groups(db, user_id: int, *, campaign: int | None = None,
+                   channel: int | None = None, limit: int = 8) -> list[dict]:
+    """Failed episodes, one entry per (campaign, cause): {campaign_id, dg, tasks}. Shared by the
+    dashboard triage and the Review queue (R32/R33) — three episodes stopped by one refused key are
+    one problem, not three identical paragraphs with three Retry buttons. An episode whose video
+    waits in the review queue is a review item, not a failure (R22), so it is left out."""
+    review_keys = _review_episode_keys(db, user_id, campaign=campaign, channel=channel)
+    stmt = select(Task).where(Task.user_id == user_id, Task.status == TaskStatus.FAILED)
+    if campaign:
+        stmt = stmt.where(Task.campaign_id == campaign)
+    if channel:
+        stmt = stmt.join(Campaign, Task.campaign_id == Campaign.id).where(
+            Campaign.channel_id == channel)
+    failed = [t for t in db.scalars(stmt.order_by(Task.updated_at.desc()).limit(limit * 2)).all()
+              if (t.campaign_id, t.episode_number) not in review_keys][:limit]
+    groups: list[dict] = []
+    by_key: dict = {}
+    for t in failed:
+        dg = _diagnose_failure(t.error_message)
+        k = (t.campaign_id, dg["cause"] if dg else (t.error_message or "")[:80])
+        if k not in by_key:
+            by_key[k] = {"campaign_id": t.campaign_id, "dg": dg, "tasks": []}
+            groups.append(by_key[k])
+        by_key[k]["tasks"].append(t)
+    for g in groups:
+        g["tasks"].sort(key=lambda t: t.episode_number)
+    return groups
 
 
 def _review_episode_keys(db, user_id: int, *, campaign: int | None = None,

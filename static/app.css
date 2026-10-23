@@ -268,6 +268,35 @@ details.disclosure > summary > .sum { flex: 1; min-width: 0; display: flex; flex
 .tab-panel { display: none; }
 .tab-panel.active { display: block; }
 
+/* Section tabs (R33): a section's sibling pages, above the page head — same look as .tabs. */
+.section-tabs { display: flex; gap: var(--sp-1); border-bottom: 1px solid var(--border);
+  margin: calc(-1 * var(--sp-2)) 0 var(--sp-5); overflow-x: auto; }
+.section-tabs a { color: var(--muted); padding: 10px var(--sp-4); font-weight: var(--fw-semibold);
+  font-size: var(--fs-sm); border-bottom: 2px solid transparent; white-space: nowrap;
+  text-decoration: none; transition: color .12s ease; }
+.section-tabs a:hover { color: var(--text); }
+.section-tabs a.active { color: var(--text); border-bottom-color: var(--primary); }
+
+/* New-campaign wizard (R33): steps over the one campaign form. */
+.wz-steps { display: flex; gap: var(--sp-2); list-style: none; padding: 0; margin: 0 0 var(--sp-5);
+  flex-wrap: wrap; }
+.wz-steps li { display: flex; align-items: center; gap: var(--sp-2); color: var(--muted);
+  font-size: var(--fs-sm); font-weight: var(--fw-semibold); padding: 6px 12px; border-radius: 999px;
+  border: 1px solid var(--border); }
+.wz-steps li span { display: inline-grid; place-items: center; width: 20px; height: 20px;
+  border-radius: 50%; background: var(--border); font-size: 12px; }
+.wz-steps li.active { color: var(--text); border-color: var(--primary); }
+.wz-steps li.active span, .wz-steps li.done span { background: var(--primary); color: #fff; }
+.wz-nav { display: flex; gap: var(--sp-2); align-items: center; margin: var(--sp-4) 0; }
+form.wz .tabs, form.wz .tab-panel, form.wz .savebar, form.wz .identity-card { display: none; }
+form.wz[data-step="1"] #core, form.wz[data-step="2"] #core { display: block; }
+form.wz[data-step="1"] #core > :not(:first-child),
+form.wz[data-step="2"] #core > :not(:first-child) { display: none; }
+form.wz[data-step="1"] #core > .card > :not([data-wz-basic]) { display: none; }
+form.wz[data-step="2"] #core > .card > :not(#ai-propose-row) { display: none; }
+form.wz[data-step="2"] .identity-card, form.wz[data-step="3"] .identity-card,
+form.wz[data-step="3"] .savebar { display: flex; }
+
 /* ── 9. (reserved) ─────────────────────────────────────────────────────────── */
 
 /* ── 10. Status pills ──────────────────────────────────────────────────────── */

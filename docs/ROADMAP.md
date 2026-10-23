@@ -2089,6 +2089,24 @@ app was booted with seeded data in every state and crawled in headless Chromium 
 - Inline favicon (every page logged a `/favicon.ico` 404).
 - Verified: 809 tests pass (3 new), ruff clean, docs guard green; re-crawled with no errors.
 
+## R33 — five sections, one review queue, a three-step campaign wizard `DONE`
+
+The operator chose two simplifications from the R32 audit — ADR-098.
+
+- **Five sections instead of eight menu items + a hidden Calendar:** Home · Review · Campaigns ·
+  Channels · Setup, identical on the desktop rail and the phone tab bar (no "More"). Sibling pages
+  are tabs at the top of each section's list pages: Campaigns/Episodes/Calendar,
+  Channels/Autopilot, Credentials/Settings/Operations. Badges: Review = failed + awaiting review,
+  Channels = autopilot proposals, Setup = worker down.
+- **Review is one queue:** failed episodes (grouped by campaign + cause, `_failed_groups`, shared
+  with the dashboard) sit above the videos to approve; the Episode stage tabs left the page (they
+  jumped into Campaigns — a lateral loop) and its empty state no longer links back to itself.
+- **New-campaign wizard:** 1) topic, channel, episodes, language, format → 2) AI designs it →
+  3) review & start. Same form and POST underneath; "Set it up myself" / "Customize everything"
+  reveal every field; editing and duplicating keep the full form.
+- Verified: 811 tests pass (2 new), ruff clean, docs guard green; wizard driven end to end in
+  Chromium (created a campaign); re-crawl of 118 page visits (desktop + phone): 0 errors.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

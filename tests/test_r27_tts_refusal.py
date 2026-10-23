@@ -471,3 +471,38 @@ def test_dashboard_groups_identical_failures_into_one_row(session, user, channel
         body = c.get("/").text
     assert "UI · Ep 2, 3, 4</a></b> failed" in body and "Retry all 3" in body
     assert body.count("The voice service refused the connection") == 1
+
+
+# ── R33: five sections, and Review is one queue ──────────────────────────────
+def test_review_is_one_queue_with_failures_and_the_menu_has_five_sections(session, user, channel):
+    from starlette.testclient import TestClient
+
+    import main
+
+    _web(session, user, channel)
+    with TestClient(main.app) as c:
+        review = c.get("/assets").text
+        campaigns = c.get("/campaigns").text
+    assert "Failed — needs a retry or a fix" in review and "Retry all 3" in review
+    nav = review.split('aria-label="Primary"', 1)[1].split("</nav>", 1)[0]
+    assert [x for x in ("Home", "Review", "Campaigns", "Channels", "Setup") if x in nav] == \
+        ["Home", "Review", "Campaigns", "Channels", "Setup"]
+    assert nav.count('class="nav-text"') == 5
+    tabs = campaigns.split('class="section-tabs"', 1)[1].split("</nav>", 1)[0]
+    assert "/episodes" in tabs and "/calendar" in tabs           # the Calendar is reachable now
+
+
+def test_the_wizard_is_for_new_campaigns_only(session, user, channel):
+    from starlette.testclient import TestClient
+
+    import main
+
+    camp, _ = _web(session, user, channel)
+    with TestClient(main.app) as c:
+        new = c.get("/campaigns/new").text
+        dup = c.get(f"/campaigns/new?from_id={camp.id}").text
+        edit = c.get(f"/campaigns/{camp.id}/settings").text
+    assert 'id="wz-steps"' in new and 'class="wz" data-step="1"' in new
+    assert new.count("data-wz-basic") == 5                 # topic, channel, episodes, language, format
+    for page in (dup, edit):                               # values already set → the full form
+        assert 'id="wz-steps"' not in page and 'class="wz"' not in page

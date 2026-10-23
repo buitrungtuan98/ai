@@ -15,13 +15,24 @@
 {% else %}
 {% call ui.page_head(('Duplicate Campaign' if dup else 'New Campaign'),
    (('Copied from “' ~ source.topic_name ~ '” — pick a new channel/language, keep the persona.') if dup
-    else 'Configure strategy, persona, audio & branding, and distribution. Every field here is honored by the render pipeline.')) %}{% endcall %}
+    else 'Three steps: pick a topic and a channel, let the AI design the rest, then review and start.')) %}{% endcall %}
 {% endif %}
 
 {% if not channels %}
 {% call ui.empty('◉', 'Connect a channel first', 'Every campaign publishes to a channel — add one to get started.', '/channels', 'Add a channel') %}{% endcall %}
 {% else %}
-<form method="post" id="campaign-form" action="{{ '/campaigns/' ~ campaign.id ~ '/edit' if editing else '/campaigns' }}" novalidate>
+{# A brand-new campaign is a 3-step wizard (R33) over the SAME form: step 1 the basics, step 2 the AI
+   designs the rest, step 3 review & start. Every field stays — "Customize everything" reveals the
+   full form. Editing and duplicating already have their values, so they keep the full form. #}
+{% set wizard = not editing and not dup %}
+{% if wizard %}
+<ol class="wz-steps" id="wz-steps" aria-label="New campaign steps">
+  <li data-step="1" class="active"><span>1</span> Topic &amp; channel</li>
+  <li data-step="2"><span>2</span> AI designs it</li>
+  <li data-step="3"><span>3</span> Review &amp; start</li>
+</ol>
+{% endif %}
+<form method="post" id="campaign-form" action="{{ '/campaigns/' ~ campaign.id ~ '/edit' if editing else '/campaigns' }}" novalidate{% if wizard %} class="wz" data-step="1"{% endif %}>
   <div class="tabs">
     <button type="button" class="tab-btn active" data-tab="core">Core &amp; AI Strategy</button>
     <button type="button" class="tab-btn" data-tab="audio">Aesthetics &amp; Audio</button>
@@ -37,32 +48,32 @@
     <div class="card">
       <div class="form-row" id="ai-propose-row">
         <button type="button" class="btn ghost" id="ai-propose">✨ Propose full campaign with AI</button>
-        <p class="hint">Type a topic below (or leave it blank) and let Gemini design the persona, voice,
-          captions, look, music &amp; schedule for you — review and tweak anything before saving.
-          Click again for a completely fresh idea.</p>
+        <p class="hint">Gemini designs the persona, voice, captions, look, music &amp; schedule from your
+          topic (or invents one if it is blank) — review and tweak anything before saving. Click again
+          for a completely fresh idea.</p>
         <p class="hint" id="ai-rationale" style="display:none"></p>
         {# The failure lands here instead of in a browser alert(): an alert can't be re-read, can't be
            copied, and can't link to the page that fixes it (ADR-068). #}
         <p class="err" id="ai-error" style="display:none" role="status" aria-live="polite"></p>
       </div>
-      <div class="form-row"><label>Topic name</label>
+      <div class="form-row" data-wz-basic><label>Topic name</label>
         <input name="topic_name" required placeholder="Amazing space facts" value="{{ campaign.topic_name if editing else (source.topic_name if dup else '') }}"></div>
-      <div class="form-row"><label>Target channel</label>
+      <div class="form-row" data-wz-basic><label>Target channel</label>
         {% set sel_channel = sel_channel if sel_channel is defined else None %}
         <select name="channel_id" required>
           {% for c in channels %}<option value="{{ c.id }}" {{ 'selected' if c.id == sel_channel }}>{{ c.channel_name }} ({{ c.platform.value }})</option>{% endfor %}
         </select>
       </div>
-      <div class="form-row"><label>Total episodes</label>
+      <div class="form-row" data-wz-basic><label>Total episodes</label>
         <input name="total_episodes" type="number" min="1" value="{{ campaign.total_episodes if editing else (source.total_episodes if dup else (default_episodes|default(10))) }}" required></div>
-      <div class="form-row"><label>Target language</label>
+      <div class="form-row" data-wz-basic><label>Target language</label>
         <select name="language">
           {% for code, name in [('vi','Vietnamese'), ('en','English'), ('es','Spanish')] %}
           <option value="{{ code }}" {{ 'selected' if cfg.get('language', 'en') == code }}>{{ name }}</option>
           {% endfor %}
         </select>
       </div>
-      <div class="form-row"><label>Video format</label>
+      <div class="form-row" data-wz-basic><label>Video format</label>
         <select name="video_format">
           <option value="short" {{ 'selected' if cfg.get('video_format','short')!='long' }}>Short — vertical 9:16, ≤3 min (Shorts / Reels)</option>
           <option value="long" {{ 'selected' if cfg.get('video_format')=='long' }}>Long — horizontal 16:9, 3–15 min (with chapter markers)</option>
@@ -391,6 +402,19 @@
     </div>
   </div>
 
+  {% if wizard %}
+  <div class="wz-nav" id="wz-nav">
+    <button type="button" class="btn ghost" id="wz-back" hidden>← Back</button>
+    <span class="grow"></span>
+    <button type="button" class="btn ghost" id="wz-skip" hidden title="Skip the AI and fill in every field yourself">Set it up myself</button>
+    <button type="button" class="btn" id="wz-next">Next →</button>
+  </div>
+  <div class="wz-review card" id="wz-review" hidden>
+    <p class="hint" style="margin:0">Everything the AI chose is in the summary above. Start now, or open every
+      setting first — persona, voice, captions, music, schedule.</p>
+    <button type="button" class="btn ghost sm mt-sm" id="wz-customize">⚙ Customize everything</button>
+  </div>
+  {% endif %}
   <div class="savebar">
     {% if editing %}
     <button class="btn" type="submit" id="save-campaign">Save changes</button>
@@ -709,12 +733,52 @@
             note.style.display = p.rationale ? "block" : "none";
           }
           updateIdentity();  // fields set programmatically don't fire input events
+          form.dispatchEvent(new CustomEvent("ai-proposed"));   // the wizard moves to Review (R33)
         } catch (e) {
           showAiError(e.message || "AI proposal failed — please try again.");
         }
       });
     });
   }
+
+  // 🧭 The new-campaign wizard (R33): three steps over the one form. Pure show/hide — every
+  // field still submits, so the server contract is unchanged.
+  (function () {
+    const form = document.getElementById("campaign-form");
+    if (!form || !form.classList.contains("wz")) return;
+    const steps = document.querySelectorAll("#wz-steps li");
+    const back = document.getElementById("wz-back"), next = document.getElementById("wz-next");
+    const skip = document.getElementById("wz-skip"), review = document.getElementById("wz-review");
+    const nav = document.getElementById("wz-nav");
+    function go(n) {
+      form.dataset.step = String(n);
+      steps.forEach(function (li) {
+        const k = Number(li.dataset.step);
+        li.classList.toggle("active", k === n);
+        li.classList.toggle("done", k < n);
+      });
+      back.hidden = n === 1;
+      skip.hidden = n !== 2;
+      next.hidden = n !== 1;
+      review.hidden = n !== 3;
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+    function full() {   // "Customize everything": leave the wizard, show the whole form
+      form.classList.remove("wz");
+      delete form.dataset.step;
+      nav.hidden = true;
+      review.hidden = true;
+      document.getElementById("wz-steps").hidden = true;
+    }
+    next.addEventListener("click", function () { go(2); });
+    back.addEventListener("click", function () { go(Math.max(1, Number(form.dataset.step) - 1)); });
+    skip.addEventListener("click", full);
+    document.getElementById("wz-customize").addEventListener("click", full);
+    form.addEventListener("ai-proposed", function () { go(3); });
+    // A server-side validation error re-renders this page with values filled in — show everything
+    // so the message and the field it names are both visible.
+    if (document.querySelector(".err:not(#ai-error), .banner.danger")) full();
+  })();
 
   // ✅ Inline validation + submit busy state. Native POST navigates on success, so the busy
   // label persists until the new page loads — clear feedback that the save is in flight.
