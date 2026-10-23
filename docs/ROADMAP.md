@@ -2148,6 +2148,21 @@ The operator asked for a factory that recovers without them. Two gaps were left 
 - Verified: 7 new tests drive `deploy.sh` against a fake `docker` (healthy deploy, worker/web
   failure → rollback, no state file, already-down stack, no target, failed rollback).
 
+## R36 — a stock clip retagging can't fix no longer fails the episode `DONE`
+
+"Invalid color space" (ffmpeg exit 234) failed episode 553. That render ran on the build before
+R31's retag retry was deployed. The retry still had a hole: a clip with no retag filter
+(not h264/hevc), or one broken in a way new tags don't fix, failed the scene the same way.
+
+- Fix: `render_scene_resilient` reads the input ffmpeg names ("input from stream N:0") and swaps
+  that clip for its nearest usable sibling in the same scene. The shot count is unchanged, and
+  each clip can be ruled out once (bounded). Studio Mode's single clip still raises.
+- Already-failed episodes: the failure classifies as "ffmpeg could not build the video",
+  which is transient, so the autopilot's retry re-renders them on the fixed build.
+- CI: the Azure apt mirror crawled (13 MB in 2.5 min) and the ffmpeg step hit its cap. The
+  .debs are now cached per runner image and installed offline (`--no-install-recommends`).
+- Verified: 5 new tests (index parse, retag-only, swap, nothing left, other errors untouched).
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

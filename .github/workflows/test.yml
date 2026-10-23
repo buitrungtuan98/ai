@@ -9,7 +9,7 @@ on:
 jobs:
   pytest:
     runs-on: ubuntu-latest
-    timeout-minutes: 40              # a hung runner fails the run instead of blocking a merge for hours
+    timeout-minutes: 45              # a hung runner fails the run instead of blocking a merge for hours
     steps:
       - uses: actions/checkout@v4
 
@@ -17,14 +17,35 @@ jobs:
         with:
           python-version: "3.11"
 
-      # ffmpeg lets the render integration test run (it self-skips when absent). An apt mirror can
-      # hang (R35: one run sat 25 min here), so each attempt is time-boxed and retried.
+      # ffmpeg lets the render integration test run (it self-skips when absent). The Azure apt mirror
+      # can crawl (R35/R36: 13 MB in 2.5 min, twice hitting the step cap), so the .debs are cached per
+      # runner image and installed offline; the mirror is only used on a cache miss.
+      - name: Name the ffmpeg package cache
+        id: ffkey
+        # ImageOS/ImageVersion are runner shell variables, not part of the `env` context.
+        run: echo "key=ffmpeg-debs-${ImageOS}-${ImageVersion}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore ffmpeg packages
+        uses: actions/cache@v4
+        with:
+          path: ~/ffmpeg-debs
+          key: ${{ steps.ffkey.outputs.key }}
+
       - name: Install ffmpeg
-        timeout-minutes: 15
+        timeout-minutes: 25
         run: |
+          if ls ~/ffmpeg-debs/*.deb >/dev/null 2>&1 \
+             && sudo dpkg -i ~/ffmpeg-debs/*.deb >/dev/null && ffmpeg -version >/dev/null; then
+            echo "ffmpeg installed from cache"; exit 0
+          fi
+          rm -rf ~/ffmpeg-debs && mkdir -p ~/ffmpeg-debs
           for i in 1 2 3; do
-            timeout 240 sudo apt-get update -o Acquire::Retries=3 \
-              && timeout 300 sudo apt-get install -y -o Acquire::Retries=3 ffmpeg && exit 0
+            if timeout 300 sudo apt-get update -o Acquire::Retries=3 \
+               && timeout 900 sudo apt-get install -y -f --no-install-recommends \
+                    -o Acquire::Retries=3 -o APT::Keep-Downloaded-Packages=true ffmpeg; then
+              cp /var/cache/apt/archives/*.deb ~/ffmpeg-debs/ 2>/dev/null || true
+              exit 0
+            fi
             echo "apt attempt $i failed, retrying…"; sleep $((i * 10))
           done
           exit 1

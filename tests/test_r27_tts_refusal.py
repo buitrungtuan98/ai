@@ -517,3 +517,76 @@ def test_a_requeued_episode_does_not_show_its_old_failure_as_a_render(session, u
     session.commit()
     stages = {m.key: m for m in episode_timeline(session, tasks[0], camp)}
     assert stages["rendered"].at is None
+
+
+# ── R36: a clip retagging can't fix is swapped for a sibling, not fatal ─────
+_REAL_ERR = ("ffmpeg failed (exit 234): Stream #4:0 (h264) -> trim:default "
+             "[graph 0 input from stream 2:0 @ 0xf96b1800b8f0] Invalid color space "
+             "[fc#0 @ 0xc8aadde747e0] Error reinitializing filters!")
+
+
+def test_bad_colour_input_reads_the_index_ffmpeg_names():
+    from core import video_factory as v
+
+    assert v.bad_colour_input(_REAL_ERR) == 2
+    assert v.bad_colour_input("ffmpeg failed: Invalid argument") is None
+
+
+def _scene_runner(bad_clips):
+    """A fake render that refuses the first bad clip it is given, the way ffmpeg 7 does."""
+    from core.ffmpeg_runner import FFmpegError
+
+    calls = []
+
+    def render(clips):
+        calls.append(list(clips))
+        for i, c in enumerate(clips):
+            if c in bad_clips:
+                raise FFmpegError(f"[graph 0 input from stream {i}:0 @ 0x1] Invalid color space")
+
+    return render, calls
+
+
+def test_retag_that_works_needs_no_swap(monkeypatch):
+    from core import video_factory as v
+
+    monkeypatch.setattr(v, "retag_clips_bt709", lambda cs: [c + ".bt709" for c in cs])
+    render, calls = _scene_runner({"b"})
+    v.render_scene_resilient(render, ["a", "b", "c"])
+    assert calls == [["a", "b", "c"], ["a.bt709", "b.bt709", "c.bt709"]]
+
+
+def test_a_clip_retagging_cannot_fix_is_swapped_for_its_neighbour(monkeypatch):
+    from core import video_factory as v
+
+    monkeypatch.setattr(v, "retag_clips_bt709", lambda cs: list(cs))   # e.g. a vp9 clip
+    render, calls = _scene_runner({"b", "d"})
+    v.render_scene_resilient(render, ["a", "b", "c", "d"])
+    assert calls[-1] == ["a", "a", "c", "c"]       # same shot count, every clip usable
+    assert len(calls) == 4                          # first try, retag, two swaps — bounded
+
+
+def test_no_usable_clip_left_raises(monkeypatch):
+    import pytest
+
+    from core import video_factory as v
+    from core.ffmpeg_runner import FFmpegError
+
+    monkeypatch.setattr(v, "retag_clips_bt709", lambda cs: list(cs))
+    render, _ = _scene_runner({"only"})
+    with pytest.raises(FFmpegError):
+        v.render_scene_resilient(render, ["only"])      # Studio Mode: one clip, nothing to swap
+
+
+def test_other_ffmpeg_errors_are_not_retried(monkeypatch):
+    import pytest
+
+    from core import video_factory as v
+    from core.ffmpeg_runner import FFmpegError
+
+    def render(clips):
+        raise FFmpegError("ffmpeg failed: moov atom not found")
+
+    monkeypatch.setattr(v, "retag_clips_bt709", lambda cs: pytest.fail("must not retag"))
+    with pytest.raises(FFmpegError, match="moov"):
+        v.render_scene_resilient(render, ["a"])
