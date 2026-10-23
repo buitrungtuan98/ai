@@ -192,6 +192,8 @@ def plan_move(grid: dict, cfg: dict, *, iso_week: int, channel_id: int) -> Move 
         if d not in WEEKDAYS:
             continue
         day_slots = [s for s in (by_day.get(d) or slots) if daypart_of_slot(s)]
+        if not day_slots:
+            continue
         cells = grid["cells"][d]
         day_used = {daypart_of_slot(s) for s in day_slots}
         day_weak = min(day_slots, key=lambda s: cells[daypart_of_slot(s)]["score"])

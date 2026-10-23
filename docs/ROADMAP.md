@@ -2212,6 +2212,22 @@ on top of them (ADR-102):
 - Verified: 15 new tests with Gemini mocked (rails, veto/approve/outage/unreliable, ideas → design,
   UI); two autoapply tests updated to run the review step first.
 
+## R39 — the AI layers can never stall the factory `DONE`
+
+Review of R35–R38 for anything that could block the factory or misbehave:
+
+- **AI time budget per pass:** the autopilot pass runs inside the scheduler tick that publishes on
+  time, and each Gemini call may take up to 180 s with retries. With strategist, analyst, council
+  and up to 3 reviews, a hanging Gemini could hold the tick for ~30 min, long enough to miss a
+  slot. Optional AI steps now stop starting new calls 5 min into a pass, and the rest run next
+  pass.
+- **Review never blocks forever:** a rule decision whose AI review has not arrived after 12 h is
+  applied anyway, recorded as "not run".
+- **Failure backoff:** a failed analyst or council call is not re-asked on every 10-min
+  partial-pass retry; each step backs off 1 h.
+- best_time: an empty weekday slot list can no longer raise.
+- Verified: 3 new tests (review timeout, budget, backoff); full suite passes.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

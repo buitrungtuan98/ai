@@ -2777,3 +2777,8 @@ The AI can stop a rule decision, never invent one; recovery paths have no AI dep
 - Fail-closed review (an outage would freeze every structural change).
 - Letting the analyst file actions (the council already does that, with its own rails).
 
+**Addendum (R39).** The AI layers share a time budget per autopilot pass (5 min), because the pass
+runs inside the publishing tick. Review is fail-open on time as well as on errors: after 12 h
+without a review, the rule decision applies. A failed analyst or council call backs off 1 h rather
+than being retried on every partial pass.
+

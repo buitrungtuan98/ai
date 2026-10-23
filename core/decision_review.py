@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 REVIEWED_KINDS = ("extend", "wind_down", "successor", "slot_change")
 MAX_REVIEWS_PER_PASS = 3
+REVIEW_WAIT_H = 12   # a decision whose review has not arrived by then applies anyway (fail open)
 
 
 class ReviewVerdict(BaseModel):
@@ -77,6 +78,11 @@ def review(db, channel, action, *, api_key: str, model: str) -> dict:
     if problem:
         out.update(verdict="unreliable", reason=f"AI review discarded — {problem}")
     return out
+
+
+def waited_too_long(action, now: datetime | None = None) -> bool:
+    created = action.created_at
+    return created is not None and (now or datetime.utcnow()) - created >= timedelta(hours=REVIEW_WAIT_H)
 
 
 def unavailable(why: str) -> dict:

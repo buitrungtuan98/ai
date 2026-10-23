@@ -249,3 +249,49 @@ def test_analyse_now_without_a_key_explains_itself(client, session, user, channe
     session.commit()
     r = client.post(f"/channels/{channel.id}/analyst-now", follow_redirects=False)
     assert r.headers["location"] == "/channels?flash=analyst_no_key"
+
+
+# ── safety: the AI never stalls the factory ──────────────────────────────────
+def test_a_review_that_never_arrives_lets_the_rule_apply(session, user, channel):
+    from workers import scheduler
+
+    camp = _campaign(session, user, channel)
+    a = _wind_down(session, user, channel, camp)
+    a.created_at = datetime.utcnow() - timedelta(hours=13)
+    session.commit()
+    scheduler.autopilot_autoapply_channel(session, channel)
+    session.refresh(a)
+    assert a.status == "applied" and a.evidence["ai_review"]["verdict"] == "unavailable"
+
+
+def test_reviews_stop_when_the_pass_ai_time_is_spent(session, user, channel, monkeypatch):
+    import time
+
+    from core import ai_engine
+    from workers import scheduler
+
+    camp = _campaign(session, user, channel)
+    a = _wind_down(session, user, channel, camp)
+    monkeypatch.setattr(ai_engine, "generate_structured", lambda **kw: pytest.fail("no AI call"))
+    assert scheduler.autopilot_review_rules_channel(
+        session, user, channel, "autopilot", deadline=time.monotonic() - 1) == 0
+    session.refresh(a)
+    assert "ai_review" not in a.evidence and a.status == "proposed"
+
+
+def test_a_failed_analyst_is_not_retried_every_ten_minutes(session, user, channel, monkeypatch):
+    from core import ai_engine
+    from workers import scheduler
+
+    _campaign(session, user, channel)
+    calls = []
+
+    def boom(**kw):
+        calls.append(1)
+        raise RuntimeError("429 quota")
+
+    monkeypatch.setattr(ai_engine, "generate_structured", boom)
+    with pytest.raises(RuntimeError):
+        scheduler.autopilot_analyst_channel(session, user, channel)
+    assert scheduler.autopilot_analyst_channel(session, user, channel) == 0   # backed off
+    assert len(calls) == 1
