@@ -277,6 +277,13 @@ details.disclosure > summary > .sum { flex: 1; min-width: 0; display: flex; flex
 .section-tabs a:hover { color: var(--text); }
 .section-tabs a.active { color: var(--text); border-bottom-color: var(--primary); }
 
+/* The 🏭 Factory switches (R28) sat in a browser-default fieldset — a stark frame through the
+   legend. Same surface treatment as the rest of the autopilot box. */
+.ap-box fieldset { border: 1px solid var(--border); border-radius: var(--radius);
+  padding: var(--sp-3) var(--sp-4); margin: var(--sp-4) 0; display: grid; gap: var(--sp-2); }
+.ap-box fieldset legend { padding: 0 var(--sp-2); max-width: 100%; }
+.ap-box fieldset label { display: block; line-height: 1.45; }
+
 /* New-campaign wizard (R33): steps over the one campaign form. */
 .wz-steps { display: flex; gap: var(--sp-2); list-style: none; padding: 0; margin: 0 0 var(--sp-5);
   flex-wrap: wrap; }

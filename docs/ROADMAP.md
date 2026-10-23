@@ -2104,8 +2104,13 @@ The operator chose two simplifications from the R32 audit — ADR-098.
 - **New-campaign wizard:** 1) topic, channel, episodes, language, format → 2) AI designs it →
   3) review & start. Same form and POST underneath; "Set it up myself" / "Customize everything"
   reveal every field; editing and duplicating keep the full form.
-- Verified: 811 tests pass (2 new), ruff clean, docs guard green; wizard driven end to end in
-  Chromium (created a campaign); re-crawl of 118 page visits (desktop + phone): 0 errors.
+- Found while recording the demo, fixed: a failed episode re-queued by Retry still showed its old
+  stop time as "render finished" (the timeline now trusts `finished_at` as a render finish only in
+  review/scheduled/publishing); the 🏭 Factory box was an unstyled browser fieldset; its
+  Auto-create copy still said "never from a flopping campaign" (R30 changed that); the Home page
+  was still titled "Dashboard".
+- Verified: 812 tests pass, ruff clean, docs guard green; wizard driven end to end in Chromium
+  (created a campaign); re-crawl of 118 page visits (desktop + phone): 0 errors.
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation

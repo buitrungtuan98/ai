@@ -112,6 +112,11 @@ def episode_timeline(db, task, campaign, buffer=None) -> list[Milestone]:
     status = task.status.value if hasattr(task.status, "value") else task.status
     completed = status == TaskStatus.COMPLETED.value
     stopped = status in (TaskStatus.FAILED.value, TaskStatus.CANCELLED.value)
+    # Only these states are reached BY a finished render; anywhere else a leftover `finished_at` is
+    # a stale stop time (R33: a failed episode re-queued by Retry still showed its failure as
+    # "master finished encoding").
+    rendered_states = (TaskStatus.AWAITING_REVIEW.value, TaskStatus.SCHEDULED.value,
+                       TaskStatus.PUBLISHING.value)
     finished = task.finished_at
 
     published_at = task.published_at or (buffer.consumed_at if buffer is not None else None)
@@ -123,7 +128,7 @@ def episode_timeline(db, task, campaign, buffer=None) -> list[Milestone]:
     rendered_at = task.rendered_at
     # A failed/cancelled task's `finished_at` is when it STOPPED (R32) — reading it as a render
     # finish showed a failed episode as "master finished encoding" at the moment it failed.
-    if rendered_at is None and finished is not None and not completed and not stopped:
+    if rendered_at is None and finished is not None and status in rendered_states:
         rendered_at = finished
     reviewed_at = task.reviewed_at
     if reviewed_at is None and buffer is not None and buffer.status != BufferStatus.awaiting_review:

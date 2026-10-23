@@ -506,3 +506,14 @@ def test_the_wizard_is_for_new_campaigns_only(session, user, channel):
     assert new.count("data-wz-basic") == 5                 # topic, channel, episodes, language, format
     for page in (dup, edit):                               # values already set → the full form
         assert 'id="wz-steps"' not in page and 'class="wz"' not in page
+
+
+def test_a_requeued_episode_does_not_show_its_old_failure_as_a_render(session, user, channel):
+    from core.timeline import episode_timeline
+    from database.types import TaskStatus
+
+    camp, tasks = _web(session, user, channel)
+    tasks[0].status = TaskStatus.PENDING_QUEUE        # what Retry does; finished_at is left over
+    session.commit()
+    stages = {m.key: m for m in episode_timeline(session, tasks[0], camp)}
+    assert stages["rendered"].at is None
