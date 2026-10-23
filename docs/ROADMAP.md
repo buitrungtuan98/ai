@@ -2131,6 +2131,23 @@ Published uploads ARE deleted from the buffer — but four other stores grew wit
   age); deploy prunes unused images older than 3 days; RUNBOOK lists every store and its limit.
 - Verified: 814 tests pass (2 new), ruff clean, docs guard green.
 
+## R35 — deploys and CI recover on their own `DONE`
+
+The operator asked for a factory that recovers without them. Two gaps were left on the delivery path:
+
+- **A bad build stayed live.** `deploy.sh` health-checked web only, and on failure it printed a
+  manual rollback command and left the broken build running. A worker that crashed at import (web
+  still healthy) passed the gate, and nothing rendered until a human noticed.
+- **A hung CI runner blocked a merge.** One `pytest` run sat 25 minutes in `apt-get` with no
+  timeout (GitHub's default job limit is 6 hours).
+- Fix: the gate waits for web AND worker; if either stays unhealthy the stack goes back to the
+  last tag that passed (`.deploy/last-good-tag`, else the tag the running web was started from) and
+  the run still exits 1 so the failure is visible (ADR-100). A stack that was already down before
+  the deploy rolls forward instead, so a broken box never refuses a fix. CI: 40-minute job cap, the apt step is
+  time-boxed per attempt and retried 3×.
+- Verified: 7 new tests drive `deploy.sh` against a fake `docker` (healthy deploy, worker/web
+  failure → rollback, no state file, already-down stack, no target, failed rollback).
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download
