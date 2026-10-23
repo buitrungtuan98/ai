@@ -185,6 +185,22 @@ def _synthesize_raw(text: str, out_path: str, voice: str, rate_pct: int, pitch: 
     raise last if last is not None else RuntimeError("TTS failed with no error")
 
 
+def _is_no_audio(exc: Exception) -> bool:
+    """edge-tts' NoAudioReceived, recognised by name so the SDK stays a lazy import."""
+    return type(exc).__name__ == "NoAudioReceived"
+
+
+class NoAudioError(RuntimeError):
+    """No audio for a line, even after merging it with its neighbours — with the evidence (R31).
+    The bare edge-tts error named nothing, so a failed render could not say WHICH line, voice or
+    prosody Microsoft refused. The name keeps `core.failure`'s NoAudioReceived class matching."""
+
+
+def _no_audio_error(text: str, voice: str, rate_pct: int, pitch: str) -> NoAudioError:
+    return NoAudioError(f"NoAudioReceived: no audio for voice {voice} (rate {_rate_str(rate_pct)}, "
+                        f"pitch {pitch}) on the line {text[:120]!r}")
+
+
 def apply_soft_voice(path: str) -> None:
     """Rewrite `path` through SOFT_VOICE_FILTER in place (tmp + replace, so a failed pass can never
     leave a half-written narration where the render expects a finished one)."""
@@ -211,7 +227,12 @@ def synthesize(
     `delivery="soft"` is the intimate, confiding read used by quote videos (ADR-071)."""
     resolved = resolve_voice(language, voice)
     rate, pitch = _delivery_params(delivery, resolved, rate_pct)
-    timings = _synthesize_raw(text, out_path, resolved, rate, pitch)
+    try:
+        timings = _synthesize_raw(text, out_path, resolved, rate, pitch)
+    except Exception as exc:
+        if _is_no_audio(exc):
+            raise _no_audio_error(text, resolved, rate, pitch) from exc
+        raise
     if delivery == "soft":
         apply_soft_voice(out_path)
     return timings
@@ -318,11 +339,34 @@ def synthesize_paced(
     parts: list[str] = []
     per_timings: list[list[WordTiming]] = []
     durations: list[float] = []
-    for i, sentence in enumerate(sentences):
+    i = 0
+    while i < len(sentences):
         part = f"{out_path}.p{i}.mp3"
-        per_timings.append(_synthesize_raw(sentence, part, resolved, rate, pitch))
+        try:
+            per_timings.append(_synthesize_raw(sentences[i], part, resolved, rate, pitch))
+        except Exception as exc:
+            if not _is_no_audio(exc):
+                raise
+            # A line the voice cannot say on its own (R31) — a sentence wholly in another script,
+            # say Jung's Greek "ἐναντιοδρομία" read by an English voice — gets no audio at all
+            # and used to fail the whole render. Said together with a neighbour, the speakable
+            # words carry it; each merge removes a sentence, so this always ends.
+            if len(sentences) == 1:
+                raise _no_audio_error(sentences[0], resolved, rate, pitch) from exc
+            logger.warning("TTS: no audio for %r — merging it with a neighbouring sentence",
+                           sentences[i][:80])
+            if i + 1 < len(sentences):
+                sentences[i:i + 2] = [f"{sentences[i]} {sentences[i + 1]}"]
+            else:   # the last line: fold it into the one before, which is re-synthesized
+                i -= 1
+                per_timings.pop()
+                parts.pop()
+                durations.pop()
+                sentences[i:i + 2] = [f"{sentences[i]} {sentences[i + 1]}"]
+            continue
         parts.append(part)
         durations.append(media.probe_duration(part))
+        i += 1
 
     gaps = [pause_after(s) for s in sentences[:-1]]
     run_ffmpeg(build_paced_concat_args(parts, gaps, out_path))

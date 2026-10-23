@@ -330,3 +330,84 @@ def test_final_qc_names_the_real_cause_without_leaking_secrets(monkeypatch):
     assert len(calls) == 1                         # a refused key is not asked twice
     reason = qc._unavailable_reason(RuntimeError("boom at https://h.example/?key=AIzaSyX"))
     assert "boom" in reason and "AIza" not in reason and "https" not in reason
+
+
+# ── R31: a line the voice cannot say is carried by its neighbour, or named ────
+class NoAudioReceived(Exception):
+    """Stands in for edge_tts.exceptions.NoAudioReceived (matched by name)."""
+
+
+def _paced_env(monkeypatch, refuses):
+    from core import ffmpeg_runner, media, tts
+
+    said: list[str] = []
+
+    def raw(text, part, voice, rate, pitch):
+        said.append(text)
+        if refuses(text):
+            raise NoAudioReceived("No audio was received.")
+        return [tts.WordTiming(text.split()[0], 0.0, 0.5)]
+
+    monkeypatch.setattr(tts, "_synthesize_raw", raw)
+    monkeypatch.setattr(media, "probe_duration", lambda p: 1.0)
+    monkeypatch.setattr(ffmpeg_runner, "run_ffmpeg", lambda args: None)
+    return tts, said
+
+
+def test_an_unsayable_line_is_merged_with_the_next_one(monkeypatch):
+    tts, said = _paced_env(monkeypatch, lambda t: t == "ἐναντιοδρομία.")
+    timings = tts.synthesize_paced("Jung named it. ἐναντιοδρομία. Opposites turn.", "o.mp3")
+    assert said == ["Jung named it.", "ἐναντιοδρομία.", "ἐναντιοδρομία. Opposites turn."]
+    assert len(timings) == 2                       # two requests made it: the render survives
+
+
+def test_an_unsayable_last_line_folds_into_the_one_before(monkeypatch):
+    tts, said = _paced_env(monkeypatch, lambda t: t == "ἐναντιοδρομία.")
+    timings = tts.synthesize_paced("Jung named it. ἐναντιοδρομία.", "o.mp3")
+    assert said == ["Jung named it.", "ἐναντιοδρομία.", "Jung named it. ἐναντιοδρομία."]
+    assert len(timings) == 1
+
+
+def test_when_nothing_is_sayable_the_error_names_the_line_and_voice(monkeypatch):
+    import pytest
+
+    from core import failure
+
+    tts, _ = _paced_env(monkeypatch, lambda t: True)
+    with pytest.raises(tts.NoAudioError) as e:
+        tts.synthesize_paced("Uno. Dos.", "o.mp3", language="en", voice="en-US-AriaNeural")
+    msg = f"{type(e.value).__name__}: {e.value}"
+    assert "'Uno. Dos.'" in msg and "en-US-AriaNeural" in msg and "rate +0%" in msg
+    assert failure.diagnose(msg)["cause"] == "The voice service returned no audio for a line"
+
+
+# ── R31: a stock clip with a reserved colour space is retagged, not fatal ────
+def test_retag_args_are_a_stream_copy_with_bt709_tags():
+    from core import video_factory as v
+
+    args = v.build_retag_args("in.mp4", "out.mp4", "h264")
+    assert args[args.index("-c") + 1] == "copy"
+    assert "matrix_coefficients=1" in args[args.index("-bsf:v") + 1]
+    assert v.build_retag_args("in.webm", "out.webm", "vp9") is None   # no filter → used as-is
+
+
+def test_a_reserved_colour_space_clip_comes_out_bt709(tmp_path):
+    import shutil
+    import subprocess
+
+    import pytest
+
+    from core import video_factory as v
+
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not installed")
+    good, bad = str(tmp_path / "g.mp4"), str(tmp_path / "b.mp4")
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=s=160x90:d=1",
+                    "-c:v", "libx264", "-y", good], check=True)
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-i", good, "-c", "copy", "-bsf:v",
+                    "h264_metadata=matrix_coefficients=3", "-y", bad], check=True)   # 3 = reserved
+    (fixed,) = v.retag_clips_bt709([bad])
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                          "stream=color_space", "-of", "csv=p=0", fixed],
+                         capture_output=True, text=True, check=True).stdout.strip()
+    assert out == "bt709"

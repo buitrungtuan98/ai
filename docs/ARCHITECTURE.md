@@ -2649,3 +2649,24 @@ rather than merely skipping, a `failed` campaign occupies an auto-create slot, a
 design, and the vision QC leg is bounded (2 tries; no frames-only retry after a timeout; blocks
 raise instead of being repaired).
 
+### ADR-097 — Self-heal an unsayable line and a mistagged clip; name what failed
+
+**Context.** With ADR-095's split fix deployed, renders still failed with edge-tts
+`NoAudioReceived` — so the refused line had words, just none the voice could say alone (a sentence
+wholly in another script). A second render failed in ffmpeg 7.1 with "Invalid color space" at the
+filter-graph input for one stock clip. Both killed a whole episode over one line or one clip, and
+the TTS error did not even say which line.
+
+**Decision.**
+1. A sentence that gets no audio is merged with its neighbour (the last one folds into the one
+   before) and synthesized again; each merge removes a sentence, so the loop ends. Only when the
+   whole narration is refused does it raise — `NoAudioError`, quoting the line, voice, rate and
+   pitch, still matched by `core.failure`'s NoAudioReceived class.
+2. A scene that fails with "Invalid color space" is retried once with its clips retagged to bt709
+   by stream copy (`h264_metadata` / `hevc_metadata`). The error is raised at the graph's input,
+   so no filter (`setparams`, `colorspace`) can reach it — only the bitstream can be fixed.
+
+**Rejected:** retagging every clip pre-emptively (a remux per clip on every render, for a rare
+fault); dropping the unsayable sentence (silent content loss); re-encoding the clip (the decode
+itself is what fails, and it costs minutes on this CPU-only box).
+

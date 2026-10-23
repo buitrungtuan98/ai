@@ -2055,6 +2055,21 @@ The operator asked: after full-auto stops a campaign, does it create a new one? 
     retryable again, fresh-script escape named in the fix copy.
 - Verified: 801 tests pass, ruff clean, docs guard green.
 
+## R31 — an unsayable line and an oddly tagged clip no longer fail a render `DONE`
+
+Two production failures after R29 went live — ADR-097.
+
+- **`NoAudioReceived` with the split fix live.** The failing line had real words — but words the
+  voice cannot say on their own (a sentence wholly in another script, e.g. Jung's Greek
+  "ἐναντιοδρομία" for an English voice). `synthesize_paced` now merges such a sentence with its
+  neighbour, so the speakable words carry it; if even that is refused, `NoAudioError` quotes the
+  line, voice, rate and pitch (the bare edge-tts error named nothing).
+- **`FFmpegError … Invalid color space`.** ffmpeg 7 rejects a stock clip whose stream declares a
+  reserved colour space at the filter-graph input. On that error the scene is retried once with
+  every clip retagged to bt709 by stream copy (`retag_clips_bt709`) — no re-encode, no cost on the
+  normal path. Verified with ffprobe: `reserved` → `bt709`.
+- Verified: 806 tests pass (5 new in `tests/test_r27_tts_refusal.py`), ruff clean, docs guard green.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download
