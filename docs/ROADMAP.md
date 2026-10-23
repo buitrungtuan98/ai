@@ -2159,6 +2159,8 @@ R31's retag retry was deployed. The retry still had a hole: a clip with no retag
   each clip can be ruled out once (bounded). Studio Mode's single clip still raises.
 - Already-failed episodes: the failure classifies as "ffmpeg could not build the video",
   which is transient, so the autopilot's retry re-renders them on the fixed build.
+- CI: the Azure apt mirror crawled (13 MB in 2.5 min) and the ffmpeg step hit its cap. The
+  .debs are now cached per runner image and installed offline (`--no-install-recommends`).
 - Verified: 5 new tests (index parse, retag-only, swap, nothing left, other errors untouched).
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
