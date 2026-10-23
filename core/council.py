@@ -174,6 +174,13 @@ def evidence_pack(db, channel) -> dict:
             "operations": operations,
             "operator_recently_dismissed": dismissed,
         })
+    # When the audience shows up and which styles land when (R38) — computed by the best-time
+    # engine's own code, so the council reasons over the same numbers that move the slots.
+    from core import best_time
+    from workers.scheduler import _best_time_samples
+
+    samples = _best_time_samples(db, channel)
+    grid = best_time.build_grid(samples)
     profile = channel.profile_json or {}
     recent = db.scalars(select(AutopilotAction).where(
         AutopilotAction.channel_id == channel.id).order_by(AutopilotAction.id.desc()).limit(5)).all()
@@ -183,6 +190,8 @@ def evidence_pack(db, channel) -> dict:
                     "measures_retention": autopilot.measurable(channel)},
         "monetization": monetize.channel_progress(db, channel),
         "campaigns": packs,
+        "audience_map": best_time.audience_summary(grid),
+        "style_by_daypart": best_time.style_table(samples, grid["median_24h"])[:40],
         "my_recent_decisions": [{"kind": a.kind, "summary": a.summary, "status": a.status}
                                 for a in recent],
     }
@@ -199,9 +208,13 @@ def pack_hash(pack: dict) -> str:
 
 # ── D3: the rails (deterministic, 0 AI) ──────────────────────────────────────
 def _numbers_exist_in_pack(decision: CouncilDecision, pack_json: str) -> str | None:
-    """The anti-hallucination rail: every number ≥ HALLUCINATION_MIN the model wrote in its reason
-    or evidence must literally exist in the pack. The model interprets data; it does not mint it."""
-    prose = decision.reason + " " + " ".join(decision.evidence)
+    return numbers_missing(decision.reason + " " + " ".join(decision.evidence), pack_json)
+
+
+def numbers_missing(prose: str, pack_json: str) -> str | None:
+    """The anti-hallucination rail: every number ≥ HALLUCINATION_MIN the model wrote must literally
+    exist in the pack. The model interprets data; it does not mint it. Shared by the council, the
+    analyst and the decision reviewer (R38)."""
     for num in re.findall(r"\d[\d,.]*", prose):
         cleaned = num.rstrip(".,").replace(",", "")
         if not cleaned.isdigit() or int(cleaned) < HALLUCINATION_MIN:
@@ -308,7 +321,10 @@ _SYSTEM = (
     "evidence. Each campaign's `operations` block is its production health (failures, buffer "
     "runway, absent QC judge) — weigh it before any growth move: a limping factory needs fixing, "
     "not more ambition. `operator_recently_dismissed` lists action kinds the operator explicitly "
-    "said NO to recently — do not re-propose those; work with the decision. Rules you cannot "
+    "said NO to recently — do not re-propose those; work with the decision. `audience_map` says "
+    "when this channel's audience shows up (score 1.0 = a normal video at 24h, n = videos behind "
+    "it) and `style_by_daypart` how each style choice scored overall and per time of day — use "
+    "them for tune and slot decisions, and treat small n as a hint, not a fact. Rules you cannot "
     "break: use ONLY numbers present in the pack; choose actions ONLY from the allowed list (use "
     "'hold' for campaigns needing none); every decision names its evidence; write reasons in the "
     "channel's language when one is set, otherwise English, in a plain, human voice — no jargon, "

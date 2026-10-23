@@ -354,6 +354,9 @@ def test_full_auto_applies_with_guardrails():
     db.add_all([ext, suc])
     db.commit()
 
+    # Rule decisions wait for their AI review (R38); with no key it is "unavailable" → they apply.
+    assert scheduler.autopilot_autoapply_channel(db, ch)["extend"] == 0
+    assert scheduler.autopilot_review_rules_channel(db, None, ch, "autopilot") == 2
     applied = scheduler.autopilot_autoapply_channel(db, ch)
     assert applied["extend"] == 1 and applied["successor"] == 1
     db.refresh(camp)
@@ -376,6 +379,7 @@ def test_full_auto_successor_respects_max_active_cap():
     db.add(suc)
     db.commit()
 
+    scheduler.autopilot_review_rules_channel(db, None, ch, "autopilot")
     assert scheduler.autopilot_autoapply_channel(db, ch)["successor"] == 0  # capped → not applied
     db.refresh(suc)
     assert suc.status == "proposed"  # left for the operator

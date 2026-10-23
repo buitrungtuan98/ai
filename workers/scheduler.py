@@ -1443,6 +1443,13 @@ def _design_successor(db, parent):
                "give it a genuinely fresh angle, not a rerun.")
     if playbook:
         context += " Proven lessons to carry forward: " + "; ".join(playbook[:5]) + "."
+    # The weekly analyst's topic ideas (R38) — grounded in this channel's own numbers.
+    from core.analyst import topic_ideas
+
+    ideas = topic_ideas(channel) if channel else []
+    if ideas:
+        context += (" Fresh directions this channel's analysis suggested (use one if it fits): "
+                    + "; ".join(f"{i['topic']} ({i['why']})" for i in ideas[:3]) + ".")
     try:
         return ai_engine.propose_campaign(
             topic=parent.topic_name, language=pcfg.get("language"),
@@ -1520,7 +1527,8 @@ def _best_time_samples(db, channel, *, campaign_id: int | None = None,
         if t.id not in keep or v is None or when is None or when < since:
             continue
         local = publish_local(t, c)
-        out.append(best_time.Sample(best_time.WEEKDAYS[local.weekday()], local.hour, int(v)))
+        out.append(best_time.Sample(best_time.WEEKDAYS[local.weekday()], local.hour, int(v),
+                                    (t.render_json or {}).get("style")))
     return out
 
 
@@ -1622,6 +1630,76 @@ def autopilot_council_channel(db, user, channel) -> dict:
     result = council.run_council(db, channel, api_key=gemini_key, model=model)
     log_council_report(db, channel, user, result)
     return result
+
+
+def autopilot_analyst_channel(db, user, channel, now: datetime | None = None) -> int:
+    """The weekly AI analyst (R38, ADR-102): one Gemini call per channel per week, behind the same
+    guards as the council (a key, the budget reserve). It decides nothing — the report is shown on
+    the Channels page, logged here, and its topic ideas feed the next successor design. Returns 1
+    when a report was written."""
+    from core import analyst
+    from core.usage import reserve_reached
+
+    key = ((user.gemini_api_key if user else None) or settings.GEMINI_API_KEY)
+    if not key or not analyst.due(channel, now) or reserve_reached(user):
+        return 0
+    state = analyst.run_analyst(db, channel, api_key=key,
+                                model=(user.gemini_model if user else None) or settings.GEMINI_MODEL,
+                                now=now)
+    if not state:
+        return 0
+    log_analyst_report(db, channel, user, state)
+    return 1
+
+
+def autopilot_review_rules_channel(db, user, channel, mode: str) -> int:
+    """AI review of rule-made decisions (R38, ADR-102), before autoapply. Full-auto: a veto
+    dismisses the action with the AI's reason; anything that prevents a review (no key, budget
+    reserve, outage) is recorded as 'unavailable' and the rule decision stands — fail open.
+    Copilot: the opinion rides on the proposal, and an unreviewable one simply waits for the next
+    pass. At most MAX_REVIEWS_PER_PASS calls. Returns reviews written."""
+    from core import decision_review
+    from core.usage import reserve_reached
+
+    pending = [a for a in db.scalars(select(AutopilotAction).where(
+        AutopilotAction.channel_id == channel.id, AutopilotAction.status == "proposed")
+        .order_by(AutopilotAction.id)).all() if decision_review.needs_review(a)]
+    if not pending:
+        return 0
+    key = ((user.gemini_api_key if user else None) or settings.GEMINI_API_KEY)
+    blocked = ("no Gemini key" if not key
+               else ("today's AI budget is reserved for rendering" if reserve_reached(user) else None))
+    model = (user.gemini_model if user else None) or settings.GEMINI_MODEL
+    written = 0
+    for a in pending[:decision_review.MAX_REVIEWS_PER_PASS]:
+        if blocked:
+            result = decision_review.unavailable(blocked)
+        else:
+            try:
+                result = decision_review.review(db, channel, a, api_key=key, model=model)
+            except Exception:  # noqa: BLE001 — a review outage must never stall the rules
+                logger.warning("AI review failed for action %s", a.id, exc_info=True)
+                result = decision_review.unavailable("the AI could not be reached")
+        if result["verdict"] == "unavailable" and mode != "autopilot":
+            continue   # Copilot: nothing is applied without a human anyway — try again later
+        a.evidence = {**(a.evidence or {}), "ai_review": result}
+        if result["verdict"] == "veto" and mode == "autopilot":
+            a.status, a.resolved_at = "dismissed", datetime.utcnow()
+            _log_action(db, channel, "ai_review",
+                        f"AI review stopped “{a.summary[:120]}” — {result['reason']}"[:300],
+                        campaign_id=a.campaign_id, evidence={"action": a.id, "kind": a.kind})
+        db.commit()
+        written += 1
+    return written
+
+
+def log_analyst_report(db, channel, user, state: dict) -> None:
+    """Shared by the weekly pass and the "Analyse now" button."""
+    _log_action(db, channel, "analyst", ("📊 " + state["headline"])[:300],
+                evidence={"insights": len(state["insights"]), "ideas": len(state["topic_ideas"]),
+                          "dropped": state["dropped"]})
+    if user is not None:
+        video_worker._notify(user, f"📊 {channel.channel_name} — {state['headline'][:300]}")
 
 
 def log_council_report(db, channel, user, result: dict) -> None:
@@ -1754,6 +1832,8 @@ def autopilot_autoapply_channel(db, channel) -> dict:
     week, and the replaced values are kept on the action). Never deletes anything."""
     from core import autopilot
 
+    from core import decision_review
+
     fs = autopilot.factory_settings(channel)
     max_active = fs["max_active"]
     applied = {"extend": 0, "wind_down": 0, "successor": 0}
@@ -1761,6 +1841,8 @@ def autopilot_autoapply_channel(db, channel) -> dict:
     for a in db.scalars(select(AutopilotAction).where(
             AutopilotAction.channel_id == channel.id, AutopilotAction.status == "proposed")
             .order_by(AutopilotAction.id)).all():
+        if decision_review.needs_review(a):
+            continue   # its AI review (R38) has not run yet — the next pass applies it
         if a.kind == "successor":
             active_n = db.scalar(select(func.count()).select_from(Campaign).where(
                 Campaign.channel_id == channel.id, Campaign.status == CampaignStatus.active)) or 0
@@ -2065,9 +2147,13 @@ def autopilot_pass(db=None, now: datetime | None = None, respect_cadence: bool =
                 db, db.get(User, ch.user_id), ch), 0, failures)
             proposed += _ap_step(db, ch, "best_time",
                                  lambda: autopilot_best_time_channel(db, ch, now=now), 0, failures)
+            _ap_step(db, ch, "analyst", lambda: autopilot_analyst_channel(
+                db, db.get(User, ch.user_id), ch, now=now), 0, failures)
             council_r = _ap_step(db, ch, "council", lambda: autopilot_council_channel(
                 db, db.get(User, ch.user_id), ch), {"filed": 0}, failures)
             proposed += council_r.get("filed", 0)
+            _ap_step(db, ch, "ai_review", lambda: autopilot_review_rules_channel(
+                db, db.get(User, ch.user_id), ch, mode), 0, failures)
             autoapplied = _ap_step(db, ch, "autoapply", lambda: autopilot_autoapply_channel(db, ch),
                                    {}, failures) if mode == "autopilot" else {}
             if mode == "autopilot":   # the factory switches (R28) — each a no-op until turned on

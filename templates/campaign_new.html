@@ -57,7 +57,7 @@
         <p class="err" id="ai-error" style="display:none" role="status" aria-live="polite"></p>
       </div>
       <div class="form-row" data-wz-basic><label>Topic name</label>
-        <input name="topic_name" required placeholder="Amazing space facts" value="{{ campaign.topic_name if editing else (source.topic_name if dup else '') }}"></div>
+        <input name="topic_name" required placeholder="Amazing space facts" value="{{ campaign.topic_name if editing else (source.topic_name if dup else (prefill_topic or '')) }}"></div>
       <div class="form-row" data-wz-basic><label>Target channel</label>
         {% set sel_channel = sel_channel if sel_channel is defined else None %}
         <select name="channel_id" required>

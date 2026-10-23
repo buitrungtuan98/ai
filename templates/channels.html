@@ -43,6 +43,16 @@
   {% if flash_reason %}<b>Why:</b> {{ flash_reason }}{% else %}Check the <b>Page ID</b> and that the
   token is a <b>permanent Page Access Token</b> for that same Page.{% endif %}
   <a href="#fb-form">Try again below</a>.{% endcall %}
+{% elif flash == 'analyst_done' %}
+{% call ui.banner('success') %}✓ <b>Analysis written.</b> Open “📊 AI analyst” on the channel to read it.{% endcall %}
+{% elif flash == 'analyst_no_key' %}
+{% call ui.banner('warning') %}The AI analyst needs a Gemini API key — add one under Setup → Credentials.{% endcall %}
+{% elif flash == 'analyst_budget' %}
+{% call ui.banner('warning') %}Today's AI budget is reserved for rendering — the analysis runs on its weekly pass instead.{% endcall %}
+{% elif flash == 'analyst_failed' %}
+{% call ui.banner('warning') %}The AI analyst could not be reached just now. Nothing changed — try again later.{% endcall %}
+{% elif flash == 'analyst_no_data' %}
+{% call ui.banner('info') %}Nothing to analyse yet — the analyst needs a running campaign or measured videos.{% endcall %}
 {% elif flash == 'no_google_client' %}
 {# The operator did nothing wrong — the box itself has no Google OAuth client configured yet. Google
    would have answered this click with a bare "Error 400: invalid_request" (ADR-068). #}
@@ -140,6 +150,29 @@
       </div>
     </details>
     {% endif %}
+    {# ── AI analyst (R38): the weekly plain-language read; it decides nothing ── #}
+    {% set an = (ap.get(c.id) or {}).get('analyst') %}
+    <details class="disclosure mt-sm">
+      <summary><span class="sum"><span class="sum-l">📊 AI analyst</span><span class="sum-v">
+        {% if an %}{{ an.at[:10] }}{% else %}weekly — not yet{% endif %}</span></span></summary>
+      <div class="disclosure-body">
+        {% if an %}
+        <p><b>{{ an.headline }}</b></p>
+        {% for i in an.insights %}
+        <p class="mt-sm" style="margin-bottom:2px"><b>{{ i.title }}</b> — {{ i.detail }}</p>
+        <ul class="crit-list meta">{% for e in i.evidence %}<li>{{ e }}</li>{% endfor %}</ul>
+        {% endfor %}
+        {% if an.recommendations %}<p class="mt-sm"><b>Try next</b></p>
+        <ul class="crit-list">{% for r in an.recommendations %}<li>{{ r }}</li>{% endfor %}</ul>{% endif %}
+        {% if an.topic_ideas %}<p class="mt-sm"><b>Topic ideas</b> <span class="meta">— auto-create uses these when it designs the next campaign</span></p>
+        <ul class="crit-list">{% for t in an.topic_ideas %}<li><a href="/campaigns/new?channel={{ c.id }}&amp;topic={{ t.topic|urlencode }}">{{ t.topic }}</a> <span class="meta">— {{ t.why }}</span></li>{% endfor %}</ul>{% endif %}
+        <p class="hint mt-sm">Written by AI from measured numbers only{% if an.dropped %} — {{ an.dropped }} point{{ 's' if an.dropped != 1 }} dropped for citing a number that is not in the data{% endif %}. It suggests; it does not change anything.</p>
+        {% else %}
+        <p class="hint">Once a week the AI reads this channel's numbers — campaigns, flops, when the audience shows up, which styles work at which time — and writes what happened, why, what to try next, and fresh topic ideas.</p>
+        {% endif %}
+        <form method="post" action="/channels/{{ c.id }}/analyst-now" class="mt-sm"><button class="btn ghost sm" type="submit">📊 Analyse now</button></form>
+      </div>
+    </details>
     {# ── Best time to post (R37): weekday × time of day, 1.0× = a normal video at 24h ── #}
     {% set bt = best_time.get(c.id) %}
     {% if bt and bt.grid.n %}

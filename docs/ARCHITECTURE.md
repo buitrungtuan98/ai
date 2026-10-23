@@ -2755,3 +2755,25 @@ weekly cooldown and Copilot/Full-auto semantics cover both.
   edit).
 - Asking the AI to pick times (numbers it could invent; the council's rails exist for that reason).
 
+### ADR-102 — AI reasons on top of the rules; it never replaces the safety net
+
+**Context.** The operator asked to hand the fixed rules to the AI. Some rules are the factory's
+recovery path (retries, quota waits, stuck renders, deploy rollback), and they are needed most
+when Gemini is unavailable. Others make judgment calls from thresholds (wind down after N weak
+episodes, move a slot), where a reader of the evidence can add sense the thresholds lack.
+
+**Decision.** Three AI layers, all reading the same code-computed evidence pack and all passing
+the shared number rail (`numbers_missing`):
+1. **Analyst:** a weekly report that decides nothing. Its topic ideas steer the successor design.
+2. **Decision review:** an approve/veto on each rule-made extend, wind-down, successor and slot
+   move before Full-auto applies it. A veto counts as a dismissal; Copilot shows it as advice.
+   It fails open, so the rules stand whenever no trustworthy review exists.
+3. **Council evidence:** the audience map and style × daypart table join the council's pack.
+
+The AI can stop a rule decision, never invent one; recovery paths have no AI dependency.
+
+**Rejected:**
+- AI-driven retries and recovery (they would fail exactly when they are needed).
+- Fail-closed review (an outage would freeze every structural change).
+- Letting the analyst file actions (the council already does that, with its own rails).
+
