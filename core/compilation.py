@@ -68,6 +68,9 @@ def retain_master(campaign_id: int, episode_number: int, video_path: str | None)
         os.makedirs(d, exist_ok=True)
         dest = episode_master_path(campaign_id, episode_number)
         shutil.move(video_path, dest)
+        # A move keeps the RENDER time; the library's age clock is the publish time (R39), or a
+        # campaign rendered weeks ahead lost its library the day it completed.
+        os.utime(dest)
         entries = sorted((os.path.getmtime(os.path.join(d, f)), f)
                          for f in os.listdir(d) if f.endswith(".mp4"))
         for _mtime, name in entries[:-LIBRARY_CAP_PER_CAMPAIGN]:

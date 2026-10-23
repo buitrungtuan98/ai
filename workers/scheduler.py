@@ -369,10 +369,14 @@ def prune_media(db, now: datetime | None = None) -> dict:
             return []
 
     lib_cutoff = (now - timedelta(days=LIBRARY_KEEP_AFTER_DONE_DAYS)).timestamp()
+    # A compilation still queued or rendering reads its campaign's library (R39).
+    compiling = set(db.scalars(select(Task.campaign_id).where(
+        Task.video_kind == "compilation",
+        Task.status.notin_([TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]))).all())
     for e in subdirs("library"):
         c = campaigns.get(int(e.name))
         done = c is not None and c.status == CampaignStatus.completed \
-            and _newest_mtime(e.path) < lib_cutoff
+            and c.id not in compiling and _newest_mtime(e.path) < lib_cutoff
         if c is None or done:
             shutil.rmtree(e.path, ignore_errors=True)
             out["library"] += 1
@@ -468,6 +472,10 @@ def publish_due_campaign(db, campaign: Campaign, now: datetime | None = None,
         return None
     if _recently_published(db, campaign.id, settings.SLOT_TOLERANCE_MINUTES):
         return None
+    if (cfg.get("slot_changed_on") == now.date().isoformat()
+            and _published_today(db, campaign.id, now, cfg.get("timezone"))
+            >= len(slots_for_day(cfg, now))):
+        return None   # a slot moved today and today's quota already went out at the old time
     buf = db.scalar(
         select(BufferPoolItem)
         .where(BufferPoolItem.campaign_id == campaign.id,
@@ -1321,6 +1329,8 @@ def catch_up_due(db, campaign: Campaign, now: datetime | None = None):
         return None
     if is_within_slot(slots, now_l) or _recently_published(db, campaign.id, settings.SLOT_TOLERANCE_MINUTES):
         return None
+    if cfg.get("slot_changed_on") == now_l.date().isoformat():
+        return None   # slots moved today: a "missed" slot may just be one that did not exist (R39)
     now_min = now_l.hour * 60 + now_l.minute
     past_slots = 0
     for s in slots:
@@ -1607,6 +1617,28 @@ def autopilot_best_time_channel(db, channel, now: datetime | None = None) -> int
     return filed
 
 
+def _recent_ai_failure(channel, step: str) -> bool:
+    at = ((channel.autopilot_json or {}).get("ai_failed_at") or {}).get(step)
+    try:
+        return bool(at) and datetime.fromisoformat(at) > datetime.utcnow() - timedelta(
+            hours=AI_FAILURE_BACKOFF_H)
+    except ValueError:
+        return False
+
+
+def _note_ai_failure(db, channel, step: str) -> None:
+    """Remember when an optional AI step failed (R38) so the 10-minute partial-pass retry does not
+    re-ask a Gemini that is down or out of quota every time. Best-effort."""
+    try:
+        db.rollback()
+        cfg = dict(channel.autopilot_json or {})
+        cfg["ai_failed_at"] = {**(cfg.get("ai_failed_at") or {}), step: datetime.utcnow().isoformat()}
+        channel.autopilot_json = cfg
+        db.commit()
+    except Exception:  # noqa: BLE001
+        db.rollback()
+
+
 def autopilot_council_channel(db, user, channel) -> dict:
     """The daily judged pass (ADR-081) — Gemini reads the evidence pack and files proposals through
     the rails. Guarded like the strategist: a Gemini key, the 80% budget reserve (rendering is never
@@ -1626,8 +1658,14 @@ def autopilot_council_channel(db, user, channel) -> dict:
         return zeros    # already judged today
     if reserve_reached(user):
         return zeros    # strategy never outbids rendering for the daily AI budget
+    if _recent_ai_failure(channel, "council"):
+        return zeros    # failed within the hour — the partial-pass retry must not re-ask every 10 min
     model = (user.gemini_model if user else None) or settings.GEMINI_MODEL
-    result = council.run_council(db, channel, api_key=gemini_key, model=model)
+    try:
+        result = council.run_council(db, channel, api_key=gemini_key, model=model)
+    except Exception:
+        _note_ai_failure(db, channel, "council")
+        raise
     log_council_report(db, channel, user, result)
     return result
 
@@ -1643,16 +1681,23 @@ def autopilot_analyst_channel(db, user, channel, now: datetime | None = None) ->
     key = ((user.gemini_api_key if user else None) or settings.GEMINI_API_KEY)
     if not key or not analyst.due(channel, now) or reserve_reached(user):
         return 0
-    state = analyst.run_analyst(db, channel, api_key=key,
-                                model=(user.gemini_model if user else None) or settings.GEMINI_MODEL,
-                                now=now)
+    if _recent_ai_failure(channel, "analyst"):
+        return 0
+    try:
+        state = analyst.run_analyst(
+            db, channel, api_key=key, now=now,
+            model=(user.gemini_model if user else None) or settings.GEMINI_MODEL)
+    except Exception:
+        _note_ai_failure(db, channel, "analyst")
+        raise
     if not state:
         return 0
     log_analyst_report(db, channel, user, state)
     return 1
 
 
-def autopilot_review_rules_channel(db, user, channel, mode: str) -> int:
+def autopilot_review_rules_channel(db, user, channel, mode: str,
+                                   deadline: float | None = None) -> int:
     """AI review of rule-made decisions (R38, ADR-102), before autoapply. Full-auto: a veto
     dismisses the action with the AI's reason; anything that prevents a review (no key, budget
     reserve, outage) is recorded as 'unavailable' and the rule decision stands — fail open.
@@ -1668,10 +1713,14 @@ def autopilot_review_rules_channel(db, user, channel, mode: str) -> int:
         return 0
     key = ((user.gemini_api_key if user else None) or settings.GEMINI_API_KEY)
     blocked = ("no Gemini key" if not key
-               else ("today's AI budget is reserved for rendering" if reserve_reached(user) else None))
+               else ("today's AI budget is reserved for rendering" if reserve_reached(user)
+                     else ("the AI review failed within the hour" if _recent_ai_failure(
+                         channel, "ai_review") else None)))
     model = (user.gemini_model if user else None) or settings.GEMINI_MODEL
     written = 0
     for a in pending[:decision_review.MAX_REVIEWS_PER_PASS]:
+        if deadline is not None and time.monotonic() >= deadline and not blocked:
+            break   # this pass's AI time is spent — the rest wait (autoapply's REVIEW_WAIT_H caps it)
         if blocked:
             result = decision_review.unavailable(blocked)
         else:
@@ -1679,7 +1728,9 @@ def autopilot_review_rules_channel(db, user, channel, mode: str) -> int:
                 result = decision_review.review(db, channel, a, api_key=key, model=model)
             except Exception:  # noqa: BLE001 — a review outage must never stall the rules
                 logger.warning("AI review failed for action %s", a.id, exc_info=True)
+                _note_ai_failure(db, channel, "ai_review")   # Copilot would re-ask every pass
                 result = decision_review.unavailable("the AI could not be reached")
+                blocked = "the AI review failed within the hour"
         if result["verdict"] == "unavailable" and mode != "autopilot":
             continue   # Copilot: nothing is applied without a human anyway — try again later
         a.evidence = {**(a.evidence or {}), "ai_review": result}
@@ -1800,12 +1851,23 @@ def apply_autopilot_action(db, action, *, auto_start_successor: bool = False,
             slots[slots.index(frm)] = to
             if day == "all":
                 cfg["posting_slots"] = slots
+                # Weekday overrides are copies of the daily list (R39): a daily move must move
+                # them too, or a Monday keeps posting at the slot just judged weak.
+                by_day = {}
+                for d, ds in (cfg.get("slots_by_day") or {}).items():
+                    ds = [to if x == frm and to not in ds else x for x in ds]
+                    if sorted(ds) != sorted(slots):
+                        by_day[d] = ds
+                cfg["slots_by_day"] = by_day
             elif sorted(slots) == sorted(cfg.get("posting_slots") or []):
                 by_day.pop(day, None)            # back to the daily slots — no override needed
                 cfg["slots_by_day"] = by_day
             else:
                 by_day[day] = slots
                 cfg["slots_by_day"] = by_day
+            # The day a slot moved, the old slot may already have posted (R39): the publish and
+            # catch-up paths read this so that day neither posts twice nor posts off-schedule.
+            cfg["slot_changed_on"] = local_now(cfg.get("timezone")).date().isoformat()
             campaign.config_json = cfg
             db.commit()
         else:
@@ -1824,7 +1886,7 @@ def apply_autopilot_action(db, action, *, auto_start_successor: bool = False,
         return False
 
 
-def autopilot_autoapply_channel(db, channel) -> dict:
+def autopilot_autoapply_channel(db, channel, allow_ai: bool = True) -> dict:
     """Full-auto only: apply the proposals just filed, with guardrails. Structural, reversible
     actions (extend / wind-down / successor) auto-apply; a successor respects the `max_active` cap
     (default 2) and at most one is created per pass; creative 'tune' proposals are left for the
@@ -1842,8 +1904,15 @@ def autopilot_autoapply_channel(db, channel) -> dict:
             AutopilotAction.channel_id == channel.id, AutopilotAction.status == "proposed")
             .order_by(AutopilotAction.id)).all():
         if decision_review.needs_review(a):
-            continue   # its AI review (R38) has not run yet — the next pass applies it
+            if not decision_review.waited_too_long(a):
+                continue   # its AI review (R38) has not run yet — the next pass applies it
+            # Fail open on time too: a review that never arrives must not freeze the rules.
+            a.evidence = {**(a.evidence or {}), "ai_review": decision_review.unavailable(
+                f"no review within {decision_review.REVIEW_WAIT_H}h")}
+            db.commit()
         if a.kind == "successor":
+            if not allow_ai:
+                continue   # its AI design would overrun this pass's AI budget — next pass (R39)
             active_n = db.scalar(select(func.count()).select_from(Campaign).where(
                 Campaign.channel_id == channel.id, Campaign.status == CampaignStatus.active)) or 0
             if active_n >= max_active or successors >= 1:
@@ -2058,6 +2127,8 @@ def autopilot_strategist_channel(db, user, channel, respect_cadence: bool = True
     return 1
 
 
+AI_PASS_BUDGET_S = 300   # optional AI steps stop starting new calls after this long in one pass
+AI_FAILURE_BACKOFF_H = 1  # a failed analyst/council call is not retried for this long
 FAILED_PASS_RETRY_SECONDS = 600  # a partly-failed pass may try again in 10 min, not in `interval`
 
 
@@ -2107,6 +2178,7 @@ def autopilot_pass(db=None, now: datetime | None = None, respect_cadence: bool =
 
     own = db is None
     db = db or SessionLocal()
+    ai_deadline = time.monotonic() + AI_PASS_BUDGET_S
     summary: dict = {"channels": 0, "approved": 0, "rejected": 0, "recommended": 0,
                      "escalated": 0, "retried": 0, "caught_up": 0, "proposed": 0, "auto_applied": 0,
                      "partial": 0}
@@ -2140,28 +2212,39 @@ def autopilot_pass(db=None, now: datetime | None = None, respect_cadence: bool =
             caught = _ap_step(db, ch, "catchup",
                               lambda: autopilot_catchup_channel(db, ch, now=now), 0, failures)
             retried = _ap_step(db, ch, "retry", lambda: autopilot_retry_channel(db, ch), 0, failures)
-            # Optional strategy work — may call AI, may be rate-limited, may simply be down.
+            # Optional strategy work — may call AI, may be rate-limited, may simply be down. The AI
+            # steps share one time budget per pass (R38): this pass runs inside the scheduler tick
+            # that publishes on time, and a slow Gemini must not hold that tick for half an hour.
+            def ai_ok() -> bool:
+                return time.monotonic() < ai_deadline
+
             proposed = _ap_step(db, ch, "propose",
                                 lambda: autopilot_propose_channel(db, ch, now=now), 0, failures)
-            proposed += _ap_step(db, ch, "strategist", lambda: autopilot_strategist_channel(
-                db, db.get(User, ch.user_id), ch), 0, failures)
+            if ai_ok():
+                proposed += _ap_step(db, ch, "strategist", lambda: autopilot_strategist_channel(
+                    db, db.get(User, ch.user_id), ch), 0, failures)
             proposed += _ap_step(db, ch, "best_time",
                                  lambda: autopilot_best_time_channel(db, ch, now=now), 0, failures)
-            _ap_step(db, ch, "analyst", lambda: autopilot_analyst_channel(
-                db, db.get(User, ch.user_id), ch, now=now), 0, failures)
-            council_r = _ap_step(db, ch, "council", lambda: autopilot_council_channel(
-                db, db.get(User, ch.user_id), ch), {"filed": 0}, failures)
-            proposed += council_r.get("filed", 0)
+            if ai_ok():
+                _ap_step(db, ch, "analyst", lambda: autopilot_analyst_channel(
+                    db, db.get(User, ch.user_id), ch, now=now), 0, failures)
+            if ai_ok():
+                council_r = _ap_step(db, ch, "council", lambda: autopilot_council_channel(
+                    db, db.get(User, ch.user_id), ch), {"filed": 0}, failures)
+                proposed += council_r.get("filed", 0)
             _ap_step(db, ch, "ai_review", lambda: autopilot_review_rules_channel(
-                db, db.get(User, ch.user_id), ch, mode), 0, failures)
-            autoapplied = _ap_step(db, ch, "autoapply", lambda: autopilot_autoapply_channel(db, ch),
+                db, db.get(User, ch.user_id), ch, mode, deadline=ai_deadline), 0, failures)
+            autoapplied = _ap_step(db, ch, "autoapply", lambda: autopilot_autoapply_channel(
+                                       db, ch, allow_ai=ai_ok()),
                                    {}, failures) if mode == "autopilot" else {}
             if mode == "autopilot":   # the factory switches (R28) — each a no-op until turned on
                 autoapplied = dict(autoapplied)
                 autoapplied["resumed"] = _ap_step(
                     db, ch, "resume", lambda: autopilot_resume_channel(db, ch), 0, failures)
+                # Refill designs the new campaign with AI — inside the pass's AI budget, or next pass.
                 autoapplied["created"] = _ap_step(
-                    db, ch, "refill", lambda: autopilot_refill_channel(db, ch), 0, failures)
+                    db, ch, "refill", lambda: autopilot_refill_channel(db, ch), 0,
+                    failures) if ai_ok() else 0
             if failures:
                 summary["partial"] += 1
                 if respect_cadence:
@@ -2359,11 +2442,15 @@ def run_scheduler_thread(interval: int | None = None) -> threading.Thread:
     def _loop() -> None:
         logger.info("Scheduler thread started (interval=%ss)", interval)
         while True:
+            started = time.monotonic()
             try:
                 periodic_tick()
             except Exception:  # noqa: BLE001 — a tick failure must not kill the loop
                 logger.exception("periodic_tick failed")
-            time.sleep(interval)
+            # Start to start, not end to start (R39): slot publishing only happens in this tick,
+            # and its ±SLOT_TOLERANCE window is ~1h wide. Sleeping a full interval AFTER a long
+            # tick (AI calls) stretched the gap past the window and could skip a slot entirely.
+            time.sleep(max(0.0, interval - (time.monotonic() - started)))
 
     thread = threading.Thread(target=_loop, name="scheduler", daemon=True)
     thread.start()

@@ -136,7 +136,7 @@ def run_analyst(db, channel, *, api_key: str, model: str, now: datetime | None =
     report = generate_structured(
         prompt="EVIDENCE PACK:\n" + pack_json + "\n\nWrite this week's analysis.",
         schema=AnalystReport, api_key=api_key, system_prompt=_SYSTEM, model=model,
-        temperature=0.4)
+        temperature=0.4, max_retries=2)   # optional — bounded inside the pass's AI budget
     cleaned, dropped = _clean(report, pack_json)
     state = {**cleaned, "dropped": dropped, "at": now.isoformat()}
     cfg = dict(channel.autopilot_json or {})
