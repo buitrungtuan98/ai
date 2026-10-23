@@ -25,6 +25,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60             # a hung runner fails instead of holding the deploy queue (R35)
     permissions:
       contents: read
       packages: write               # push the image to GHCR under this repo
@@ -55,6 +56,8 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    # deploy.sh can wait through two worker stop-graces (300s) + health gates when it rolls back.
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: read                # the box pulls the private image with this run's token

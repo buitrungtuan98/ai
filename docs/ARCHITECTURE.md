@@ -2712,3 +2712,23 @@ for rollback). `prune_media` runs in the existing disk-hygiene step of the sched
 and it would let one store starve another; deleting the library at publish (it is the raw material
 of the compilation feature, ADR-082).
 
+### ADR-100 — A deploy that does not come up healthy rolls itself back
+
+**Context.** ADR-015's deploy health-gated web only and, on failure, printed a rollback command for a
+human. The worker is the factory: a build that breaks it at startup kept web green, passed the
+gate, and stopped every render until someone looked. The operator asked for automatic recovery.
+
+**Decision.** `deploy.sh` waits for both web and worker to report `healthy` (the worker's check
+already means "registered with Redis and no wedged render"). It remembers the last tag that passed
+in `.deploy/last-good-tag` on the box (on the first run, the tag the running web was started
+from). If the new tag fails the gate, it re-runs `compose up` on that tag, waits again, and exits 1
+either way. CI stays red, so a broken build is never silent, while the box keeps serving the old one.
+`latest` is never a rollback target: after the pull it names the build that just failed. If the
+stack was already unhealthy *before* the deploy, it does not roll back: the old build was not
+working either, and going back would block every fix from landing (roll forward, exit 1).
+Volumes are untouched; a rollback does not undo DB schema changes, which this project only makes
+additively (`create_all`), so an older build keeps running against a newer DB.
+
+**Rejected:** rolling back from the CI runner (it would need the previous sha from git history,
+and the box's state is the truth); blue/green containers (double the RAM on a 24 GB box running
+one render, and render concurrency must stay 1).

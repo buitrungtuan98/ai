@@ -9,6 +9,7 @@ on:
 jobs:
   pytest:
     runs-on: ubuntu-latest
+    timeout-minutes: 40              # a hung runner fails the run instead of blocking a merge for hours
     steps:
       - uses: actions/checkout@v4
 
@@ -16,9 +17,17 @@ jobs:
         with:
           python-version: "3.11"
 
-      # ffmpeg lets the render integration test run (it self-skips when absent).
+      # ffmpeg lets the render integration test run (it self-skips when absent). An apt mirror can
+      # hang (R35: one run sat 25 min here), so each attempt is time-boxed and retried.
       - name: Install ffmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        timeout-minutes: 15
+        run: |
+          for i in 1 2 3; do
+            timeout 240 sudo apt-get update -o Acquire::Retries=3 \
+              && timeout 300 sudo apt-get install -y -o Acquire::Retries=3 ffmpeg && exit 0
+            echo "apt attempt $i failed, retrying…"; sleep $((i * 10))
+          done
+          exit 1
 
       - name: Install dependencies
         run: |

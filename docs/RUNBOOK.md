@@ -353,14 +353,20 @@ cache.
 pull.)
 
 **Deploy:** merge the feature branch into `main` (or *Run workflow*). Watch the Actions tab; the run
-fails loudly if the build fails to push or the web container doesn't become healthy.
+fails loudly if the build fails to push or web or worker doesn't become healthy (and rolls back, below).
 
 **Changing the SSH port:** resolves as *manual-run input → repo Variable `SSH_PORT` → Secret
 `SSH_PORT` → 22*. Edit the `SSH_PORT` **Variable** (no commit) or pass a one-off `ssh_port` on
 *Run workflow*. The host key doesn't change with the port, so `SSH_KNOWN_HOSTS` stays valid
 (regenerate only if the box was rebuilt).
 
-**Rollback (instant — no rebuild):** on the box,
+**Automatic rollback (R35, ADR-100):** a deploy waits for **web and worker** to turn healthy. If
+either does not, it restarts the stack on the last tag that passed (stored on the box in
+`~/ai/.deploy/last-good-tag`) and the Actions run still fails. Read its log for `rolling back to` /
+`Rolled back`; `CRITICAL: the rollback … is unhealthy too` means both builds fail, so check `.env`,
+Redis and disk (`docker compose logs worker`).
+
+**Manual rollback (instant — no rebuild):** on the box,
 `cd ~/ai && AVF_IMAGE_TAG=<previous-good-sha> bash scripts/deploy.sh`. Find previous SHAs in the
 repo's GHCR package (Packages tab) or the commit history. (A manual run needs a one-time
 `docker login ghcr.io` with a PAT that has `read:packages`; the CD path logs in automatically.)
