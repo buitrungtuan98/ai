@@ -2226,7 +2226,17 @@ Review of R35–R38 for anything that could block the factory or misbehave:
 - **Failure backoff:** a failed analyst or council call is not re-asked on every 10-min
   partial-pass retry; each step backs off 1 h.
 - best_time: an empty weekday slot list can no longer raise.
-- Verified: 3 new tests (review timeout, budget, backoff); full suite passes.
+- **Independent review fixes:**
+  - The tick loop slept a full hour AFTER each tick, so a long tick stretched the gap past the
+    ~1h slot window and could skip a slot. It now sleeps only the rest of the hour.
+  - Successor and refill AI design now count against the pass budget, the analyst retries less,
+    and a failed AI review backs off 1h (Copilot re-asked every pass).
+  - On the day a slot moves, that day never posts more than its slot count and catch-up waits,
+    so a moved slot can't double-post a day or post off-schedule.
+  - A daily slot move now also updates weekday overrides.
+  - A retained master ages from publish, not render, and a library a queued compilation needs is
+    never pruned.
+- Verified: 11 new tests (review timeout, budget, backoff, and one per review finding); 869 pass.
 
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
