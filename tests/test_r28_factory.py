@@ -213,6 +213,7 @@ def test_a_wind_down_completes_the_campaign_and_auto_create_replaces_it(session,
                            params={"total_episodes": 7})
     session.add(stop)
     session.commit()
+    scheduler.autopilot_review_rules_channel(session, None, channel, "autopilot")   # R38, no key
     scheduler.autopilot_autoapply_channel(session, channel)
     assert scheduler.finish_stranded_campaign(session, flop) is True     # nothing left to publish
     session.refresh(flop)

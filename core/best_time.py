@@ -78,10 +78,12 @@ def label(daypart: str) -> str:
 
 @dataclass(frozen=True)
 class Sample:
-    """One measured video: when it went live (local weekday + hour) and its first-day views."""
+    """One measured video: when it went live (local weekday + hour), its first-day views, and the
+    style it was made with (`render_json.style`, R37 — None for videos older than that)."""
     weekday: str
     hour: int
     views_24h: int
+    style: dict | None = None
 
 
 def _median(vals: list[float]) -> float:
@@ -222,3 +224,45 @@ def judge_move(evidence: dict, params: dict, samples_since: list[Sample], days_s
     if len(rs) < JUDGE_MIN_N:
         return "keep" if days_since >= GIVE_UP_AFTER_DAYS else "wait"
     return "revert" if sum(rs) / len(rs) < evidence.get("from_score", 0) * REVERT_MARGIN else "keep"
+
+
+# ── Evidence for the AI layers (R38): compact, computed here, never by the model ─────────────
+STYLE_FACTORS = ("voice", "color_grade", "music_mood", "caption_theme", "rate_pct", "visual_style")
+MIN_STYLE_N = 2
+
+
+def audience_summary(grid: dict, top: int = 3) -> dict:
+    """The audience map in a few lines: daypart scores and the strongest/weakest weekday cells
+    with ≥ 2 videos — what a reader (or the council) needs, without 42 cells of noise."""
+    cells = [{"day": d, "daypart": dp, "score": c["score"], "n": c["n"]}
+             for d, row in grid["cells"].items() for dp, c in row.items() if c["n"] >= 2]
+    cells.sort(key=lambda c: c["score"], reverse=True)
+    return {"videos": grid["n"], "median_views_24h": grid["median_24h"],
+            "dayparts": {dp: v for dp, v in grid["dayparts"].items() if v["n"]},
+            "strongest": cells[:top], "weakest": cells[-top:][::-1] if len(cells) > top else []}
+
+
+def style_table(samples: list[Sample], median: float | None) -> list[dict]:
+    """How each style choice scored, per daypart and overall: [{factor, value, daypart, n, score}]
+    (score = shrunk ratio to the channel median, like the grid). Only rows with ≥ MIN_STYLE_N videos;
+    the overall row has daypart "all". This is the evidence "this style works better at night"
+    rests on — the AI may explain it, never compute it."""
+    if not median:
+        return []
+    acc: dict[tuple, list[float]] = {}
+    for s in samples:
+        if not s.style or s.views_24h is None:
+            continue
+        r = min(s.views_24h / median, SCORE_CAP)
+        for f in STYLE_FACTORS:
+            v = s.style.get(f)
+            if v in (None, ""):
+                continue
+            for dp in ("all", daypart_of(s.hour)):
+                acc.setdefault((f, str(v), dp), []).append(r)
+    rows = [{"factor": f, "value": v, "daypart": dp, "n": len(rs),
+             "score": round(_shrink(sum(rs), len(rs), 1.0), 3)}
+            for (f, v, dp), rs in acc.items() if len(rs) >= MIN_STYLE_N]
+    rows.sort(key=lambda r: (r["factor"], r["daypart"] != "all", -r["score"]))
+    return rows
+

@@ -818,6 +818,8 @@ def channels_page(request: Request, user: CurrentUser, db: DbDep, status: str = 
          "best_time": {c.id: _best_time_view(db, c) for c in channels},
          "characters": {c.id: _sanitize_characters(c.characters_json) for c in channels},
          "flash": flash if flash in ("profile", "autopilot", "character", "char_img_ok",
+                                     "analyst_done", "analyst_no_key", "analyst_budget",
+                                     "analyst_failed", "analyst_no_data",
                                      "char_img_fail", "no_google_client", "fb_added",
                                      "fb_added_unverified", "fb_rejected", "fb_token_ok",
                                      "fb_token_unverified", "fb_token_bad") else "",
@@ -985,6 +987,31 @@ def autopilot_page(request: Request, user: CurrentUser, db: DbDep, page: int = 1
          "flash": flash if flash in _COUNCIL_FLASHES else "",
          "page": page, "feed_pages": max(1, -(-total // _AUTOPILOT_FEED_PAGE)), "feed_total": total},
     )
+
+
+@app.post("/channels/{channel_id}/analyst-now")
+def run_analyst_now(user: CurrentUser, db: DbDep, channel=Depends(get_owned_channel)):
+    """Write this week's AI analysis NOW (R38) instead of waiting for the weekly pass. The budget
+    reserve still applies; an AI outage is a flash message, not a 500."""
+    from core import analyst
+    from core.usage import reserve_reached
+    from workers import scheduler
+
+    key = user.gemini_api_key or settings.GEMINI_API_KEY
+    if not key:
+        return RedirectResponse("/channels?flash=analyst_no_key", status_code=303)
+    if reserve_reached(user):
+        return RedirectResponse("/channels?flash=analyst_budget", status_code=303)
+    try:
+        state = analyst.run_analyst(db, channel, api_key=key,
+                                    model=user.gemini_model or settings.GEMINI_MODEL)
+    except Exception:  # noqa: BLE001
+        logger.warning("Analyse-now failed for channel %s", channel.id, exc_info=True)
+        return RedirectResponse("/channels?flash=analyst_failed", status_code=303)
+    if not state:
+        return RedirectResponse("/channels?flash=analyst_no_data", status_code=303)
+    scheduler.log_analyst_report(db, channel, user, state)
+    return RedirectResponse("/channels?flash=analyst_done", status_code=303)
 
 
 @app.post("/channels/{channel_id}/council-now")
@@ -1428,13 +1455,15 @@ def campaigns_page(request: Request, user: CurrentUser, db: DbDep, channel: int 
 
 @app.get("/campaigns/new", response_class=HTMLResponse)
 def campaign_new_form(request: Request, user: CurrentUser, db: DbDep,
-                      from_id: int | None = None, channel: int | None = None):
+                      from_id: int | None = None, channel: int | None = None, topic: str = ""):
     """New-campaign form. With ?from_id=<campaign>, prefills from an owned campaign (Duplicate —
     e.g. same horror persona in another language to another channel). With ?channel=<id> (carried
     from the scoped list), preselects that channel. A fresh form seeds its defaults from the user's
     Settings (new-campaign defaults) so the common choices are already right."""
     channels = db.scalars(select(Channel).where(Channel.user_id == user.id)).all()
-    ctx: dict = {"request": request, "user": user, "channels": channels, "nav": "campaigns"}
+    ctx: dict = {"request": request, "user": user, "channels": channels, "nav": "campaigns",
+                 # A topic idea from the AI analyst (R38) opens the wizard with it filled in.
+                 "prefill_topic": topic.strip()[:120]}
     sel_channel: int | None = None
     if from_id is not None:
         source = db.get(Campaign, from_id)

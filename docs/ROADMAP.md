@@ -2188,6 +2188,30 @@ style each video was made with (ADR-101).
 - Verified: 17 new tests. One caught a strong Monday dragging the whole week to mornings, which is
   why daily moves must win on most days.
 
+## R38 — more AI where it helps, rails where it matters `DONE`
+
+The operator asked whether the fixed rules could be handed to the AI. Recovery, retries and
+rollback stay rules: they must work exactly when the AI is down or out of quota. The AI now reasons
+on top of them (ADR-102):
+
+- **AI analyst (weekly per channel):** a headline, insights with their evidence, recommendations
+  and topic ideas, written from the council's evidence pack plus this week vs last week. A piece
+  citing a number the pack does not contain is dropped, and the count is shown. Channels →
+  📊 AI analyst, with "Analyse now". It decides nothing.
+- **AI review of rule decisions:** before Full-auto applies an extend, wind-down, successor or
+  best-time slot move, Gemini approves or vetoes it with a reason. A veto dismisses the action
+  (the 30-day "no"). It fails open: no key, the budget reserve, an outage, or a reason citing
+  invented numbers lets the rule stand, recorded on the action. In Copilot the opinion is shown on
+  the proposal.
+- **Style × time and audience map** join the council's pack, so its tune and slot decisions see
+  them.
+- **Topic ideas** feed the successor design (auto-create), and each one opens the new-campaign
+  wizard prefilled.
+- Cost: about 1 call per channel per week (analyst), plus 1 per rule decision (review, at most 3 a
+  pass), all behind the budget reserve.
+- Verified: 15 new tests with Gemini mocked (rails, veto/approve/outage/unreliable, ideas → design,
+  UI); two autoapply tests updated to run the review step first.
+
 ## Known deferrals (credential-gated — verified by the operator, see RUNBOOK)
 - Live Gemini script/metadata generation
 - Live Pexels footage download

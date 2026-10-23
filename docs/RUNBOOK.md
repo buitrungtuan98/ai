@@ -96,6 +96,14 @@ Every campaign improves automatically on two levels (see ADR-012):
    rewards, injected into every future script. Inspect/reset it on the campaign's
    **📊 Performance** page. YouTube channels connected before this feature need a one-click
    reconnect (adds the read-only `yt-analytics.readonly` scope).
+3. **AI analyst (weekly, R38):** Channels → **📊 AI analyst** shows what happened, why, what to
+   try next and fresh topic ideas (click one to start a campaign with it). **Analyse now** writes
+   one immediately. It changes nothing by itself; its topic ideas steer the next auto-created
+   campaign.
+4. **AI review of rule decisions (R38):** every extend / wind-down / successor / slot move made by
+   the rules gets an AI second opinion, shown as “🧐 AI review” on the Autopilot page. In
+   Full-auto a veto stops the action; if the AI is unavailable the rule decision goes ahead
+   (recorded as “not run”).
 Model upgrades: pick the new model on **Credentials → Gemini model chain** (no redeploy needed);
 `GEMINI_MODEL` in `.env` remains the server default for users who never chose one.
 
